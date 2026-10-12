@@ -3,6 +3,13 @@
 #include "RecoveryManager.h"
 
 #include <QDir>
+#include <QElapsedTimer>
+#include <QTimer>
+#include <cstdio>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <psapi.h>
+#endif
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
@@ -27,8 +34,29 @@ CanvasItem *findCanvas(QQuickItem *item)
 
 } // namespace
 
+namespace {
+
+// Working set and private memory of this process in MiB (Windows), or -1.
+void processMemory(double *workingSet, double *privateBytes)
+{
+    *workingSet = *privateBytes = -1;
+#ifdef Q_OS_WIN
+    PROCESS_MEMORY_COUNTERS_EX c{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&c), sizeof(c))) {
+        *workingSet = c.WorkingSetSize / 1048576.0;
+        *privateBytes = c.PrivateUsage / 1048576.0;
+    }
+#endif
+}
+
+} // namespace
+
 int main(int argc, char *argv[])
 {
+    // DRAWAPP_STARTUP_PROBE=1: print the time from main() to the first rendered frame and the
+    // process memory then (and again 2 s later, idle), then quit. For benchmarks.
+    QElapsedTimer startup;
+    startup.start();
     QGuiApplication app(argc, argv);
     QGuiApplication::setApplicationName(QStringLiteral("DrawApp"));
     QGuiApplication::setApplicationDisplayName(QStringLiteral("DrawApp (prototype)"));
@@ -46,6 +74,27 @@ int main(int argc, char *argv[])
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
                      [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("DrawApp", "Main");
+
+    if (qEnvironmentVariableIsSet("DRAWAPP_STARTUP_PROBE") && !engine.rootObjects().isEmpty()) {
+        if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first())) {
+            QObject::connect(window, &QQuickWindow::frameSwapped, &app, [&startup] {
+                static bool done = false;
+                if (done)
+                    return;
+                done = true;
+                double ws, priv;
+                processMemory(&ws, &priv);
+                std::printf("first frame %.1f ms; working set %.1f MiB, private %.1f MiB\n", startup.nsecsElapsed() / 1e6, ws, priv);
+                QTimer::singleShot(2000, [] {
+                    double ws2, priv2;
+                    processMemory(&ws2, &priv2);
+                    std::printf("idle after 2 s: working set %.1f MiB, private %.1f MiB\n", ws2, priv2);
+                    std::fflush(stdout);
+                    QCoreApplication::quit();
+                });
+            }, Qt::DirectConnection);
+        }
+    }
 
     CanvasItem *canvas = nullptr;
     if (!engine.rootObjects().isEmpty()) {

@@ -58,6 +58,9 @@ target_link_libraries(drawapp_ui PUBLIC drawcore Qt6::Quick Qt6::QuickControls2)
 
 qt_add_executable(drawapp src/app/main.cpp)
 target_link_libraries(drawapp PRIVATE drawapp_ui drawapp_uiplugin)
+if(WIN32)
+    target_link_libraries(drawapp PRIVATE psapi) # memory figures for DRAWAPP_STARTUP_PROBE
+endif()
 set_target_properties(drawapp PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE
