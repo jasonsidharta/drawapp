@@ -24,11 +24,27 @@ python tools\fetch_qt_windows.py          # once
 powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
 ```
 
-All tests must pass before handing off. `tst_canvas` opens real windows and saves screenshots
-(`build\windows-mingw-release\tests\tst_canvas_*.png`); look at them after rendering changes.
-Android: `tools\build-android.ps1` (build directory must not contain spaces).
+All tests must pass before handing off: `tst_core` and `tst_document` (headless) and `tst_canvas`
+(opens real windows and saves screenshots to `build\windows-mingw-release\tests\tst_canvas_*.png`;
+look at them after rendering changes). Android: `tools\build-android.ps1 [-Config Debug]` (build
+directory must not contain spaces).
+
+## Version control
+
+Local Git repository on branch `main`, no remote. Commit only when the project owner asks; never
+push. Never commit build outputs, APKs/AABs, keystores or other credentials (see `.gitignore`).
+
+## Undo and file invariants
+
+- Every artwork change goes through `CanvasItem::commitEdit` with a `TileSnapshot` captured
+  *before* the change. View state (zoom, pan) never enters history.
+- A stroke must become exactly one undo step however it ends (`endStroke`).
+- Changing the meaning of `.drawapp` bytes requires a new format version and keeping the reader
+  for older versions. Validate before allocating; never replace the open document on failure.
+- File writes go through `ProjectFile::writeFileSafely`.
 
 ## Conventions
 
-C++17, Qt types, `m_` members, one class per file pair. Comments only for non-obvious reasons.
-Brush/stroke parameters are captured at stroke start.
+C++17, Qt types, `m_` members, one class per file pair (namespaces like `ProjectFile` excepted).
+Comments only for non-obvious reasons. Brush/stroke parameters are captured at stroke start.
+User-facing errors are returned as strings from `CanvasItem` file methods and shown by QML.

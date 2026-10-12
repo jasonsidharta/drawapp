@@ -1,8 +1,10 @@
 #include "CanvasItem.h"
 
+#include "ProjectFile.h"
 #include "ViewRenderer.h"
 
 #include <QCursor>
+#include <QFileInfo>
 #include <QPainter>
 #include <QPointingDevice>
 #include <QQuickWindow>
@@ -34,14 +36,19 @@ bool isPenOrTouchDevice(const QPointingDevice *device)
     }
 }
 
-QString pointerName(PointerKind kind)
+// Local paths for file: URLs; other URLs (Android content://) are passed to QFile as strings.
+QString pathFromUrl(const QUrl &url)
 {
-    switch (kind) {
-    case PointerKind::Mouse: return QStringLiteral("Mouse");
-    case PointerKind::Pen: return QStringLiteral("Pen");
-    case PointerKind::Touch: return QStringLiteral("Touch");
-    }
-    return {};
+    return url.isLocalFile() ? url.toLocalFile() : url.toString();
+}
+
+// Adds the extension to a local path chosen without one. Content URIs are left alone.
+void ensureSuffix(QString &path, QUrl &url, const QString &suffix)
+{
+    if (!url.isLocalFile() || !QFileInfo(path).suffix().isEmpty())
+        return;
+    path += QLatin1Char('.') + suffix;
+    url = QUrl::fromLocalFile(path);
 }
 
 } // namespace
@@ -92,12 +99,133 @@ void CanvasItem::setTool(Tool tool)
     emit toolChanged();
 }
 
+QString CanvasItem::documentTitle() const
+{
+    if (m_filePath.isEmpty())
+        return QStringLiteral("Untitled");
+    const QString name = m_fileUrl.isLocalFile() ? QFileInfo(m_filePath).fileName() : m_fileUrl.fileName();
+    return name.isEmpty() ? QStringLiteral("Untitled") : name;
+}
+
 void CanvasItem::clearCanvas()
 {
     if (m_gesture == Gesture::Stroke)
         endStroke();
-    m_document.clear();
+    TileSnapshot before;
+    m_document.clear(&before);
+    commitEdit(std::move(before), QStringLiteral("Clear canvas"));
     update();
+}
+
+void CanvasItem::undo()
+{
+    // An edit in progress is committed first, so undo removes it as a whole.
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    if (!m_history.canUndo())
+        return;
+    updateDocumentRect(m_document.undo(m_history));
+    emit historyChanged();
+}
+
+void CanvasItem::redo()
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    if (!m_history.canRedo())
+        return;
+    updateDocumentRect(m_document.redo(m_history));
+    emit historyChanged();
+}
+
+void CanvasItem::commitEdit(TileSnapshot before, const QString &label)
+{
+    // Tiles touched but left identical (for example erasing transparent pixels) are not history.
+    before.dropUnchanged(m_document.image());
+    if (before.isEmpty())
+        return;
+    m_history.push(std::move(before), label);
+    emit historyChanged();
+}
+
+void CanvasItem::replaceDocument(const QImage &image)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    m_gesture = Gesture::None;
+    m_document = RasterDocument(image);
+    m_history.clear();
+    m_savedStateId = m_history.stateId();
+    m_view.fit(QSizeF(m_document.size()), size());
+    update();
+    emit documentChanged();
+    emit historyChanged();
+    emit viewChanged();
+}
+
+void CanvasItem::newDocument()
+{
+    replaceDocument(RasterDocument().image());
+    m_filePath.clear();
+    m_fileUrl = QUrl();
+    emit fileChanged();
+}
+
+QString CanvasItem::openFile(const QUrl &url)
+{
+    const QString path = pathFromUrl(url);
+    // Decoded into a separate image first: a failed open leaves the current artwork untouched.
+    ProjectFile::LoadResult result = ProjectFile::load(path);
+    if (!result.ok())
+        return result.error;
+    replaceDocument(result.image);
+    m_filePath = path;
+    m_fileUrl = url;
+    emit fileChanged();
+    return {};
+}
+
+QString CanvasItem::saveFile()
+{
+    if (m_filePath.isEmpty())
+        return QStringLiteral("Choose a file name first (Save As).");
+    return saveTo(m_filePath, m_fileUrl);
+}
+
+QString CanvasItem::saveFileAs(const QUrl &url)
+{
+    QString path = pathFromUrl(url);
+    QUrl target = url;
+    ensureSuffix(path, target, QString::fromLatin1(ProjectFile::Extension));
+    return saveTo(path, target);
+}
+
+QString CanvasItem::saveTo(const QString &path, const QUrl &url)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    const QString error = ProjectFile::save(m_document.image(), path);
+    if (!error.isEmpty())
+        return error;
+    m_savedStateId = m_history.stateId();
+    const bool fileChangedNow = path != m_filePath;
+    m_filePath = path;
+    m_fileUrl = url;
+    emit historyChanged();
+    if (fileChangedNow)
+        emit fileChanged();
+    return {};
+}
+
+QString CanvasItem::exportPng(const QUrl &url)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    QString path = pathFromUrl(url);
+    QUrl target = url;
+    ensureSuffix(path, target, QStringLiteral("png"));
+    // Export does not change the project file or the unsaved-changes state.
+    return ProjectFile::exportPng(m_document.image(), path);
 }
 
 void CanvasItem::zoomIn()
@@ -327,7 +455,7 @@ void CanvasItem::touchEvent(QTouchEvent *event)
         const qreal distance = std::hypot(a.x() - b.x(), a.y() - b.y());
         if (m_gesture != Gesture::Pinch) {
             // A second finger turns a one-finger stroke into a view gesture. Marks already
-            // made stay (there is no undo yet).
+            // made stay and become one undo step.
             if (m_gesture == Gesture::Stroke)
                 endStroke();
             m_gesture = Gesture::Pinch;
@@ -423,6 +551,13 @@ void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure)
 
 void CanvasItem::endStroke()
 {
+    // However a stroke ends (release, lost grab, a second finger, an undo or save mid-stroke),
+    // the marks it made become one undo step.
+    if (m_gesture == Gesture::Stroke) {
+        commitEdit(std::move(m_strokeBefore),
+                   m_strokeMode == BrushMode::Erase ? QStringLiteral("Eraser stroke") : QStringLiteral("Brush stroke"));
+        m_strokeBefore = TileSnapshot();
+    }
     m_spacer.reset();
     m_pendingDabs.clear();
     m_gesture = Gesture::None;
@@ -453,7 +588,7 @@ void CanvasItem::applyPendingDabs()
     if (m_pendingDabs.empty())
         return;
     m_statsDabs += qint64(m_pendingDabs.size());
-    updateDocumentRect(m_document.stampDabs(m_pendingDabs, m_strokeColor, m_strokeMode));
+    updateDocumentRect(m_document.stampDabs(m_pendingDabs, m_strokeColor, m_strokeMode, &m_strokeBefore));
     m_pendingDabs.clear();
 }
 

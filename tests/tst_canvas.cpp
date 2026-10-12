@@ -2,9 +2,12 @@
 // touch through QTest, pen through constructed QTabletEvents. Pen hardware is not involved.
 
 #include "CanvasItem.h"
+#include "ProjectFile.h"
 #include "ViewRenderer.h"
 
 #include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QPointingDevice>
 #include <QQuickWindow>
 #include <QTabletEvent>
@@ -288,6 +291,215 @@ private slots:
         QTest::touchEvent(m_window.get(), m_touch).release(0, QPoint(350, 450)).release(1, QPoint(550, 450));
         QVERIFY(m_canvas->zoom() > zoomBefore * 1.9);
         QCOMPARE(doc(), before); // the pinch drew nothing
+    }
+
+    // --- undo / redo through the canvas ---
+    void strokeEraserAndClearUndoRedo()
+    {
+        const QImage empty = doc().copy();
+        mouseStroke({{100, 300}, {600, 300}});
+        const QImage painted = doc().copy();
+        QVERIFY(m_canvas->canUndo());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Brush stroke"));
+
+        m_canvas->setTool(CanvasItem::Eraser);
+        m_canvas->setBrushSize(30);
+        mouseStroke({{350, 200}, {350, 400}});
+        const QImage erased = doc().copy();
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Eraser stroke"));
+
+        m_canvas->clearCanvas();
+        QCOMPARE(doc(), empty);
+        QCOMPARE(m_canvas->history().undoCount(), 3);
+
+        m_canvas->undo();
+        QCOMPARE(doc(), erased);
+        m_canvas->undo();
+        QCOMPARE(doc(), painted);
+        m_canvas->undo();
+        QCOMPARE(doc(), empty);
+        QVERIFY(!m_canvas->canUndo());
+        m_canvas->redo();
+        QCOMPARE(doc(), painted);
+        m_canvas->redo();
+        QCOMPARE(doc(), erased);
+        m_canvas->redo();
+        QCOMPARE(doc(), empty);
+        QVERIFY(!m_canvas->canRedo());
+        const QImage shot = screenshot("after_redo_clear");
+        const QRgb seen = shot.pixel(QPoint(200, 300) * shot.devicePixelRatio());
+        QVERIFY(seen == ViewRenderer::CheckerLight || seen == ViewRenderer::CheckerDark);
+    }
+
+    void newStrokeAfterUndoDropsRedo()
+    {
+        mouseStroke({{100, 200}, {300, 200}});
+        mouseStroke({{100, 400}, {300, 400}});
+        m_canvas->undo();
+        QVERIFY(m_canvas->canRedo());
+        mouseStroke({{500, 300}, {700, 300}});
+        QVERIFY(!m_canvas->canRedo());
+        QCOMPARE(m_canvas->history().undoCount(), 2);
+        QCOMPARE(alphaAt(toDoc(QPointF(200, 400))), 0);
+    }
+
+    void viewChangesAreNotUndoable()
+    {
+        sendWheel(QPointF(400, 300), 240);
+        mouseStroke({{600, 400}, {500, 350}}, Qt::MiddleButton);
+        m_window->resize(700, 500);
+        QTRY_COMPARE(m_canvas->size(), QSizeF(700, 500));
+        QVERIFY(!m_canvas->canUndo());
+        QVERIFY(!m_canvas->isModified());
+        const qreal zoom = m_canvas->zoom();
+        m_canvas->undo(); // nothing to undo: the view stays where it is
+        QCOMPARE(m_canvas->zoom(), zoom);
+    }
+
+    void interruptedStrokesBecomeOneStep()
+    {
+        // A one-finger stroke interrupted by a second finger.
+        m_canvas->setBrushSize(20);
+        QTest::touchEvent(m_window.get(), m_touch).press(0, QPoint(100, 300));
+        QTest::touchEvent(m_window.get(), m_touch).move(0, QPoint(300, 300));
+        QTest::touchEvent(m_window.get(), m_touch).stationary(0).press(1, QPoint(500, 450));
+        QTest::touchEvent(m_window.get(), m_touch).release(0, QPoint(300, 300)).release(1, QPoint(500, 450));
+        QCOMPARE(m_canvas->history().undoCount(), 1);
+        QCOMPARE(alphaAt(toDoc(QPointF(200, 300))), 255);
+        m_canvas->undo();
+        QCOMPARE(alphaAt(toDoc(QPointF(200, 300))), 0);
+
+        // Undo pressed while the mouse is still drawing removes the whole stroke and stops it.
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(100, 500));
+        QTest::mouseMove(m_window.get(), QPoint(300, 500));
+        m_canvas->undo();
+        QCOMPARE(alphaAt(toDoc(QPointF(200, 500))), 0);
+        QTest::mouseMove(m_window.get(), QPoint(500, 500));
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(500, 500));
+        QCOMPARE(alphaAt(toDoc(QPointF(400, 500))), 0);
+        QVERIFY(m_canvas->canRedo());
+    }
+
+    void erasingNothingIsNotAnEdit()
+    {
+        m_canvas->setTool(CanvasItem::Eraser);
+        mouseStroke({{100, 100}, {400, 100}});
+        m_canvas->clearCanvas(); // already empty
+        QVERIFY(!m_canvas->canUndo());
+        QVERIFY(!m_canvas->isModified());
+    }
+
+    // --- save / open / new ---
+    void saveOpenAndUnsavedState()
+    {
+        QTemporaryDir dir;
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("Untitled"));
+        mouseStroke({{100, 300}, {600, 300}});
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(m_canvas->saveFile(), QStringLiteral("Choose a file name first (Save As)."));
+
+        // Save As without an extension adds ".drawapp".
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("first"))), QString());
+        const QString path = dir.filePath("first.drawapp");
+        QVERIFY(QFile::exists(path));
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("first.drawapp"));
+
+        mouseStroke({{100, 450}, {600, 450}});
+        QVERIFY(m_canvas->isModified());
+        m_canvas->undo();
+        QVERIFY(!m_canvas->isModified()); // back at the saved pixels
+        m_canvas->redo();
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(m_canvas->saveFile(), QString());
+        QVERIFY(!m_canvas->isModified());
+        const QImage savedSecond = doc().copy();
+
+        m_canvas->newDocument();
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("Untitled"));
+        QVERIFY(!m_canvas->hasFile());
+        QVERIFY(!m_canvas->canUndo());
+        QCOMPARE(alphaAt(toDoc(QPointF(300, 300))), 0);
+
+        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(doc(), savedSecond);
+        QCOMPARE(m_canvas->documentSize(), QSize(2048, 1536));
+        QVERIFY(!m_canvas->isModified());
+        QVERIFY(!m_canvas->canUndo()); // history does not survive reopening
+    }
+
+    void failedOpenKeepsCurrentDocument()
+    {
+        QTemporaryDir dir;
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("current.drawapp"))), QString());
+        mouseStroke({{100, 300}, {600, 300}});
+        const QImage before = doc().copy();
+        const int undoSteps = m_canvas->history().undoCount();
+
+        const QString damaged = dir.filePath("damaged.drawapp");
+        {
+            QByteArray bytes = ProjectFile::encode(doc());
+            bytes.chop(100);
+            QFile f(damaged);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(bytes);
+        }
+        const QString error = m_canvas->openFile(QUrl::fromLocalFile(damaged));
+        QVERIFY2(error.contains("damaged"), qPrintable(error));
+        QVERIFY(!m_canvas->openFile(QUrl::fromLocalFile(dir.filePath("missing.drawapp"))).isEmpty());
+
+        QCOMPARE(doc(), before);
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(m_canvas->history().undoCount(), undoSteps);
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("current.drawapp"));
+    }
+
+    void failedSaveKeepsDocumentUnsaved()
+    {
+        QTemporaryDir dir;
+        mouseStroke({{100, 300}, {600, 300}});
+        const QString error = m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("missing/folder/x.drawapp")));
+        QVERIFY(!error.isEmpty());
+        QVERIFY(m_canvas->isModified());
+        QVERIFY(!m_canvas->hasFile());
+        QVERIFY(m_canvas->canUndo());
+    }
+
+    void openedDocumentKeepsItsSize()
+    {
+        QTemporaryDir dir;
+        RasterDocument small(QSize(300, 200));
+        small.stampDabs({{QPointF(150, 100), 50}}, QColor(200, 0, 0), BrushMode::Paint);
+        const QString path = dir.filePath("small.drawapp");
+        QCOMPARE(ProjectFile::save(small.image(), path), QString());
+        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(m_canvas->documentSize(), QSize(300, 200));
+        QCOMPARE(doc(), small.image());
+        // Drawing still maps through the (refitted) view onto the opened canvas.
+        mouseStroke({toView(QPointF(20, 20)).toPoint(), toView(QPointF(80, 20)).toPoint()});
+        QCOMPARE(alphaAt(QPointF(50, 20)), 255);
+    }
+
+    // --- PNG export ---
+    void exportIgnoresViewAndKeepsProjectState()
+    {
+        QTemporaryDir dir;
+        mouseStroke({{100, 300}, {600, 300}});
+        m_canvas->setTool(CanvasItem::Eraser);
+        mouseStroke({{350, 250}, {350, 350}});
+        sendWheel(QPointF(300, 300), 360);
+        mouseStroke({{600, 400}, {450, 330}}, Qt::MiddleButton);
+
+        const QString png = dir.filePath("export"); // ".png" gets added
+        QCOMPARE(m_canvas->exportPng(QUrl::fromLocalFile(png)), QString());
+        QImage exported(png + ".png");
+        QVERIFY(!exported.isNull());
+        QCOMPARE(exported.size(), QSize(2048, 1536));
+        QCOMPARE(exported.convertToFormat(QImage::Format_ARGB32), doc().convertToFormat(QImage::Format_ARGB32));
+        QCOMPARE(qAlpha(exported.pixel(0, 0)), 0); // transparency kept, no checkerboard
+        QVERIFY(m_canvas->isModified());           // exporting is not saving
+        QVERIFY(!m_canvas->hasFile());
     }
 };
 

@@ -14,8 +14,11 @@ option(DRAWAPP_BUILD_TESTS "Build unit tests and benchmarks" ON)
 # Document model and raster operations: QtGui only, no Qt Quick, so they can be tested headless.
 add_library(drawcore STATIC
     src/core/Pressure.h
+    src/core/ProjectFile.cpp src/core/ProjectFile.h
     src/core/RasterDocument.cpp src/core/RasterDocument.h
     src/core/StrokeSpacer.cpp src/core/StrokeSpacer.h
+    src/core/TileSnapshot.cpp src/core/TileSnapshot.h
+    src/core/UndoHistory.cpp src/core/UndoHistory.h
     src/core/ViewRenderer.cpp src/core/ViewRenderer.h
     src/core/ViewTransform.cpp src/core/ViewTransform.h
 )

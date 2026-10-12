@@ -1,3 +1,4 @@
+import QtCore
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
@@ -11,17 +12,101 @@ ApplicationWindow {
     minimumWidth: 360
     minimumHeight: 320
     visible: true
-    title: "DrawApp (prototype)"
+    title: (canvas.modified ? "*" : "") + canvas.documentTitle + " — DrawApp (prototype)"
 
     readonly property var swatches: ["#141414", "#ffffff", "#e53935", "#fb8c00", "#fdd835",
                                      "#43a047", "#1e88e5", "#8e24aa"]
 
+    // Action to run once unsaved changes are saved or discarded; null when nothing is pending.
+    property var pendingAction: null
+    // Action to run after a Save As chosen from the unsaved-changes prompt succeeds.
+    property var afterSaveAs: null
+    property bool closeConfirmed: false
+
+    function showError(message) {
+        errorDialog.text = message
+        errorDialog.open()
+    }
+
+    // Runs action now, or after the user saves or discards unsaved changes. Cancel drops it.
+    function whenChangesHandled(action) {
+        if (!canvas.modified) {
+            action()
+            return
+        }
+        pendingAction = action
+        unsavedDialog.open()
+    }
+
+    // Saves to the current file, or asks for one. Runs then() only after a successful save.
+    function saveDocument(then) {
+        if (canvas.hasFile) {
+            const error = canvas.saveFile()
+            if (error) {
+                showError(error)
+                return
+            }
+            if (then)
+                then()
+        } else {
+            saveAsDocument(then)
+        }
+    }
+
+    function saveAsDocument(then) {
+        afterSaveAs = then || null
+        saveDialog.open()
+    }
+
+    function newDocument() { whenChangesHandled(() => canvas.newDocument()) }
+    function openDocument() { whenChangesHandled(() => openDialog.open()) }
+
+    onClosing: (close) => {
+        if (canvas.modified && !closeConfirmed) {
+            close.accepted = false
+            whenChangesHandled(() => {
+                closeConfirmed = true
+                window.close()
+            })
+        }
+    }
+
     header: ToolBar {
         Flow {
-            id: toolbarFlow
             width: parent.width
             spacing: 6
             padding: 4
+
+            ToolButton {
+                text: "File"
+                onClicked: fileMenu.open()
+                Menu {
+                    id: fileMenu
+                    y: parent.height
+                    MenuItem { text: "New   (Ctrl+N)"; onTriggered: window.newDocument() }
+                    MenuItem { text: "Open…   (Ctrl+O)"; onTriggered: window.openDocument() }
+                    MenuItem { text: "Save   (Ctrl+S)"; onTriggered: window.saveDocument(null) }
+                    MenuItem { text: "Save As…   (Ctrl+Shift+S)"; onTriggered: window.saveAsDocument(null) }
+                    MenuSeparator {}
+                    MenuItem { text: "Export PNG…   (Ctrl+Shift+E)"; onTriggered: exportDialog.open() }
+                }
+            }
+            ToolButton {
+                text: "Undo"
+                enabled: canvas.canUndo
+                onClicked: canvas.undo()
+                ToolTip.visible: hovered
+                ToolTip.text: (canvas.undoText ? "Undo " + canvas.undoText.toLowerCase() : "Undo") + " (Ctrl+Z)"
+            }
+            ToolButton {
+                text: "Redo"
+                enabled: canvas.canRedo
+                onClicked: canvas.redo()
+                ToolTip.visible: hovered
+                ToolTip.text: (canvas.redoText ? "Redo " + canvas.redoText.toLowerCase() : "Redo") + " (Ctrl+Y)"
+            }
+
+            ToolSeparator {}
 
             ButtonGroup { id: toolGroup }
 
@@ -115,7 +200,12 @@ ApplicationWindow {
 
             ToolSeparator {}
 
-            ToolButton { text: "Clear"; onClicked: clearDialog.open() }
+            ToolButton {
+                text: "Clear"
+                onClicked: canvas.clearCanvas()
+                ToolTip.visible: hovered
+                ToolTip.text: "Clear the canvas (can be undone)"
+            }
         }
     }
 
@@ -123,7 +213,7 @@ ApplicationWindow {
         id: canvas
         anchors.fill: parent
         focus: true
-        enabled: !clearDialog.visible
+        enabled: !unsavedDialog.visible && !errorDialog.visible
     }
 
     footer: ToolBar {
@@ -145,17 +235,111 @@ ApplicationWindow {
         }
     }
 
+    FileDialog {
+        id: openDialog
+        title: "Open project"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["DrawApp project (*.drawapp)", "All files (*)"]
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        onAccepted: {
+            const error = canvas.openFile(selectedFile)
+            if (error)
+                window.showError(error)
+        }
+    }
+
+    FileDialog {
+        id: saveDialog
+        title: "Save project as"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "drawapp"
+        nameFilters: ["DrawApp project (*.drawapp)"]
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        onAccepted: {
+            const then = window.afterSaveAs
+            window.afterSaveAs = null
+            const error = canvas.saveFileAs(selectedFile)
+            if (error) {
+                window.showError(error)
+                return
+            }
+            if (then)
+                then()
+        }
+        // Cancelling Save As also cancels whatever was waiting for the save.
+        onRejected: window.afterSaveAs = null
+    }
+
+    FileDialog {
+        id: exportDialog
+        title: "Export PNG"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "png"
+        nameFilters: ["PNG image (*.png)"]
+        currentFolder: StandardPaths.writableLocation(StandardPaths.PicturesLocation)
+        onAccepted: {
+            const error = canvas.exportPng(selectedFile)
+            if (error)
+                window.showError(error)
+        }
+    }
+
     Dialog {
-        id: clearDialog
+        id: unsavedDialog
         anchors.centerIn: parent
         modal: true
-        title: "Clear the canvas?"
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        Label { text: "This removes all artwork. There is no undo yet." }
-        onAccepted: canvas.clearCanvas()
+        title: "Save changes?"
+        focus: true
+        standardButtons: Dialog.Save | Dialog.Discard | Dialog.Cancel
+        Label {
+            text: "\"" + canvas.documentTitle + "\" has unsaved changes."
+            focus: true
+            Keys.onReturnPressed: unsavedDialog.accept()
+            Keys.onEnterPressed: unsavedDialog.accept()
+        }
+        onAccepted: {
+            const action = window.pendingAction
+            window.pendingAction = null
+            window.saveDocument(action)
+        }
+        onDiscarded: {
+            const action = window.pendingAction
+            window.pendingAction = null
+            unsavedDialog.close()
+            if (action)
+                action()
+        }
+        onRejected: window.pendingAction = null
         onClosed: canvas.forceActiveFocus()
     }
 
+    Dialog {
+        id: errorDialog
+        property alias text: errorLabel.text
+        anchors.centerIn: parent
+        width: Math.min(window.width - 32, 480)
+        modal: true
+        focus: true
+        title: "DrawApp"
+        standardButtons: Dialog.Ok
+        Label {
+            id: errorLabel
+            width: parent.width
+            wrapMode: Text.Wrap
+            focus: true
+            Keys.onReturnPressed: errorDialog.accept()
+            Keys.onEnterPressed: errorDialog.accept()
+        }
+        onClosed: canvas.forceActiveFocus()
+    }
+
+    Shortcut { sequences: [StandardKey.Undo]; onActivated: canvas.undo() }
+    Shortcut { sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; onActivated: canvas.redo() }
+    Shortcut { sequences: [StandardKey.New]; onActivated: window.newDocument() }
+    Shortcut { sequences: [StandardKey.Open]; onActivated: window.openDocument() }
+    Shortcut { sequences: [StandardKey.Save]; onActivated: window.saveDocument(null) }
+    Shortcut { sequences: ["Ctrl+Shift+S"]; onActivated: window.saveAsDocument(null) }
+    Shortcut { sequences: ["Ctrl+Shift+E"]; onActivated: exportDialog.open() }
     Shortcut { sequence: "B"; onActivated: canvas.tool = CanvasItem.Brush }
     Shortcut { sequence: "E"; onActivated: canvas.tool = CanvasItem.Eraser }
     Shortcut { sequence: "["; onActivated: canvas.brushSize = Math.max(1, Math.round(canvas.brushSize / 1.2)) }

@@ -41,6 +41,30 @@ Memory, deployed app, idle after launch: working set 202 MB, private bytes 167 M
 drawing session: working set 198 MB, private bytes 165 MB. The document accounts for 12 MiB; we
 have not broken down the rest (Qt Quick, Controls, D3D11 and the item's backing texture).
 
+## Milestone 1 additions: 2026-10-11, same machine and conditions
+
+`bench_core 30` after adding undo and files. The undo rows use the same 1000-event zig-zag stroke,
+capturing tiles exactly as the app does; the release event includes the commit (dropping
+unchanged tiles and pushing to history).
+
+| Operation | median ms | p95 ms | max ms |
+|---|---|---|---|
+| stroke event + undo capture, brush 12 px | 0.0059 | 0.0203 | 0.0650 |
+| undo (or redo) of that whole stroke, 1.4 MiB of tiles | 0.2103 | – | 0.2315 |
+| stroke event + undo capture, brush 64 px | 0.0054 | 0.0149 | 0.0945 |
+| undo (or redo) of that whole stroke, 2.1 MiB of tiles | 0.2722 | – | 0.3465 |
+| save project, 4000 painted dabs (0.60 MiB file) | 86.8 | – | 126.2 |
+| open project, same | 32.8 | – | 40.9 |
+| export PNG, same (0.87 MiB file) | 149.6 | – | 152.0 |
+| save project, random noise, worst case (11.42 MiB file) | 443.6 | – | 458.6 |
+| open project, random noise | 142.7 | – | 148.5 |
+| export PNG, random noise (11.13 MiB file) | 498.7 | – | 510.7 |
+
+Stroke events with undo capture cost the same as without it within run-to-run noise (0.0059 vs
+0.0059 ms median at 12 px in this run). Save/open/export run on the UI thread, so the worst-case
+numbers are visible pauses. The undo budget is a fixed 128 MiB; actual history memory depends on
+what is drawn and was not measured in the running app.
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera).

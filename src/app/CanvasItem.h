@@ -3,6 +3,8 @@
 #include "Pressure.h"
 #include "RasterDocument.h"
 #include "StrokeSpacer.h"
+#include "TileSnapshot.h"
+#include "UndoHistory.h"
 #include "ViewTransform.h"
 
 #include <QColor>
@@ -10,6 +12,7 @@
 #include <QPointer>
 #include <QQuickPaintedItem>
 #include <QQuickWindow>
+#include <QUrl>
 #include <QtQml/qqmlregistration.h>
 #include <optional>
 #include <vector>
@@ -24,8 +27,16 @@ class CanvasItem : public QQuickPaintedItem
     Q_PROPERTY(QColor brushColor READ brushColor WRITE setBrushColor NOTIFY brushColorChanged)
     Q_PROPERTY(Tool tool READ tool WRITE setTool NOTIFY toolChanged)
     Q_PROPERTY(qreal zoom READ zoom NOTIFY viewChanged)
-    Q_PROPERTY(QSize documentSize READ documentSize CONSTANT)
+    Q_PROPERTY(QSize documentSize READ documentSize NOTIFY documentChanged)
     Q_PROPERTY(QString inputStatus READ inputStatus NOTIFY inputStatusChanged)
+    Q_PROPERTY(bool canUndo READ canUndo NOTIFY historyChanged)
+    Q_PROPERTY(bool canRedo READ canRedo NOTIFY historyChanged)
+    Q_PROPERTY(QString undoText READ undoText NOTIFY historyChanged)
+    Q_PROPERTY(QString redoText READ redoText NOTIFY historyChanged)
+    Q_PROPERTY(bool modified READ isModified NOTIFY historyChanged)
+    Q_PROPERTY(bool hasFile READ hasFile NOTIFY fileChanged)
+    Q_PROPERTY(QUrl fileUrl READ fileUrl NOTIFY fileChanged)
+    Q_PROPERTY(QString documentTitle READ documentTitle NOTIFY fileChanged)
 
 public:
     enum Tool { Brush, Eraser };
@@ -47,6 +58,25 @@ public:
     QString inputStatus() const { return m_inputStatus; }
     const RasterDocument &document() const { return m_document; }
     const ViewTransform &viewTransform() const { return m_view; }
+    const UndoHistory &history() const { return m_history; }
+
+    bool canUndo() const { return m_history.canUndo(); }
+    bool canRedo() const { return m_history.canRedo(); }
+    QString undoText() const { return m_history.undoLabel(); }
+    QString redoText() const { return m_history.redoLabel(); }
+    bool isModified() const { return m_history.stateId() != m_savedStateId; }
+    bool hasFile() const { return !m_filePath.isEmpty(); }
+    QUrl fileUrl() const { return m_fileUrl; }
+    QString documentTitle() const;
+
+    Q_INVOKABLE void undo();
+    Q_INVOKABLE void redo();
+    Q_INVOKABLE void newDocument();
+    // These return an empty string on success, otherwise a message to show the user.
+    Q_INVOKABLE QString openFile(const QUrl &url);
+    Q_INVOKABLE QString saveFile();
+    Q_INVOKABLE QString saveFileAs(const QUrl &url);
+    Q_INVOKABLE QString exportPng(const QUrl &url);
 
     Q_INVOKABLE void clearCanvas();
     Q_INVOKABLE void zoomIn();
@@ -62,6 +92,9 @@ signals:
     void toolChanged();
     void viewChanged();
     void inputStatusChanged();
+    void documentChanged();
+    void historyChanged();
+    void fileChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -90,12 +123,20 @@ private:
     void continuePan(const QPointF &viewPos);
     void endPan();
     void applyPendingDabs();
+    void commitEdit(TileSnapshot before, const QString &label);
+    void replaceDocument(const QImage &image);
+    QString saveTo(const QString &path, const QUrl &url);
     void updateDocumentRect(const QRect &docRect);
     void viewModified();
     void setInputStatus(const QString &status);
     void reportStats();
 
     RasterDocument m_document;
+    UndoHistory m_history;
+    TileSnapshot m_strokeBefore;
+    quint64 m_savedStateId = 0;
+    QString m_filePath;
+    QUrl m_fileUrl;
     ViewTransform m_view;
     bool m_viewInitialized = false;
 

@@ -16,7 +16,7 @@ future feature with no work scheduled.
 | Platform | Distribution | Status (details in BUILD.md) |
 |---|---|---|
 | Windows 10/11 x64 | Direct download first; store later | Prototype built, launched and tested |
-| Android 9+ (API 28+) | Google Play | Prototype APK built, not launched |
+| Android 9+ (API 28+) | Google Play | Prototype APKs built (debug APK signed with a development key), not launched |
 | iOS / iPadOS | App Store | Blocked (no macOS/Xcode available) |
 | Linux x86_64 | Direct download / Flatpak (to decide) | Blocked (build dependencies not installed) |
 
@@ -25,16 +25,20 @@ future feature with no work scheduled.
 - Raster drawing with layers and common blend modes.
 - Pressure-sensitive brushes with a pressure curve, smoothing and a small set of brush presets.
 - Selection and transform basics.
-- Undo/redo with bounded memory.
-- Reliable saving: own project format with atomic writes and crash recovery; PNG/JPEG export.
+- Undo/redo for layer operations (single-canvas undo/redo is done).
+- Crash recovery (atomic project saving and PNG export are done); JPEG export.
 - Canvas rotation and mirroring.
 - Touch gestures on tablets (pinch zoom/pan, two-finger tap undo) with palm rejection.
 - Interface that works on phone, tablet and desktop sizes.
 
-## Done in milestone 0 (prototype)
+## Done so far
 
-One fixed 2048 × 1536 raster canvas; round brush with size and color; eraser; mouse, pen
-(pressure) and touch input; zoom and pan; clear. See ROADMAP.md for acceptance status.
+- Milestone 0: one 2048 × 1536 raster canvas; round brush with size and color; eraser; mouse, pen
+  (pressure) and touch input; zoom and pan; clear.
+- Milestone 1: undo/redo (stroke, eraser stroke, clear) under a 128 MiB budget; New/Open/Save/Save As
+  with a versioned .drawapp format, atomic saving and unsaved-changes prompts; PNG export.
+
+See ROADMAP.md for acceptance status.
 
 ## Deferred (not planned for the first release unless decided otherwise)
 

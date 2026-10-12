@@ -1,7 +1,9 @@
 #include "RasterDocument.h"
 
+#include "TileSnapshot.h"
+#include "UndoHistory.h"
+
 #include <QPainter>
-#include <cmath>
 
 RasterDocument::RasterDocument(QSize size)
     : m_image(size, QImage::Format_ARGB32_Premultiplied)
@@ -9,18 +11,28 @@ RasterDocument::RasterDocument(QSize size)
     m_image.fill(Qt::transparent);
 }
 
-QRect RasterDocument::stampDabs(const std::vector<Dab> &dabs, const QColor &color, BrushMode mode)
+RasterDocument::RasterDocument(const QImage &image)
+    : m_image(image.convertToFormat(QImage::Format_ARGB32_Premultiplied))
+{
+}
+
+QRect RasterDocument::stampDabs(const std::vector<Dab> &dabs, const QColor &color, BrushMode mode,
+                                TileSnapshot *before)
 {
     if (dabs.empty())
         return {};
 
-    QRectF changed;
+    QRect dirty;
     for (const Dab &dab : dabs) {
         const qreal r = dab.diameter / 2.0;
-        changed |= QRectF(dab.center.x() - r, dab.center.y() - r, dab.diameter, dab.diameter);
+        // One extra pixel for anti-aliased edges.
+        const QRect dabRect = QRectF(dab.center.x() - r, dab.center.y() - r, dab.diameter, dab.diameter)
+                                  .toAlignedRect().adjusted(-1, -1, 1, 1) & bounds();
+        // Per dab, not the union: a long diagonal segment must not capture its whole bounding box.
+        if (before)
+            before->capture(m_image, dabRect);
+        dirty |= dabRect;
     }
-    // One extra pixel for anti-aliased edges.
-    const QRect dirty = changed.toAlignedRect().adjusted(-1, -1, 1, 1) & bounds();
     if (dirty.isEmpty())
         return {};
 
@@ -41,8 +53,20 @@ QRect RasterDocument::stampDabs(const std::vector<Dab> &dabs, const QColor &colo
     return dirty;
 }
 
-QRect RasterDocument::clear()
+QRect RasterDocument::clear(TileSnapshot *before)
 {
+    if (before)
+        before->captureNonTransparent(m_image);
     m_image.fill(Qt::transparent);
     return bounds();
+}
+
+QRect RasterDocument::undo(UndoHistory &history)
+{
+    return history.undo(m_image);
+}
+
+QRect RasterDocument::redo(UndoHistory &history)
+{
+    return history.redo(m_image);
 }

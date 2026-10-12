@@ -48,6 +48,19 @@ timings every 2 s.
 The deploy step warns that translations are missing because `qttranslations` is not downloaded.
 This is harmless for now.
 
+## Manual check on Windows
+
+Run `dist\windows-mingw\bin\drawapp.exe` (after the install step above), then:
+
+1. Draw a stroke; the title shows `*Untitled`. Ctrl+Z removes it, Ctrl+Y (or Ctrl+Shift+Z) restores it.
+2. Erase part of it, press Clear, then undo three times: each step comes back in order.
+3. Ctrl+N with unsaved changes asks Save / Discard / Cancel. Cancel or Escape keeps the drawing.
+4. Ctrl+S on an untitled drawing opens Save As; after saving, the title loses its `*`.
+5. Ctrl+O reopens the file. Opening a renamed `.png` or a truncated `.drawapp` shows an error and
+   keeps the current drawing.
+6. Ctrl+Shift+E exports a PNG; the title keeps its `*` if there were unsaved changes.
+7. Closing the window with unsaved changes asks first.
+
 ## Android (APK builds; not launched)
 
 Additional prerequisites: the Android SDK at `%LOCALAPPDATA%\Android\Sdk` (Android Studio), with
@@ -59,15 +72,24 @@ python tools\fetch_qt_windows.py --android    # Qt 6.12.0 for Android arm64-v8a
 powershell -ExecutionPolicy Bypass -File tools\build-android.ps1
 ```
 
-Output: `%USERPROFILE%\drawapp-build\android-arm64-release\android-build\drawapp.apk`
-(unsigned release, arm64-v8a, minSdk 28, targetSdk 36, 64.9 MB).
+Release output: `%USERPROFILE%\drawapp-build\android-arm64-release\android-build\drawapp.apk`
+(unsigned, arm64-v8a, minSdk 28, targetSdk 36).
+
+Debug APK for local device testing, signed with the Android SDK's development key
+(`%USERPROFILE%\.android\debug.keystore`, created by Gradle; certificate "CN=Android Debug"):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\build-android.ps1 -Config Debug
+# -> %USERPROFILE%\drawapp-build\android-arm64-debug\android-build\build\outputs\apk\debug\android-build-debug.apk (66.9 MB)
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r <that apk>
+```
+
+The debug key is for development only. Google Play needs an AAB signed with an upload key;
+none is set up and no production credentials are stored in this repository.
 
 The Android build directory **must not contain spaces**. `androiddeployqt` 6.12.0 fails with
 "Import found outside of import paths" when it does, so the script builds outside this
 repository by default.
-
-Install on a device (not done here, no device available): sign the APK or build Debug, then
-`adb install drawapp.apk`. Google Play needs a signed AAB (`--target aab` plus signing); not set up.
 
 ## Linux (blocked here)
 
@@ -94,7 +116,7 @@ linking question (ARCHITECTURE.md) before shipping.
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 2/2 suites (22 + 13 tests); deployed build launched with a clean PATH; real OS mouse input drew, panned and zoomed (screenshot checked) |
-| Android arm64 | **Built but not launched** | APK built and inspected with `aapt2` (no device or emulator image available) |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 3/3 suites (22 + 36 + 23 tests); deployed build driven with real keyboard/mouse input: draw, undo/redo, unsaved prompt on New and on close, native Save/Open/Export dialogs, damaged-file error (screenshots checked) |
+| Android arm64 | **Built but not launched** | Release (unsigned) and debug (signed with the development key, `apksigner` verified) APKs built after milestone 1; no device or emulator image available. Drawing, file dialogs and `content://` saving are unverified |
 | Linux | **Blocked** | WSL needs a sudo password to install the compiler and libraries |
 | iOS / iPadOS | **Blocked** | No macOS or Xcode |
