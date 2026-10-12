@@ -1,9 +1,7 @@
 #include "BrushPreview.h"
 
 #include "CanvasItem.h"
-#include "StrokeCompositor.h"
-#include "StrokeSmoother.h"
-#include "StrokeSpacer.h"
+#include "StrokeEngine.h"
 #include "TileSnapshot.h"
 
 #include <QPainter>
@@ -52,21 +50,17 @@ void BrushPreview::paint(QPainter *painter)
                          std::sin(t * M_PI)});
     }
 
-    StrokeSmoother smoother(m_smoothing / 100.0 * CanvasItem::MaxSmoothingRadius);
-    StrokeSpacer spacer(diameter, StrokeSpacer::DefaultSpacing,
-                        PressureResponse{m_minSize, PressureResponse::gammaForFirmness(m_firmness)});
-    StrokeCompositor compositor(m_color, m_opacity, m_eraser ? BrushMode::Erase : BrushMode::Paint);
+    BrushSettings settings;
+    settings.blend = m_eraser ? BrushBlend::Erase : BrushBlend::Paint;
+    settings.size = diameter;
+    settings.opacity = m_opacity;
+    settings.pressureSize = {true, m_minSize, PressureResponse::gammaForFirmness(m_firmness)};
+    StrokeEngine engine(settings, m_color, 1, m_smoothing / 100.0 * CanvasItem::MaxSmoothingRadius);
     TileSnapshot before;
-    std::vector<StrokeSample> smoothed;
-    std::vector<Dab> dabs;
-    smoother.begin(input.front(), smoothed);
+    engine.begin(layer, input.front(), before);
     for (size_t i = 1; i < input.size(); ++i)
-        smoother.moveTo(input[i], smoothed);
-    smoother.finish(smoothed);
-    spacer.begin(smoothed.front(), dabs);
-    for (size_t i = 1; i < smoothed.size(); ++i)
-        spacer.moveTo(smoothed[i], dabs);
-    compositor.addDabs(layer, dabs, before);
+        engine.moveTo(layer, input[i], before);
+    engine.finish(layer, before);
 
     if (m_smoothing > 0) {
         QPainterPath raw;

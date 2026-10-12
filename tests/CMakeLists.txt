@@ -4,6 +4,10 @@ qt_add_executable(tst_core tst_core.cpp)
 target_link_libraries(tst_core PRIVATE drawcore Qt6::Test)
 add_test(NAME tst_core COMMAND tst_core)
 
+qt_add_executable(tst_brush tst_brush.cpp)
+target_link_libraries(tst_brush PRIVATE drawcore Qt6::Test)
+add_test(NAME tst_brush COMMAND tst_brush)
+
 qt_add_executable(tst_document tst_document.cpp)
 target_link_libraries(tst_document PRIVATE drawcore Qt6::Test)
 add_test(NAME tst_document COMMAND tst_document)
@@ -37,7 +41,7 @@ endif()
 if(WIN32)
     # Let ctest find the Qt and MinGW DLLs without a deployment step.
     get_filename_component(_cxx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    set_tests_properties(tst_core tst_document tst_recovery tst_canvas tst_ui PROPERTIES
+    set_tests_properties(tst_core tst_brush tst_document tst_recovery tst_canvas tst_ui PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_cxx_bin}")
     # Window tests render offscreen under ctest so they do not take over the desktop.
     set_property(TEST tst_canvas tst_ui APPEND PROPERTY ENVIRONMENT_MODIFICATION

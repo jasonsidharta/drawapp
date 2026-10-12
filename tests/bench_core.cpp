@@ -7,7 +7,7 @@
 #include "RasterDocument.h"
 #include "RecoveryFile.h"
 #include "SafeSave.h"
-#include "StrokeCompositor.h"
+#include "StrokeEngine.h"
 #include "StrokeSmoother.h"
 #include "StrokeSpacer.h"
 #include "TileSnapshot.h"
@@ -113,23 +113,18 @@ void layerBench(int layers, int reps)
     const std::vector<StrokeSample> samples = zigZag();
     std::vector<double> events;
     for (int r = 0; r < std::max(1, reps / 10); ++r) {
-        StrokeSpacer spacer(12);
-        StrokeCompositor compositor(Qt::black, 1.0, BrushMode::Paint);
+        StrokeEngine engine(BrushSettings{}, Qt::black, 1, 0);
         TileSnapshot before;
-        std::vector<Dab> pending;
         UndoHistory history;
         for (size_t i = 0; i < samples.size(); ++i) {
             QElapsedTimer t;
             t.start();
-            if (i == 0)
-                spacer.begin(samples[i], pending);
-            else
-                spacer.moveTo(samples[i], pending);
-            const QRect changed = compositor.addDabs(doc.pixels(active), pending, before);
+            const QRect changed = i == 0 ? engine.begin(doc.pixels(active), samples[i], before)
+                                         : engine.moveTo(doc.pixels(active), samples[i], before);
             doc.refreshComposite(changed);
-            pending.clear();
             events.push_back(t.nsecsElapsed() / 1e6);
         }
+        doc.refreshComposite(engine.finish(doc.pixels(active), before));
         before.dropUnchanged(doc.layer(active).image);
         history.push(UndoCommand::pixels(doc.layer(active).id, std::move(before), QStringLiteral("stroke")));
         history.undo(doc);
@@ -145,13 +140,14 @@ void layerBench(int layers, int reps)
         t.start();
         DocumentData snapshot = doc.snapshot();
         snapshotMs.push_back(t.nsecsElapsed() / 1e6);
-        StrokeCompositor compositor(Qt::red, 1.0, BrushMode::Paint);
+        BrushSettings dot;
+        dot.size = 10;
         TileSnapshot before;
         t.restart();
-        compositor.addDabs(doc.pixels(active), {{QPointF(500 + r, 500), 10}}, before);
+        StrokeEngine::render(doc.pixels(active), dot, Qt::red, {{QPointF(500 + r, 500), 1}}, 1, &before);
         detachMs.push_back(t.nsecsElapsed() / 1e6);
         t.restart();
-        compositor.addDabs(doc.pixels(active), {{QPointF(520 + r, 500), 10}}, before);
+        StrokeEngine::render(doc.pixels(active), dot, Qt::red, {{QPointF(520 + r, 500), 1}}, 1, &before);
         normalMs.push_back(t.nsecsElapsed() / 1e6);
     }
     const DocumentData snapshot = doc.snapshot();
@@ -265,15 +261,15 @@ void brushEngineBench(int reps)
     };
     const Variant variants[] = {
         {"milestone 4 path (QPainter dabs), 12 px", true, 12, 1.0, 0},
-        {"compositor, 12 px, 100 %, smoothing off", false, 12, 1.0, 0},
-        {"compositor, 12 px, 50 %, smoothing off", false, 12, 0.5, 0},
-        {"compositor, 12 px, 50 %, smoothing 20 px", false, 12, 0.5, 20},
+        {"stroke engine, 12 px, 100 %, smoothing off", false, 12, 1.0, 0},
+        {"stroke engine, 12 px, 50 %, smoothing off", false, 12, 0.5, 0},
+        {"stroke engine, 12 px, 50 %, smoothing 20 px", false, 12, 0.5, 20},
         {"milestone 4 path (QPainter dabs), 128 px", true, 128, 1.0, 0},
-        {"compositor, 128 px, 50 %, smoothing off", false, 128, 0.5, 0},
+        {"stroke engine, 128 px, 50 %, smoothing off", false, 128, 0.5, 0},
     };
     const std::vector<StrokeSample> samples = zigZag();
     std::printf("\n### Brush engine: one input event of a 1000-event stroke (stroke processing + undo capture + composite refresh)\n\n");
-    std::printf("| Variant | median ms | p95 ms | max ms | mask tiles |\n|---|---|---|---|---|\n");
+    std::printf("| Variant | median ms | p95 ms | max ms | coverage tiles |\n|---|---|---|---|---|\n");
     for (const Variant &v : variants) {
         LayeredDocument doc;
         doc.pixels(0).fill(Qt::white);
@@ -281,35 +277,34 @@ void brushEngineBench(int reps)
         std::vector<double> events;
         int maskTiles = 0;
         for (int r = 0; r < std::max(1, reps / 10); ++r) {
-            StrokeSmoother smoother(v.smoothing);
+            BrushSettings settings;
+            settings.size = v.size;
+            settings.opacity = v.opacity;
+            StrokeEngine engine(settings, Qt::black, 1, v.smoothing);
             StrokeSpacer spacer(v.size);
-            StrokeCompositor compositor(Qt::black, v.opacity, BrushMode::Paint);
             TileSnapshot before;
-            std::vector<StrokeSample> smoothed;
             std::vector<Dab> pending;
             for (size_t i = 0; i < samples.size(); ++i) {
                 QElapsedTimer t;
                 t.start();
-                if (i == 0) {
-                    smoother.begin(samples[i], smoothed);
-                    spacer.begin(smoothed.front(), pending);
-                    smoothed.clear();
+                QRect changed;
+                if (v.legacy) {
+                    if (i == 0)
+                        spacer.begin(samples[i], pending);
+                    else
+                        spacer.moveTo(samples[i], pending);
+                    changed = RasterDocument::stampDabs(doc.pixels(0), pending, Qt::black, BrushMode::Paint, &before);
+                    pending.clear();
                 } else {
-                    smoother.moveTo(samples[i], smoothed);
+                    changed = i == 0 ? engine.begin(doc.pixels(0), samples[i], before)
+                                     : engine.moveTo(doc.pixels(0), samples[i], before);
+                    if (i + 1 == samples.size())
+                        changed |= engine.finish(doc.pixels(0), before);
                 }
-                if (i + 1 == samples.size())
-                    smoother.finish(smoothed);
-                for (const StrokeSample &s : smoothed)
-                    spacer.moveTo(s, pending);
-                smoothed.clear();
-                const QRect changed = v.legacy
-                    ? RasterDocument::stampDabs(doc.pixels(0), pending, Qt::black, BrushMode::Paint, &before)
-                    : compositor.addDabs(doc.pixels(0), pending, before);
                 doc.refreshComposite(changed);
-                pending.clear();
                 events.push_back(t.nsecsElapsed() / 1e6);
             }
-            maskTiles = compositor.maskTileCount();
+            maskTiles = engine.coverageTileCount();
             before.swapWith(doc.pixels(0)); // undo, so every repetition starts from the same pixels
             doc.refreshComposite();
         }

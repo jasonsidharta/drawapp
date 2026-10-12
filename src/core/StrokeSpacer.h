@@ -1,18 +1,29 @@
 #pragma once
 
 #include <QPointF>
+#include <functional>
 #include <vector>
 
+// One input sample in document coordinates, independent of the device that produced it.
 struct StrokeSample
 {
-    QPointF pos;       // document pixels
+    QPointF pos;        // document pixels
     qreal pressure = 1; // 0..1, already passed through effectivePressure()
+    qreal tiltX = 0;    // degrees, −90..90 (QTabletEvent::xTilt); meaningful only with hasTilt
+    qreal tiltY = 0;
+    bool hasTilt = false;
+    double timeMs = -1; // event time in milliseconds; < 0 when unknown
+
+    // Linear interpolation of every field (tilt only when both ends report it).
+    static StrokeSample lerp(const StrokeSample &a, const StrokeSample &b, qreal t);
 };
 
 struct Dab
 {
-    QPointF center; // document pixels
-    qreal diameter; // document pixels
+    QPointF center;      // document pixels
+    qreal diameter;      // document pixels
+    StrokeSample sample; // the input interpolated at this dab (pressure, tilt, time)
+    qreal direction = 0; // travel direction at this dab, radians (0 = +x)
 };
 
 // How pen pressure maps to dab size: size = brush size × (minFraction + (1 − minFraction) × p^gamma).
@@ -43,9 +54,21 @@ public:
     static constexpr qreal MinDiameter = 1.0;
     static constexpr qreal MinStep = 0.5;
 
+    // The dab diameter for an input sample (clamped to MinDiameter by the spacer).
+    using DiameterFunction = std::function<qreal(const StrokeSample &)>;
+
     explicit StrokeSpacer(qreal brushSize, qreal spacing = DefaultSpacing, PressureResponse response = {});
+    StrokeSpacer(DiameterFunction diameter, qreal spacing);
 
     qreal diameterFor(qreal pressure) const;
+    qreal diameterFor(const StrokeSample &sample) const;
+    // Fraction of the diameter between successive dabs, at least MinStep pixels.
+    qreal stepFraction(qreal diameter) const;
+    // The last sample reached, and the diameter of the last dab.
+    const StrokeSample &last() const { return m_last; }
+    qreal lastDiameter() const { return m_lastDabDiameter; }
+    // A dab placed at last() by other means (elapsed time): distance spacing restarts from it.
+    void restartDistance() { m_sinceLastDab = 0; }
 
     // Starts a stroke and emits its first dab.
     void begin(const StrokeSample &sample, std::vector<Dab> &out);
@@ -53,9 +76,8 @@ public:
     void moveTo(const StrokeSample &sample, std::vector<Dab> &out);
 
 private:
-    qreal m_brushSize;
+    DiameterFunction m_diameter;
     qreal m_spacing;
-    PressureResponse m_response;
     StrokeSample m_last;
     qreal m_lastDabDiameter = 1;
     qreal m_sinceLastDab = 0;

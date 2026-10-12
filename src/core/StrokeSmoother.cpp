@@ -27,15 +27,15 @@ void StrokeSmoother::moveTo(const StrokeSample &sample, std::vector<StrokeSample
     const int steps = std::max(1, int(std::ceil(length / StepLength)));
     bool moved = false;
     for (int i = 1; i <= steps; ++i) {
-        const qreal t = qreal(i) / steps;
-        const QPointF pointer = m_pointer.pos + delta * t;
-        const qreal pressure = m_pointer.pressure + (sample.pressure - m_pointer.pressure) * t;
-        const QPointF toPointer = pointer - m_brush.pos;
+        const StrokeSample pointer = StrokeSample::lerp(m_pointer, sample, qreal(i) / steps);
+        const QPointF toPointer = pointer.pos - m_brush.pos;
         const qreal distance = std::hypot(toPointer.x(), toPointer.y());
-        // The brush carries the pressure of the pointer that pulls it.
-        m_brush.pressure = pressure;
+        // The brush carries the pressure, tilt and time of the pointer that pulls it.
+        const QPointF brushPos = m_brush.pos;
+        m_brush = pointer;
+        m_brush.pos = brushPos;
         if (distance > m_radius) {
-            m_brush.pos = pointer - toPointer * (m_radius / distance);
+            m_brush.pos = pointer.pos - toPointer * (m_radius / distance);
             moved = true;
             // Emitting every step keeps curves round; the spacer turns them into evenly spaced dabs.
             out.push_back(m_brush);

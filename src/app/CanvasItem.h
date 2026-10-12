@@ -5,9 +5,8 @@
 #include "ProjectIo.h"
 #include "RasterDocument.h"
 #include "RecoveryManager.h"
-#include "StrokeCompositor.h"
-#include "StrokeSmoother.h"
-#include "StrokeSpacer.h"
+#include "BrushSettings.h"
+#include "StrokeEngine.h"
 #include "TileSnapshot.h"
 #include "UndoHistory.h"
 #include "ViewTransform.h"
@@ -22,6 +21,7 @@
 #include <QUrl>
 #include <QVariantList>
 #include <QtQml/qqmlregistration.h>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -33,8 +33,8 @@ class CanvasItem : public QQuickPaintedItem
     QML_ELEMENT
     Q_PROPERTY(int brushSize READ brushSize WRITE setBrushSize NOTIFY brushSizeChanged)
     Q_PROPERTY(QColor brushColor READ brushColor WRITE setBrushColor NOTIFY brushColorChanged)
-    // Brush settings, captured when a stroke starts. Opacity is uniform within a stroke (see
-    // StrokeCompositor); pressure settings only matter for pens that report pressure.
+    // Brush settings, captured when a stroke starts (see StrokeEngine). Pressure settings only
+    // matter for pens that report pressure.
     Q_PROPERTY(qreal brushOpacity READ brushOpacity WRITE setBrushOpacity NOTIFY brushSettingsChanged)
     Q_PROPERTY(qreal pressureMinSize READ pressureMinSize WRITE setPressureMinSize NOTIFY brushSettingsChanged)
     Q_PROPERTY(qreal pressureFirmness READ pressureFirmness WRITE setPressureFirmness NOTIFY brushSettingsChanged)
@@ -240,13 +240,22 @@ private:
     void watchWindow(QQuickWindow *window);
     bool handleTabletEvent(QTabletEvent *event);
     bool ignoreMouseEvent(const QMouseEvent *event) const;
-    void beginStroke(const QPointF &viewPos, PointerKind kind, qreal pressure, bool eraserTip);
-    void continueStroke(const QPointF &viewPos, qreal pressure);
+    // Tilt in degrees (QTabletEvent::xTilt/yTilt), meaningful only with hasTilt.
+    void beginStroke(const QPointF &viewPos, PointerKind kind, qreal pressure, bool eraserTip,
+                     const QPointF &tilt = {}, bool hasTilt = false);
+    void continueStroke(const QPointF &viewPos, qreal pressure, const QPointF &tilt = {}, bool hasTilt = false);
     void endStroke();
+    // Undoes the stroke in progress completely (Escape); nothing enters the history.
+    void cancelStroke();
+    void advanceAirbrush();
+    StrokeSample strokeSample(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt) const;
+    // The settings a new stroke uses: the paint or eraser brush with the current controls applied.
+    BrushSettings strokeSettings(bool erase) const;
     void beginPan(const QPointF &viewPos);
     void continuePan(const QPointF &viewPos);
     void endPan();
-    void applyPendingDabs();
+    // Publishes pixels a stroke changed on its layer (composite, recovery, repaint).
+    void strokePixelsChanged(const QRect &changed, qint64 dabs);
     bool commitPixels(quint64 layerId, TileSnapshot before, const QString &label);
     void pushCommand(UndoCommand command);
     void applyHistoryResult(const UndoCommand::Result &result);
@@ -265,7 +274,6 @@ private:
     SafeSave::LocalCopy makeLocalCopy();
     void onSaveFinished(quint64 id, const QString &path, const SafeSave::Result &result, qint64 workerMs);
     void onExportFinished(quint64 id, const QString &path, const SafeSave::Result &result, qint64 workerMs);
-    void feedSmoothedSamples(bool first);
     void onOpenFinished(quint64 id, const QString &path, const ProjectFile::LoadResult &result, qint64 workerMs);
     void applyOpened(const DocumentData &document, const QString &path, const QUrl &url);
     void setFile(const QString &path, const QUrl &url, const QString &knownName = QString());
@@ -356,14 +364,18 @@ private:
     Gesture m_gesture = Gesture::None;
     PointerKind m_strokeKind = PointerKind::Mouse;
     BrushMode m_strokeMode = BrushMode::Paint;
-    // The stroke pipeline, created with the settings at stroke start:
-    // input samples -> smoother -> spacer (dabs) -> compositor (layer pixels).
-    std::optional<StrokeSmoother> m_smoother;
-    std::optional<StrokeSpacer> m_spacer;
-    std::optional<StrokeCompositor> m_compositor;
-    std::vector<StrokeSample> m_smoothed;
-    std::vector<Dab> m_pendingDabs;
+    // The brushes strokes start from (the controls above are applied on top, see strokeSettings).
+    BrushSettings m_paintBrush;
+    BrushSettings m_eraserBrush;
+    // The stroke in progress, created with the settings at stroke start. Sample times come from
+    // m_strokeClock; while an airbrush is held still, m_airbrushTimer advances it.
+    std::unique_ptr<StrokeEngine> m_engine;
+    QElapsedTimer m_strokeClock;
+    QTimer m_airbrushTimer;
+    quint64 m_strokeCount = 0; // per-stroke random seed
     qreal m_lastPressure = 1.0;
+    QPointF m_lastTilt;
+    bool m_lastHasTilt = false;
     QPointF m_lastPanPos;
     bool m_spaceHeld = false;
 

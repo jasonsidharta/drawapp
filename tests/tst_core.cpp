@@ -1,6 +1,6 @@
 #include "Pressure.h"
 #include "RasterDocument.h"
-#include "StrokeCompositor.h"
+#include "StrokeEngine.h"
 #include "StrokeSmoother.h"
 #include "StrokeSpacer.h"
 #include "TileSnapshot.h"
@@ -50,13 +50,20 @@ std::vector<StrokeSample> sampled(const std::vector<QPointF> &points, int parts)
     return out;
 }
 
-// One complete stroke (smoother -> spacer -> compositor) on image; returns its undo snapshot.
+// One complete stroke of a solid round brush on image (StrokeEngine); returns its undo snapshot.
 TileSnapshot paintStroke(QImage &image, const std::vector<StrokeSample> &input, qreal size, qreal opacity,
                          BrushMode mode = BrushMode::Paint, qreal radius = 0, const QColor &color = Qt::black)
 {
-    StrokeCompositor compositor(color, opacity, mode);
+    BrushSettings settings;
+    settings.size = size;
+    settings.opacity = opacity;
+    settings.blend = mode == BrushMode::Erase ? BrushBlend::Erase : BrushBlend::Paint;
+    StrokeEngine engine(settings, color, 1, radius);
     TileSnapshot before;
-    compositor.addDabs(image, strokeDabs(smoothed(input, radius), size), before);
+    engine.begin(image, input.front(), before);
+    for (size_t i = 1; i < input.size(); ++i)
+        engine.moveTo(image, input[i], before);
+    engine.finish(image, before);
     return before;
 }
 

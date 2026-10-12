@@ -95,6 +95,13 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     connect(&m_io, &ProjectIo::saveFinished, this, &CanvasItem::onSaveFinished);
     connect(&m_io, &ProjectIo::openFinished, this, &CanvasItem::onOpenFinished);
     connect(&m_io, &ProjectIo::exportFinished, this, &CanvasItem::onExportFinished);
+    m_paintBrush.name = QStringLiteral("Solid Round");
+    m_eraserBrush.name = QStringLiteral("Hard Eraser");
+    m_eraserBrush.blend = BrushBlend::Erase;
+    // About one display frame: an airbrush held still keeps spraying at its rate.
+    m_airbrushTimer.setInterval(16);
+    m_airbrushTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_airbrushTimer, &QTimer::timeout, this, &CanvasItem::advanceAirbrush);
     // Constructed with a parent already in a window: ItemSceneChange ran before this class existed.
     watchWindow(window());
 }
@@ -907,6 +914,11 @@ bool CanvasItem::handleTabletEvent(QTabletEvent *event)
     const bool reportsPressure = event->pointingDevice()
         && event->pointingDevice()->capabilities().testFlag(QInputDevice::Capability::Pressure);
     const qreal pressure = effectivePressure(PointerKind::Pen, reportsPressure, event->pressure());
+    // Tilt only when the pen reports it; brushes fall back to the stroke direction otherwise.
+    const bool hasTilt = event->pointingDevice()
+        && event->pointingDevice()->capabilities().testFlag(QInputDevice::Capability::XTilt)
+        && event->pointingDevice()->capabilities().testFlag(QInputDevice::Capability::YTilt);
+    const QPointF tilt(event->xTilt(), event->yTilt());
 
     if (reportsPressure)
         setInputStatus(QStringLiteral("Input: pen, pressure %1").arg(event->pressure(), 0, 'f', 2));
@@ -921,7 +933,7 @@ bool CanvasItem::handleTabletEvent(QTabletEvent *event)
         forceActiveFocus(Qt::MouseFocusReason);
         if (event->button() == Qt::LeftButton && !m_spaceHeld) {
             const bool eraserTip = event->pointerType() == QPointingDevice::PointerType::Eraser;
-            beginStroke(pos, PointerKind::Pen, pressure, eraserTip);
+            beginStroke(pos, PointerKind::Pen, pressure, eraserTip, tilt, hasTilt);
         } else {
             // Barrel button (or Space) with the tip down pans.
             beginPan(pos);
@@ -933,7 +945,7 @@ bool CanvasItem::handleTabletEvent(QTabletEvent *event)
         if (!m_penDown)
             return false; // hover
         if (m_gesture == Gesture::Stroke && m_strokeKind == PointerKind::Pen)
-            continueStroke(pos, pressure);
+            continueStroke(pos, pressure, tilt, hasTilt);
         else if (m_gesture == Gesture::Pan)
             continuePan(pos);
         event->accept();
@@ -943,9 +955,9 @@ bool CanvasItem::handleTabletEvent(QTabletEvent *event)
             return false;
         m_penDown = false;
         if (m_gesture == Gesture::Stroke) {
-            // The lift-off position ends the line; its pressure (often near zero) is not used.
+            // The lift-off position ends the line; its pressure (often near zero) and tilt are not used.
             if (m_strokeKind == PointerKind::Pen)
-                continueStroke(pos, m_lastPressure);
+                continueStroke(pos, m_lastPressure, m_lastTilt, m_lastHasTilt);
             endStroke();
         }
         else if (m_gesture == Gesture::Pan)
@@ -1085,6 +1097,11 @@ void CanvasItem::touchUngrabEvent()
 
 void CanvasItem::keyPressEvent(QKeyEvent *event)
 {
+    if (event->key() == Qt::Key_Escape && m_gesture == Gesture::Stroke) {
+        cancelStroke();
+        event->accept();
+        return;
+    }
     if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
         m_spaceHeld = true;
         setCursor(Qt::OpenHandCursor);
@@ -1105,7 +1122,33 @@ void CanvasItem::keyReleaseEvent(QKeyEvent *event)
     QQuickPaintedItem::keyReleaseEvent(event);
 }
 
-void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pressure, bool eraserTip)
+BrushSettings CanvasItem::strokeSettings(bool erase) const
+{
+    BrushSettings s = erase ? m_eraserBrush : m_paintBrush;
+    s.size = m_brushSize;
+    s.opacity = m_brushOpacity;
+    s.pressureSize.minimum = m_pressureMinSize;
+    s.pressureSize.gamma = PressureResponse::gammaForFirmness(m_pressureFirmness);
+    s.smoothing = m_smoothing;
+    return s;
+}
+
+StrokeSample CanvasItem::strokeSample(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt) const
+{
+    StrokeSample sample;
+    sample.pos = m_view.viewToDoc(viewPos);
+    sample.pressure = pressure;
+    sample.hasTilt = hasTilt;
+    if (hasTilt) {
+        sample.tiltX = tilt.x();
+        sample.tiltY = tilt.y();
+    }
+    sample.timeMs = double(m_strokeClock.nsecsElapsed()) / 1e6;
+    return sample;
+}
+
+void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pressure, bool eraserTip,
+                             const QPointF &tilt, bool hasTilt)
 {
     QElapsedTimer timer;
     if (m_statsEnabled)
@@ -1116,21 +1159,28 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
         emit notice(blocked); // the gesture stays None, so the rest of this press does nothing
         return;
     }
+    const int index = m_document.indexOf(m_document.activeLayerId());
+    if (index < 0)
+        return;
     m_gesture = Gesture::Stroke;
     m_strokeLayerId = m_document.activeLayerId();
     m_strokeKind = kind;
     m_strokeMode = (eraserTip || m_tool == Eraser) ? BrushMode::Erase : BrushMode::Paint;
     // Every brush setting is fixed for the whole stroke here. The smoothing distance is set in view
     // pixels, so it feels the same at every zoom level.
-    m_compositor.emplace(m_brushColor, m_brushOpacity, m_strokeMode);
-    m_spacer.emplace(m_brushSize, StrokeSpacer::DefaultSpacing,
-                     PressureResponse{m_pressureMinSize, PressureResponse::gammaForFirmness(m_pressureFirmness)});
-    m_smoother.emplace(m_smoothing / 100.0 * MaxSmoothingRadius / m_view.zoom());
-    m_smoothed.clear();
+    const BrushSettings settings = strokeSettings(m_strokeMode == BrushMode::Erase);
+    m_engine = std::make_unique<StrokeEngine>(settings, m_brushColor, ++m_strokeCount,
+                                              settings.smoothing / 100.0 * MaxSmoothingRadius / m_view.zoom());
+    m_strokeClock.start();
     m_lastPressure = pressure;
-    m_smoother->begin({m_view.viewToDoc(viewPos), pressure}, m_smoothed);
-    feedSmoothedSamples(true);
-    applyPendingDabs();
+    m_lastTilt = tilt;
+    m_lastHasTilt = hasTilt;
+    QImage &layer = m_document.pixels(index);
+    const qint64 dabs = m_engine->dabCount();
+    const QRect changed = m_engine->begin(layer, strokeSample(viewPos, pressure, tilt, hasTilt), m_strokeBefore);
+    strokePixelsChanged(changed, m_engine->dabCount() - dabs);
+    if (m_engine->usesTime())
+        m_airbrushTimer.start();
 
     if (m_statsEnabled) {
         const qint64 ns = timer.nsecsElapsed();
@@ -1140,19 +1190,24 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
     }
 }
 
-void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure)
+void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt)
 {
-    if (!m_spacer || !m_smoother)
+    if (!m_engine)
+        return;
+    const int index = m_document.indexOf(m_strokeLayerId);
+    if (index < 0)
         return;
     QElapsedTimer timer;
     if (m_statsEnabled)
         timer.start();
 
-    m_smoothed.clear();
     m_lastPressure = pressure;
-    m_smoother->moveTo({m_view.viewToDoc(viewPos), pressure}, m_smoothed);
-    feedSmoothedSamples(false);
-    applyPendingDabs();
+    m_lastTilt = tilt;
+    m_lastHasTilt = hasTilt;
+    QImage &layer = m_document.pixels(index);
+    const qint64 dabs = m_engine->dabCount();
+    const QRect changed = m_engine->moveTo(layer, strokeSample(viewPos, pressure, tilt, hasTilt), m_strokeBefore);
+    strokePixelsChanged(changed, m_engine->dabCount() - dabs);
 
     if (m_statsEnabled) {
         const qint64 ns = timer.nsecsElapsed();
@@ -1160,6 +1215,21 @@ void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure)
         m_statsInputNs += ns;
         m_statsInputMaxNs = std::max(m_statsInputMaxNs, ns);
     }
+}
+
+void CanvasItem::advanceAirbrush()
+{
+    if (!m_engine || m_gesture != Gesture::Stroke) {
+        m_airbrushTimer.stop();
+        return;
+    }
+    const int index = m_document.indexOf(m_strokeLayerId);
+    if (index < 0)
+        return;
+    QImage &layer = m_document.pixels(index);
+    const qint64 dabs = m_engine->dabCount();
+    const QRect changed = m_engine->advanceTime(layer, double(m_strokeClock.nsecsElapsed()) / 1e6, m_strokeBefore);
+    strokePixelsChanged(changed, m_engine->dabCount() - dabs);
 }
 
 void CanvasItem::endStroke()
@@ -1167,36 +1237,37 @@ void CanvasItem::endStroke()
     // However a stroke ends (release, lost grab, a second finger, an undo or save mid-stroke),
     // the smoothed line is completed to the last input position at once and the marks it made
     // become one undo step.
+    m_airbrushTimer.stop();
     if (m_gesture == Gesture::Stroke) {
-        if (m_smoother && m_spacer) {
-            m_smoothed.clear();
-            m_smoother->finish(m_smoothed);
-            feedSmoothedSamples(false);
-            applyPendingDabs();
+        const int index = m_document.indexOf(m_strokeLayerId);
+        if (m_engine && index >= 0) {
+            QImage &layer = m_document.pixels(index);
+            const qint64 dabs = m_engine->dabCount();
+            const QRect changed = m_engine->finish(layer, m_strokeBefore);
+            strokePixelsChanged(changed, m_engine->dabCount() - dabs);
         }
         commitPixels(m_strokeLayerId, std::move(m_strokeBefore),
                      m_strokeMode == BrushMode::Erase ? QStringLiteral("Eraser stroke") : QStringLiteral("Brush stroke"));
         m_strokeBefore = TileSnapshot();
     }
-    m_smoother.reset();
-    m_spacer.reset();
-    m_compositor.reset();
-    m_smoothed.clear();
-    m_pendingDabs.clear();
+    m_engine.reset();
     m_gesture = Gesture::None;
 }
 
-void CanvasItem::feedSmoothedSamples(bool first)
+void CanvasItem::cancelStroke()
 {
-    for (const StrokeSample &sample : m_smoothed) {
-        if (first) {
-            m_spacer->begin(sample, m_pendingDabs);
-            first = false;
-        } else {
-            m_spacer->moveTo(sample, m_pendingDabs);
-        }
-    }
-    m_smoothed.clear();
+    m_airbrushTimer.stop();
+    if (m_gesture != Gesture::Stroke)
+        return;
+    // The snapshot holds every pixel the stroke changed as it was before, so swapping it back
+    // restores the layer exactly.
+    const int index = m_document.indexOf(m_strokeLayerId);
+    if (index >= 0 && !m_strokeBefore.isEmpty())
+        strokePixelsChanged(m_strokeBefore.swapWith(m_document.pixels(index)), 0);
+    m_strokeBefore = TileSnapshot();
+    m_engine.reset();
+    m_gesture = Gesture::None;
+    emit notice(QStringLiteral("Stroke cancelled"));
 }
 
 void CanvasItem::beginPan(const QPointF &viewPos)
@@ -1219,40 +1290,26 @@ void CanvasItem::continuePan(const QPointF &viewPos)
     viewModified();
 }
 
-void CanvasItem::applyPendingDabs()
+void CanvasItem::strokePixelsChanged(const QRect &changed, qint64 dabs)
 {
-    if (m_pendingDabs.empty())
+    m_statsDabs += dabs;
+    if (changed.isEmpty())
         return;
-    m_statsDabs += qint64(m_pendingDabs.size());
-    const int index = m_document.indexOf(m_strokeLayerId);
-    if (index < 0) {
-        m_pendingDabs.clear();
-        return;
-    }
-    // Only the stroke's layer changes; the composite is rebuilt for the changed area only.
-    // The first edit after a snapshot (recovery or save) also copies this layer's shared pixels.
+    // Only the stroke's layer changed; the composite is rebuilt for the changed area only.
     QElapsedTimer firstEditTimer;
     const bool firstAfterSnapshot = m_firstEditAfterSnapshot;
     if (firstAfterSnapshot)
         firstEditTimer.start();
-    if (!m_compositor) {
-        m_pendingDabs.clear();
-        return;
-    }
-    const QRect changed = m_compositor->addDabs(m_document.pixels(index), m_pendingDabs, m_strokeBefore);
-    if (!changed.isEmpty()) {
-        m_document.refreshComposite(changed);
-        markContentChanged();
-    }
+    m_document.refreshComposite(changed);
+    markContentChanged();
     if (firstAfterSnapshot) {
         m_firstEditAfterSnapshot = false;
         if (m_statsEnabled)
-            qInfo().noquote() << QStringLiteral("[snapshot] first edit after a snapshot: %1 ms (stamp + layer copy + "
-                                                "composite refresh, before the repaint)")
+            qInfo().noquote() << QStringLiteral("[snapshot] first edit after a snapshot: %1 ms (composite refresh, "
+                                                "before the repaint; the layer copy is timed by the stroke input)")
                                      .arg(firstEditTimer.nsecsElapsed() / 1e6, 0, 'f', 3);
     }
     updateDocumentRect(changed);
-    m_pendingDabs.clear();
 }
 
 // --- crash recovery ---

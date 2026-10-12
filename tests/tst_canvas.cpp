@@ -1315,6 +1315,27 @@ private slots:
         QCOMPARE(alphaAt(toDoc(QPointF(300, 450))), 51);
     }
 
+    void escapeCancelsTheStrokeInProgress()
+    {
+        mouseStroke({{100, 200}, {400, 200}});
+        const QImage afterFirst = doc().copy();
+        const QString undoLabel = m_canvas->undoText();
+        m_canvas->setBrushOpacity(0.5);
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(100, 300));
+        QTest::mouseMove(m_window.get(), QPoint(250, 200));
+        QTest::mouseMove(m_window.get(), QPoint(400, 300));
+        QVERIFY(doc() != afterFirst);
+        QTest::keyClick(m_window.get(), Qt::Key_Escape);
+        // Everything the stroke changed is restored exactly, and nothing enters the history.
+        QCOMPARE(doc(), afterFirst);
+        QTest::mouseMove(m_window.get(), QPoint(500, 350));
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(500, 350));
+        QCOMPARE(doc(), afterFirst);
+        QCOMPARE(m_canvas->undoText(), undoLabel);
+        m_canvas->undo();
+        QCOMPARE(alphaAt(toDoc(QPointF(250, 200))), 0); // the first stroke was the last step
+    }
+
     void smoothedStrokeEndsWhereThePenIsLifted()
     {
         m_canvas->setSmoothing(100); // the brush trails by up to 40 view pixels
