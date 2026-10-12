@@ -455,6 +455,12 @@ file size of fully painted documents (+20–25 %). Not met: 30 fps transform pre
 The milestone 9 claim "file-open peak 1055 → 29 MiB" compared whole benchmark processes; opening
 alone measured 1033.6 → 7.7 MiB (`m10-open-memory.md`).
 
+After the A/B runs, a transform without a selection stopped keeping a transparent base copy per
+layer (found on the Android emulator, where five 4096² layers then held 868 of 980 MiB). One run,
+not interleaved (`m10-transform-nobase.md`): transform session memory 238 → 136 MiB
+(9 × 2048 × 1536) and 1021 → 583 MiB (7 × 4096²); begin 118 → 70 ms and 476 → 359 ms against the
+milestone 10 medians above.
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera). The

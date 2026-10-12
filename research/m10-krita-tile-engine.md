@@ -148,6 +148,7 @@ marked as such.
   - Adopted: a resolution pyramid of the composite for zoomed-out display.
   - Adopted: reduced-resolution transform previews tied to the view's resolution. Our rule follows
     the zoom rather than a fixed 2000 px, because the preview only needs screen resolution.
+    **Not built in milestone 10** (`docs/m10-known-limitations.md`, hypothesis H7 not met).
   - Not adopted: an OpenGL texture canvas. DrawApp draws with QPainter into a `QQuickPaintedItem`,
     and moving to a texture canvas is outside this milestone (`research/m10-rendering-architecture.md`).
 
@@ -175,7 +176,8 @@ marked as such.
   tile engine is format-agnostic, and colour spaces live above it.
 - **Relevance.**
   - Adopted: tiles carry a byte size per pixel, so formats other than 8-bit premultiplied RGBA
-    can be added later without changing the tile engine.
+    can be added later without changing the tile engine. **Not built in milestone 10:**
+    `TiledImage` holds premultiplied ARGB32 only.
   - **Not adopted in milestone 10:** DrawApp selections stay a dense 8-bit mask the size of the
     document. On a 16 384² canvas that is 256 MiB, counted by the budget
     (`docs/m10-known-limitations.md`).
@@ -198,7 +200,8 @@ marked as such.
   - sparse tiles;
   - COW;
   - budgeted allocation with refusal instead of swapping;
-  - a display pyramid and reduced-resolution previews.
+  - a display pyramid and reduced-resolution previews (the pyramid was built; the previews were
+    not).
 
   Swapping and multithreaded painting are deliberately left out (see the hypotheses document for
   the reasons and the measurements that would change that).

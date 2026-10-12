@@ -158,10 +158,25 @@ on the offscreen platform), Android at runtime.
 | Physical pen, palm rejection, tablet performance | **Not done** (no hardware) | milestone 7 |
 | Krita and PhotoCraft comparison | **Not run** (not installed / no Rust toolchain); manual procedure written | `docs/milestone9-performance.md` |
 
-## Milestone 10: sparse tiled storage, memory budget and asynchronous rendering (in progress)
+## Milestone 10: sparse tiled storage, memory budget and asynchronous rendering (done, with gaps)
 
-Plan and order in the milestone 10 specification; research in `research/m10-*.md`. Done so far
-(local commits): baseline reproduced; research; `MemoryBudget` and `TiledImage` (64-pixel
+Report: `docs/milestone10-final-report.md`. All 15 completion criteria met; gaps below.
+
+| Item | Status | Evidence |
+|---|---|---|
+| Sparse 64 × 64 copy-on-write tiles for layers, composite, undo, transforms, clipboard, recovery | Done | `tst_tiles`, `docs/m10-tile-storage.md` |
+| Memory budget replacing the 512 MiB limit; eviction; device-memory guard; notices and questions | Done | `docs/m10-memory-budget.md`, `docs/m10-undo-architecture.md` |
+| Background Apply with progress, Stop, generations, atomic commit | Done (implicit applies still on the UI thread; commit 90–120 ms at 7 × 4096²) | `docs/m10-async-transforms.md` |
+| Brushes unchanged on tiles | Done (identical pixels, 16 seam goldens) | `tst_brushengine` |
+| Project format 3; formats 1 and 2 read; milestone 1 and 9 fixtures identical; fuzzing | Done | `docs/m10-file-compatibility.md` |
+| Windows tests | Done: 10 suites, 424 results, 0 failures; UBSan build passes | `docs/m10-test-results.md` |
+| ASan, TSan | **Not run** (not in the MinGW toolchain) | same |
+| Android | Done on the emulator (x86_64, `adb` input); four defects found and fixed; arm64 built, not run | BUILD.md |
+| Reduced-resolution transform preview, 30 fps at 7 × 4096² | **Not done** | `docs/m10-known-limitations.md` |
+| Comparison with Krita and others | **Not run** (not installed); procedure written | `docs/m10-comparison-checklist.md` |
+| Hands-on artist use, pen hardware, physical devices | **Not done** | milestone 7 list below |
+
+History of the work (local commits): baseline reproduced; research; `MemoryBudget` and `TiledImage` (64-pixel
 copy-on-write tiles, chosen by measurement); layers, composite, brushes, undo records, selection
 edits, transforms, clipboard and recovery snapshots on tiled storage; project format 3 (sparse
 tiles; versions 1 and 2 still read); a view pyramid for zoomed-out views; Apply on a worker thread
@@ -170,8 +185,12 @@ memory limit, eviction under pressure, confirmation before non-undoable actions)
 report and refusal messages; compatibility with files written by milestones 1 and 9, recovery
 and fuzzing (`docs/m10-file-compatibility.md`); benchmarks of every workload against milestone 9
 (`docs/m10-performance.md`), a device-memory guard, New canvas up to 16384², fifteen automated
-workflows. Not done: a reduced-resolution transform preview. Remaining: sanitizer runs, Android
-validation and the final report.
+workflows; UndefinedBehaviorSanitizer run; Android emulator validation (which found and fixed four
+defects, including a transform that held 868 of 980 MiB); the final report.
+
+Next (report section P): hardware validation, ASan/TSan with clang or MSVC, a reduced-resolution
+transform preview with a lighter transform source, a commit under 100 ms, sparse selection masks,
+the external comparison.
 
 ## Milestone 7: hardware validation (outstanding: no pen hardware yet)
 

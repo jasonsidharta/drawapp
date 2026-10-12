@@ -17,7 +17,10 @@ Code: `src/core/TransformApply.h/.cpp`, `src/core/TransformSession.*` (render wi
   closes it, Apply tries again.
 - **Implicit applies** (switching tools with a transform open) still apply at once; if a
   background Apply is running they wait for its result first.
-- **Out of memory** on the worker: nothing changes, a notice says so, the preview stays open.
+- **Out of memory** on the worker: nothing changes, a notice says so and why (the limit, or the
+  device's free memory), the preview stays open.
+- **On Android** (emulator only, `BUILD.md`): progress and Stop shown for five 4096² layers; Stop
+  kept the drawing and the history; Home during Apply, then return: the result was committed.
 - **Cannot be undone**: if the undo record would be larger than the whole undo history, Apply asks
   first (`docs/m10-undo-architecture.md`).
 
@@ -27,8 +30,8 @@ Code: `src/core/TransformApply.h/.cpp`, `src/core/TransformSession.*` (render wi
    reservation), a copy of each layer (shares its tiles), each layer's version, the changed
    rectangle. The UI thread's evictors are asked for room for the new tiles.
 2. On the worker (`TransformApply::run`): for each layer, the result starts as the copy of the
-   layer; `TransformSession::render` writes the changed area band by band (four tile rows, rows
-   of each band in parallel on the transform row pool), copying each touched tile first because
+   layer; `TransformSession::render` writes the changed area band by band (sixteen tile rows, so
+   the row pool uses every thread; rows of each band in parallel), copying each touched tile first because
    it is shared with the live layer. The cancel flag is checked between bands and before each
    layer; progress counts rows.
 3. Delivery: the result is stored under a mutex and a queued call reaches the UI thread. It is

@@ -76,7 +76,8 @@ and `m10-gegl-skia-comparison.md`. What was actually built, and how it measured,
   over the source rectangle.
 - Previews write into preview `TiledImage`s that share untouched tiles with the layers.
   Interactive drags render at the view's pyramid level (as Krita's LoD preview); full resolution
-  is rendered after the drag.
+  is rendered after the drag. *(Not built: drags still render at full resolution over the changed
+  area; `docs/m10-known-limitations.md`.)*
 - Apply runs on a worker (`research/m10-concurrency-design.md`). It produces new layer images
   that share unchanged tiles with the old ones. Commit swaps pointers on the UI thread and records
   one undo command whose snapshot holds the old tiles.
@@ -92,6 +93,6 @@ and `m10-gegl-skia-comparison.md`. What was actually built, and how it measured,
 - GPU canvas or compositor (no measured need: `m10-performance-hypotheses.md`).
 - Swapping to disk.
 - Tiled selection masks.
-- Pixel formats other than 8-bit premultiplied ARGB. The tile carries bytes per pixel so they can
-  be added.
+- Pixel formats other than 8-bit premultiplied ARGB. (The plan was for the tile to carry bytes
+  per pixel so they could be added; as built, `TiledImage` is ARGB32 only.)
 - Layer offsets or infinite canvases.

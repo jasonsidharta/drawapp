@@ -26,13 +26,34 @@ is actually allocated:
 - Evictors run only on the thread that registered them (the UI thread), so a worker never frees
   memory the UI thread is using. A background Apply asks the UI thread's evictors for room before
   it starts.
+- A request **larger than the whole limit** is refused at once, without evicting anything (giving
+  up caches and undo steps for an allocation that fails anyway would only lose them). The undo
+  history gives up steps only when that can cover the shortfall (found on the Android emulator,
+  `tst_canvas::hopelessRequestsKeepTheUndoHistory`).
 - The layer count is fixed at 64 at any canvas size; canvases are still at most 16384 per side.
+
+## The device-memory guard
+
+The limit alone did not prevent paging: with other programs holding most of the RAM (0.9 GB free),
+an 8192² × 10 save took 63 minutes although DrawApp was within its own limit
+(`docs/m10-performance.md`). So the budget also checks the device:
+
+- **Floor**: the larger of 256 MiB and a 32nd of physical memory must stay available
+  (`MemoryBudget::physicalFloor`; `DRAWAPP_MEMORY_FLOOR_MB` overrides it, used by `ctest` so the
+  tests do not depend on what else runs).
+- **Available memory** is read every 64 MiB of growth (a system call per tile would cost too
+  much): `GlobalMemoryStatusEx` on Windows, `MemAvailable` from `/proc/meminfo` on Linux and
+  Android. (MemFree was used first; on the emulator it read 325 MiB with 1980 MiB actually
+  available and refused ordinary work.)
+- Below the floor, the evictors are asked for the shortfall, the device is checked again, and the
+  request is refused if it is still low. Messages then say "the device's free memory, N MiB left"
+  instead of "the memory limit of N MiB" (`MemoryBudget::shortageText`).
 
 ## What the artist sees
 
 - **Memory usage** (File menu): the limit, use by category, the undo history and the peak. It
-  counts pixel data only; the program itself, fonts and the window need more (about 75 MiB
-  private at start-up, `docs/m10-performance.md`).
+  counts pixel data only; the program itself, fonts and the window need more (about 56 MiB
+  private at start-up on Windows, `docs/m10-performance.md`).
 - A **notice** when old undo steps were given up to make room, when a stroke was taken back,
   when an export or a transform does not fit, and when the view could not be fully updated.
 - A **question** before an action whose undo record would not fit in the undo history (Apply,
