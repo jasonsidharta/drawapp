@@ -945,6 +945,7 @@ bool CanvasItem::eventFilter(QObject *watched, QEvent *event)
 bool CanvasItem::handleTabletEvent(QTabletEvent *event)
 {
     m_sincePenEvent.start();
+    m_pointerModifiers = event->modifiers();
     const QPointF pos = mapFromScene(event->scenePosition());
     const bool reportsPressure = event->pointingDevice()
         && event->pointingDevice()->capabilities().testFlag(QInputDevice::Capability::Pressure);
@@ -1013,6 +1014,7 @@ bool CanvasItem::ignoreMouseEvent(const QMouseEvent *event) const
 
 void CanvasItem::mousePressEvent(QMouseEvent *event)
 {
+    m_pointerModifiers = event->modifiers();
     if (ignoreMouseEvent(event) || m_gesture != Gesture::None) {
         event->accept();
         return;
@@ -1028,6 +1030,7 @@ void CanvasItem::mousePressEvent(QMouseEvent *event)
 
 void CanvasItem::mouseMoveEvent(QMouseEvent *event)
 {
+    m_pointerModifiers = event->modifiers();
     if (ignoreMouseEvent(event))
         return;
     if (m_gesture == Gesture::Stroke && m_strokeKind == PointerKind::Mouse)
@@ -1072,6 +1075,7 @@ void CanvasItem::wheelEvent(QWheelEvent *event)
 
 void CanvasItem::touchEvent(QTouchEvent *event)
 {
+    m_pointerModifiers = event->modifiers();
     QList<QEventPoint> active;
     for (const QEventPoint &point : event->points()) {
         if (point.state() != QEventPoint::State::Released)

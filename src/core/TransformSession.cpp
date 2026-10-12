@@ -405,12 +405,12 @@ QPointF TransformSession::localHandle(Handle handle) const
     }
 }
 
-void TransformSession::dragScaleHandle(Handle handle, const QPointF &pointer, bool keepAspect)
+void TransformSession::dragScaleHandle(Handle handle, const QPointF &pointer, bool keepAspect, bool fromCenter)
 {
     if (handle < Handle::TopLeft || !std::isfinite(pointer.x()) || !std::isfinite(pointer.y()))
         return;
     const QPointF c0 = QRectF(m_sourceRect).center();
-    const QPointF lh = localHandle(handle), la = -lh;
+    const QPointF lh = localHandle(handle), la = fromCenter ? QPointF() : -lh;
     const QPointF anchorDoc = mapToDocument(c0 + la);
     const double a = m_rotation * Pi / 180.0, c = std::cos(a), s = std::sin(a);
     const QPointF v = pointer - anchorDoc;
@@ -482,7 +482,10 @@ TransformSession::Handle TransformSession::hitTest(const QPointF &pos, double to
     for (Handle h : {Handle::Top, Handle::Right, Handle::Bottom, Handle::Left})
         if (near(handlePosition(h, knobDistance)))
             return h;
-    if (near(pivot()))
+    // The pivot's own target is small, and smaller on small boxes, so dragging from the middle of
+    // a small selection moves it instead of grabbing the pivot.
+    const double minSide = std::min(width(), height());
+    if (std::hypot(pos.x() - pivot().x(), pos.y() - pivot().y()) <= std::min(tolerance * 0.45, minSide * 0.15))
         return Handle::Pivot;
     if (quad().containsPoint(pos, Qt::OddEvenFill))
         return Handle::Move;

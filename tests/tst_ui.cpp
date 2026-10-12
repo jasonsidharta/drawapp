@@ -10,6 +10,8 @@
 #include "ProjectFile.h"
 #include "RasterDocument.h"
 #include "RecoveryManager.h"
+#include "Selection.h"
+#include "TransformSession.h"
 
 #include <QDir>
 #include <QScopeGuard>
@@ -465,6 +467,253 @@ private slots:
         snap("brush_panel_narrow");
         m_window->resize(wideSize);
         QTRY_VERIFY(panel->width() > 600);
+    }
+
+private:
+    // --- milestone 8: the artist tasks through the real UI (helpers, not tests) ---
+
+    // Samples along an ellipse (document coordinates), 8 ms apart, pressure rising and falling.
+    static std::vector<StrokeSample> ring(QPointF c, qreal rx, qreal ry, qreal from = 0, qreal to = 2 * M_PI, int n = 90)
+    {
+        std::vector<StrokeSample> out;
+        for (int i = 0; i <= n; ++i) {
+            const qreal a = from + (to - from) * i / n;
+            StrokeSample s;
+            s.pos = c + QPointF(rx * std::cos(a), ry * std::sin(a));
+            s.pressure = 0.55 + 0.45 * std::sin(M_PI * i / n);
+            s.timeMs = i * 8.0;
+            out.push_back(s);
+        }
+        return out;
+    }
+
+    static std::vector<StrokeSample> segment(QPointF a, QPointF b, int n = 30)
+    {
+        std::vector<StrokeSample> out;
+        for (int i = 0; i <= n; ++i) {
+            StrokeSample s;
+            s.pos = a + (b - a) * (qreal(i) / n);
+            s.pressure = 0.6 + 0.4 * std::sin(M_PI * i / n);
+            s.timeMs = i * 8.0;
+            out.push_back(s);
+        }
+        return out;
+    }
+
+    void paintWith(const char *preset, QColor color, const std::vector<StrokeSample> &samples, int size = 0)
+    {
+        QVERIFY(m_canvas->brushes()->select(QString::fromLatin1(preset)));
+        if (size)
+            m_canvas->setBrushSize(size);
+        m_canvas->setBrushColor(color);
+        QVERIFY(m_canvas->drawStroke(samples));
+    }
+
+    // A small character illustration: colour and shading layers under clean ink.
+    void drawCharacter()
+    {
+        m_canvas->newDocument();
+        renameActive("Colour");
+        paintWith("builtin.solid-round", QColor(245, 214, 186), ring({700, 520}, 70, 60), 230); // face
+        paintWith("builtin.solid-round", QColor(70, 110, 170), segment({620, 820}, {780, 820}), 200); // body
+        paintWith("builtin.solid-round", QColor(245, 214, 186), ring({1180, 860}, 22, 18), 110); // hand
+        paintWith("builtin.textured-paint", QColor(90, 55, 35), ring({700, 430}, 150, 70, M_PI, 2 * M_PI), 60); // hair
+        click("addLayerButton");
+        renameActive("Ink");
+        paintWith("builtin.clean-ink", QColor(25, 25, 35), ring({700, 520}, 180, 170), 9);
+        paintWith("builtin.clean-ink", QColor(25, 25, 35), ring({640, 500}, 22, 16), 7);   // left eye
+        paintWith("builtin.clean-ink", QColor(25, 25, 35), ring({760, 500}, 22, 16), 7);   // right eye
+        paintWith("builtin.solid-round", QColor(25, 25, 35), ring({646, 504}, 6, 6), 10);  // pupils
+        paintWith("builtin.solid-round", QColor(25, 25, 35), ring({766, 504}, 6, 6), 10);
+        paintWith("builtin.clean-ink", QColor(25, 25, 35), ring({700, 600}, 45, 18, 0.2, M_PI - 0.2), 6); // mouth
+        paintWith("builtin.clean-ink", QColor(25, 25, 35), segment({850, 760}, {1120, 840}), 9);       // arm
+        paintWith("builtin.clean-ink", QColor(25, 25, 35), ring({1180, 860}, 60, 50), 8);              // hand
+        for (int f = 0; f < 4; ++f)
+            paintWith("builtin.clean-ink", QColor(25, 25, 35),
+                      segment({1200.0 + f * 12, 815.0 - f * 4}, {1235.0 + f * 16, 760.0 - f * 6}, 12), 6); // fingers
+        paintWith("builtin.sketch-pencil", QColor(60, 60, 70), segment({560, 640}, {600, 700}), 6);   // pencil shading
+        m_canvas->setTool(CanvasItem::Brush);
+        m_canvas->fitToView();
+    }
+
+    void dragScene(QPoint from, QPoint to, int steps = 8, Qt::KeyboardModifiers mods = Qt::NoModifier)
+    {
+        QTest::mousePress(m_window, Qt::LeftButton, mods, from);
+        for (int i = 1; i <= steps; ++i) {
+            const QPoint p = from + (to - from) * i / steps;
+            if (mods == Qt::NoModifier) {
+                QTest::mouseMove(m_window, p);
+            } else {
+                // QTest's moves carry no modifiers; a held key is part of every real move event.
+                QMouseEvent move(QEvent::MouseMove, p, p, m_window->mapToGlobal(p), Qt::NoButton, Qt::LeftButton, mods);
+                QCoreApplication::sendEvent(m_window, &move);
+            }
+        }
+        QTest::mouseRelease(m_window, Qt::LeftButton, mods, to);
+    }
+
+    QPoint handleScene(TransformSession::Handle h)
+    {
+        return docToScene(m_canvas->transformSession().handlePosition(h, 0));
+    }
+
+    void typeInto(const QString &field, const QString &value)
+    {
+        click(field);
+        QTest::keyClick(m_window, Qt::Key_End);
+        for (int i = 0; i < 10; ++i)
+            QTest::keyClick(m_window, Qt::Key_Backspace);
+        for (const QChar ch : value)
+            QTest::keyClick(m_window, ch.toLatin1());
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QTest::qWait(30);
+    }
+
+private slots:
+    void artistTasksWithSelectionsAndTransforms()
+    {
+        drawCharacter();
+        const auto restore = qScopeGuard([&] {
+            if (m_canvas->isTransforming())
+                m_canvas->cancelTransform();
+            m_canvas->deselect();
+            m_canvas->setTool(CanvasItem::Brush);
+            m_canvas->setSelectMode(CanvasItem::Replace);
+            m_canvas->setSelectShape(CanvasItem::RectangleShape);
+            m_canvas->brushes()->select(BrushPresets::defaultPaintId());
+        });
+        snap("m8_0_illustration");
+        const int inkLayer = m_canvas->activeLayerId();
+
+        // 1. Lasso the head and enlarge it proportionally (on the ink layer).
+        click("selectToolButton");
+        click("shapeLasso");
+        {
+            const auto pts = ring({700, 500}, 215, 205, 0, 2 * M_PI, 40);
+            QTest::mousePress(m_window, Qt::LeftButton, Qt::NoModifier, docToScene(pts.front().pos));
+            for (const StrokeSample &s : pts)
+                QTest::mouseMove(m_window, docToScene(s.pos));
+            QTest::mouseRelease(m_window, Qt::LeftButton, Qt::NoModifier, docToScene(pts.back().pos));
+        }
+        QVERIFY(m_canvas->hasSelection());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Select"));
+        snap("m8_1_lasso_head");
+        click("selectTransformButton");
+        QVERIFY(m_canvas->isTransforming());
+        const qreal w0 = m_canvas->transformWidth(), h0 = m_canvas->transformHeight();
+        // Alt: from the centre, so the head grows in place.
+        const QPointF headCentre = m_canvas->transformSession().center();
+        dragScene(handleScene(TransformSession::Handle::BottomRight),
+                  handleScene(TransformSession::Handle::BottomRight) + QPoint(30, 28), 8, Qt::AltModifier);
+        QVERIFY(std::abs(m_canvas->transformSession().center().x() - headCentre.x()) < 1.0);
+        QVERIFY2(m_canvas->transformWidth() > w0 * 1.15, qPrintable(QString::number(m_canvas->transformWidth() / w0)));
+        QVERIFY(std::abs(m_canvas->transformWidth() / m_canvas->transformHeight() - w0 / h0) < 1e-6); // proportional
+        snap("m8_1_head_preview");
+        const QImage inkBefore = m_canvas->document().layer(m_canvas->document().indexOf(inkLayer)).image.copy();
+        click("applyTransformButton");
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
+        QVERIFY(m_canvas->document().layer(m_canvas->document().indexOf(inkLayer)).image != inkBefore);
+
+        // 2. Rotate the hand and move it into position.
+        click("shapeRect");
+        dragScene(docToScene({1100, 740}), docToScene({1270, 930}));
+        click("selectTransformButton");
+        typeInto("transformRotationField", "35");
+        QCOMPARE(m_canvas->transformRotation(), 35.0);
+        QVERIFY(m_canvas->isTransforming()); // Enter in the field confirmed the number, not the transform
+        const QPoint inside = docToScene(m_canvas->transformSession().center() + QPointF(20, 0));
+        dragScene(inside, inside + QPoint(-30, -25));
+        snap("m8_2_hand_rotate_preview");
+        QTest::keyClick(m_window, Qt::Key_Return); // Enter applies
+        QVERIFY(!m_canvas->isTransforming());
+        QTest::qWait(100); // the bar shows the selection buttons again; let it lay out, as a person would
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
+
+        // 3. Add and subtract regions, then shade only inside them (on the colour layer).
+        m_canvas->setActiveLayer(int(m_canvas->document().layer(0).id));
+        click("shapeEllipse");
+        click("modeReplace");
+        dragScene(docToScene({560, 420}), docToScene({700, 640}));
+        click("modeAdd");
+        dragScene(docToScene({680, 420}), docToScene({840, 640}));
+        click("modeSubtract");
+        dragScene(docToScene({660, 470}), docToScene({740, 560}));
+        click("modeReplace");
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Subtract from selection"));
+        const Selection shadeArea = m_canvas->selection();
+        QVERIFY(shadeArea.coverageAt(600, 530) == 255 && shadeArea.coverageAt(800, 530) == 255);
+        QCOMPARE(shadeArea.coverageAt(700, 515), 0); // the subtracted middle
+        const QImage colourBefore = m_canvas->document().layer(0).image.copy();
+        click("brushSettingsButton");
+        click("preset_builtin.soft-airbrush");
+        QMetaObject::invokeMethod(m_window->findChild<QObject *>("brushPopup"), "close");
+        QTRY_VERIFY(!find("brushPanel"));
+        m_canvas->setBrushColor(QColor(200, 120, 110));
+        click("brushToolButton");
+        draw({{520, 520}, {880, 540}, {520, 600}});
+        const QImage colourAfter = m_canvas->document().layer(0).image;
+        QVERIFY(colourAfter != colourBefore);
+        for (int y = 380; y < 700; y += 4)
+            for (int x = 480; x < 900; x += 4)
+                if (shadeArea.coverageAt(x, y) == 0)
+                    QVERIFY2(colourAfter.pixel(x, y) == colourBefore.pixel(x, y), qPrintable(QString("%1,%2").arg(x).arg(y)));
+        click("selectToolButton");
+        snap("m8_3_shade_inside");
+
+        // 4. Copy an eye to a new layer and flip it.
+        m_canvas->setActiveLayer(inkLayer);
+        click("shapeEllipse");
+        const Selection beforeEye = m_canvas->selection();
+        QPointF eye = QPointF(640, 500);
+        // The head was enlarged around its centre: find the left eye's ink near where it was.
+        dragScene(docToScene(eye - QPointF(55, 45)), docToScene(eye + QPointF(55, 45)));
+        QVERIFY(m_canvas->selection() != beforeEye);
+        const int layersBefore = m_canvas->layerCount();
+        click("copyButton");
+        click("pasteButton");
+        QCOMPARE(m_canvas->layerCount(), layersBefore + 1);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Paste"));
+        click("selectTransformButton");
+        click("flipHButton");
+        QVERIFY(m_canvas->transformSession().scaleX() < 0);
+        const QPoint eyeCentre = docToScene(m_canvas->transformSession().center());
+        dragScene(eyeCentre, eyeCentre + docToScene(QPointF(1300, 0)) - docToScene(QPointF(1100, 0)));
+        snap("m8_4_eye_flip_preview");
+        click("applyTransformButton");
+        QCOMPARE(m_canvas->layerCount(), layersBefore + 1);
+        const QImage beforeTask5 = m_canvas->document().composite().copy();
+
+        // 5. Cancel a transform: nothing changes.
+        const int steps = m_canvas->history().undoCount();
+        click("selectTransformButton");
+        QVERIFY(m_canvas->isTransforming());
+        dragScene(handleScene(TransformSession::Handle::TopLeft), handleScene(TransformSession::Handle::TopLeft) - QPoint(30, 30));
+        QVERIFY(m_canvas->displayedComposite() != beforeTask5);
+        click("cancelTransformButton");
+        QCOMPARE(m_canvas->document().composite(), beforeTask5);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+
+        // 6. Undo and redo the applied transform.
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
+        click("undoButton");
+        QVERIFY(m_canvas->document().composite() != beforeTask5);
+        click("redoButton");
+        QCOMPARE(m_canvas->document().composite(), beforeTask5);
+        QCOMPARE(m_canvas->layerCount(), layersBefore + 1);
+        snap("m8_6_final");
+
+        // 7. Save and reopen.
+        QTemporaryDir dir;
+        const QString path = dir.filePath("character.drawapp");
+        QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(path)); }, true), QString());
+        const QImage saved = m_canvas->document().composite().copy();
+        const int layers = m_canvas->layerCount();
+        m_canvas->newDocument();
+        QCOMPARE(waitFor([&] { return m_canvas->openFile(QUrl::fromLocalFile(path)); }, false), QString());
+        QCOMPARE(m_canvas->document().composite(), saved);
+        QCOMPARE(m_canvas->layerCount(), layers);
+        QVERIFY(!m_canvas->hasSelection()); // selections are not saved
     }
 
     void overwriteOfAProviderDocumentIsConfirmed()

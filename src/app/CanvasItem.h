@@ -480,6 +480,7 @@ private:
     QTimer m_airbrushTimer;
     quint64 m_strokeCount = 0; // per-stroke random seed
     PointerTask m_pointerTask = PointerTask::Paint;
+    Qt::KeyboardModifiers m_pointerModifiers; // from the latest pointer event
 
     // --- selection ---
     SelectShape m_selectShape = RectangleShape;

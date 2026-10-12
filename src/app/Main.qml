@@ -42,6 +42,8 @@ ApplicationWindow {
 
     // Runs action now, or after the user saves or discards unsaved changes. Cancel drops it.
     function whenChangesHandled(action) {
+        if (transformBlocks())
+            return
         if (canvas.fileBusy) {
             showNotice(canvas.fileBusyText + " Try again when it has finished.")
             return
@@ -66,7 +68,23 @@ ApplicationWindow {
     }
 
     // Saves to the current file, or asks for one.
+    // A transform preview is not part of the document: file actions wait for Apply or Cancel.
+    function transformBlocks() {
+        if (!canvas.transforming)
+            return false
+        showNotice("Apply or cancel the transform first (Enter applies, Esc cancels).")
+        return true
+    }
+
+    // Runs a clipboard or selection action and shows why it did nothing, if it did nothing.
+    function runEdit(result) {
+        if (result)
+            showNotice(result)
+    }
+
     function saveDocument(then) {
+        if (transformBlocks())
+            return
         if (canvas.hasFile)
             startSave(() => canvas.saveFile(), then)
         else
@@ -74,6 +92,8 @@ ApplicationWindow {
     }
 
     function saveAsDocument(then) {
+        if (transformBlocks())
+            return
         if (canvas.fileBusy) {
             showNotice(canvas.fileBusyText + " Try again when it has finished.")
             return
@@ -186,7 +206,27 @@ ApplicationWindow {
                     MenuItem { text: "Save   (Ctrl+S)"; enabled: !canvas.opening; onTriggered: window.saveDocument(null) }
                     MenuItem { text: "Save As…   (Ctrl+Shift+S)"; enabled: !canvas.fileBusy; onTriggered: window.saveAsDocument(null) }
                     MenuSeparator {}
-                    MenuItem { text: "Export PNG…   (Ctrl+Shift+E)"; enabled: !canvas.fileBusy; onTriggered: exportDialog.open() }
+                    MenuItem { text: "Export PNG…   (Ctrl+Shift+E)"; enabled: !canvas.fileBusy; onTriggered: { if (!window.transformBlocks()) exportDialog.open() } }
+                }
+            }
+            ToolButton {
+                objectName: "editMenuButton"
+                text: "Edit"
+                onClicked: editMenu.open()
+                Menu {
+                    id: editMenu
+                    y: parent.height
+                    MenuItem { text: "Cut   (Ctrl+X)"; enabled: !canvas.opening; onTriggered: window.runEdit(canvas.cutSelection()) }
+                    MenuItem { text: "Copy   (Ctrl+C)"; enabled: !canvas.opening; onTriggered: window.runEdit(canvas.copySelection()) }
+                    MenuItem { text: "Paste as new layer   (Ctrl+V)"; enabled: canvas.canPaste && !canvas.opening; onTriggered: window.runEdit(canvas.paste()) }
+                    MenuItem { text: "Clear selected pixels   (Delete)"; enabled: !canvas.opening; onTriggered: canvas.clearSelected() }
+                    MenuSeparator {}
+                    MenuItem { text: "Select all   (Ctrl+A)"; onTriggered: canvas.selectAll() }
+                    MenuItem { text: "Deselect   (Ctrl+Shift+A)"; enabled: canvas.hasSelection; onTriggered: canvas.deselect() }
+                    MenuItem { text: "Reselect   (Ctrl+Shift+D)"; enabled: canvas.canReselect; onTriggered: canvas.reselect() }
+                    MenuItem { text: "Invert selection   (Ctrl+Shift+I)"; enabled: canvas.hasSelection; onTriggered: canvas.invertSelection() }
+                    MenuSeparator {}
+                    MenuItem { text: "Transform   (Ctrl+T)"; enabled: !canvas.transforming && !canvas.opening; onTriggered: canvas.tool = CanvasItem.Transform }
                 }
             }
             ToolButton {
@@ -211,6 +251,7 @@ ApplicationWindow {
             ButtonGroup { id: toolGroup }
 
             ToolButton {
+                objectName: "brushToolButton"
                 text: "Brush"
                 checkable: true
                 checked: canvas.tool === CanvasItem.Brush
@@ -227,6 +268,26 @@ ApplicationWindow {
                 onClicked: canvas.tool = CanvasItem.Eraser
                 ToolTip.visible: hovered
                 ToolTip.text: "Eraser (E)"
+            }
+            ToolButton {
+                objectName: "selectToolButton"
+                text: "Select"
+                checkable: true
+                checked: canvas.tool === CanvasItem.Select
+                ButtonGroup.group: toolGroup
+                onClicked: canvas.tool = CanvasItem.Select
+                ToolTip.visible: hovered
+                ToolTip.text: "Select: rectangle, ellipse or lasso (M). Shift adds, Alt subtracts"
+            }
+            ToolButton {
+                objectName: "transformToolButton"
+                text: "Transform"
+                checkable: true
+                checked: canvas.tool === CanvasItem.Transform
+                ButtonGroup.group: toolGroup
+                onClicked: canvas.tool = CanvasItem.Transform
+                ToolTip.visible: hovered
+                ToolTip.text: "Move, scale, rotate or flip the selection or the layer (Ctrl+T)"
             }
 
             ToolSeparator {}
@@ -425,6 +486,152 @@ ApplicationWindow {
                     noticeTimer.restart()
                 }
                 onLayersChanged: window.syncOpacitySlider()
+            }
+
+            Pane {
+                id: contextBar
+                objectName: "contextBar"
+                visible: canvas.tool === CanvasItem.Select || canvas.transforming
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottomMargin: 10
+                // As wide as the visible groups need, wrapping onto more lines on narrow screens.
+                readonly property real naturalWidth: {
+                    let w = 0
+                    for (const g of [shapeRow, modeRow, selectionRow, clipboardRow, numbersRow, adjustRow, applyRow])
+                        if (g.visible)
+                            w += g.implicitWidth + contextFlow.spacing
+                    return w
+                }
+                width: Math.min(parent.width - 16, naturalWidth + leftPadding + rightPadding)
+                padding: 6
+                background: Rectangle {
+                    radius: 8
+                    color: "#f2f4f4f4"
+                    border.color: "#a0a0a0"
+                }
+
+                // Touch-sized (40 px tall) but only as wide as the text.
+                component BarButton: Button {
+                    implicitHeight: 40
+                    implicitWidth: Math.max(44, contentItem.implicitWidth + 20)
+                    leftPadding: 10
+                    rightPadding: 10
+                    focusPolicy: Qt.NoFocus // keeps Enter and Escape with the canvas
+                }
+
+                // A number field that applies on Enter or when it loses focus.
+                component NumberField: TextField {
+                    property string key
+                    property real value
+                    property int decimals: 0
+                    implicitWidth: 64
+                    implicitHeight: 40
+                    horizontalAlignment: TextInput.AlignRight
+                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                    validator: DoubleValidator { notation: DoubleValidator.StandardNotation }
+                    text: activeFocus ? text : value.toFixed(decimals)
+                    onEditingFinished: {
+                        const v = Number(text.replace(",", "."))
+                        if (!isNaN(v))
+                            canvas.setTransformValue(key, v)
+                        text = Qt.binding(() => activeFocus ? text : value.toFixed(decimals))
+                        canvas.forceActiveFocus()
+                    }
+                }
+
+                Flow {
+                    id: contextFlow
+                    width: contextBar.availableWidth
+                    spacing: 8
+
+                    ButtonGroup { id: shapeGroup }
+                    ButtonGroup { id: modeGroup }
+
+                    Row {
+                        id: shapeRow
+                        visible: !canvas.transforming
+                        spacing: 2
+                        BarButton { objectName: "shapeRect"; text: "Rectangle"; checkable: true; ButtonGroup.group: shapeGroup
+                            checked: canvas.selectShape === CanvasItem.RectangleShape; onClicked: canvas.selectShape = CanvasItem.RectangleShape }
+                        BarButton { objectName: "shapeEllipse"; text: "Ellipse"; checkable: true; ButtonGroup.group: shapeGroup
+                            checked: canvas.selectShape === CanvasItem.EllipseShape; onClicked: canvas.selectShape = CanvasItem.EllipseShape }
+                        BarButton { objectName: "shapeLasso"; text: "Lasso"; checkable: true; ButtonGroup.group: shapeGroup
+                            checked: canvas.selectShape === CanvasItem.LassoShape; onClicked: canvas.selectShape = CanvasItem.LassoShape }
+                    }
+                    Row {
+                        id: modeRow
+                        visible: !canvas.transforming
+                        spacing: 2
+                        BarButton { objectName: "modeReplace"; text: "New"; checkable: true; ButtonGroup.group: modeGroup
+                            checked: canvas.selectMode === CanvasItem.Replace; onClicked: canvas.selectMode = CanvasItem.Replace
+                            ToolTip.visible: hovered; ToolTip.text: "Replace the selection" }
+                        BarButton { objectName: "modeAdd"; text: "Add"; checkable: true; ButtonGroup.group: modeGroup
+                            checked: canvas.selectMode === CanvasItem.Add; onClicked: canvas.selectMode = CanvasItem.Add
+                            ToolTip.visible: hovered; ToolTip.text: "Add to the selection (or hold Shift)" }
+                        BarButton { objectName: "modeSubtract"; text: "Subtract"; checkable: true; ButtonGroup.group: modeGroup
+                            checked: canvas.selectMode === CanvasItem.Subtract; onClicked: canvas.selectMode = CanvasItem.Subtract
+                            ToolTip.visible: hovered; ToolTip.text: "Subtract from the selection (or hold Alt)" }
+                        BarButton { objectName: "modeIntersect"; text: "Intersect"; checkable: true; ButtonGroup.group: modeGroup
+                            checked: canvas.selectMode === CanvasItem.Intersect; onClicked: canvas.selectMode = CanvasItem.Intersect
+                            ToolTip.visible: hovered; ToolTip.text: "Keep only the overlap (or hold Shift+Alt)" }
+                    }
+                    Row {
+                        id: selectionRow
+                        visible: !canvas.transforming
+                        spacing: 2
+                        BarButton { objectName: "selectAllButton"; text: "All"; onClicked: canvas.selectAll() }
+                        BarButton { objectName: "deselectButton"; text: "None"; enabled: canvas.hasSelection; onClicked: canvas.deselect() }
+                        BarButton { objectName: "invertButton"; text: "Invert"; enabled: canvas.hasSelection; onClicked: canvas.invertSelection() }
+                        BarButton { objectName: "reselectButton"; text: "Reselect"; enabled: canvas.canReselect; onClicked: canvas.reselect() }
+                    }
+                    Row {
+                        id: clipboardRow
+                        visible: !canvas.transforming
+                        spacing: 2
+                        BarButton { objectName: "copyButton"; text: "Copy"; onClicked: window.runEdit(canvas.copySelection()) }
+                        BarButton { objectName: "cutButton"; text: "Cut"; onClicked: window.runEdit(canvas.cutSelection()) }
+                        BarButton { objectName: "pasteButton"; text: "Paste"; enabled: canvas.canPaste; onClicked: window.runEdit(canvas.paste()) }
+                        BarButton { objectName: "selectTransformButton"; text: "Transform"; highlighted: true
+                            onClicked: canvas.tool = CanvasItem.Transform }
+                    }
+
+                    Row {
+                        id: numbersRow
+                        visible: canvas.transforming
+                        spacing: 3
+                        Label { text: "X"; anchors.verticalCenter: parent.verticalCenter }
+                        NumberField { objectName: "transformXField"; key: "x"; value: canvas.transformX }
+                        Label { text: "Y"; anchors.verticalCenter: parent.verticalCenter }
+                        NumberField { objectName: "transformYField"; key: "y"; value: canvas.transformY }
+                        Label { text: "W"; anchors.verticalCenter: parent.verticalCenter }
+                        NumberField { objectName: "transformWidthField"; key: "width"; value: canvas.transformWidth }
+                        Label { text: "H"; anchors.verticalCenter: parent.verticalCenter }
+                        NumberField { objectName: "transformHeightField"; key: "height"; value: canvas.transformHeight }
+                        Label { text: "°"; anchors.verticalCenter: parent.verticalCenter }
+                        NumberField { objectName: "transformRotationField"; key: "rotation"; value: canvas.transformRotation; decimals: 1 }
+                    }
+                    Row {
+                        id: adjustRow
+                        visible: canvas.transforming
+                        spacing: 2
+                        BarButton { objectName: "keepAspectButton"; text: "Keep ratio"; checkable: true; checked: canvas.keepAspect
+                            onToggled: canvas.keepAspect = checked
+                            ToolTip.visible: hovered; ToolTip.text: "Handles keep the proportions (Shift inverts while dragging)" }
+                        BarButton { objectName: "flipHButton"; text: "Flip H"; onClicked: canvas.flipTransformHorizontal() }
+                        BarButton { objectName: "flipVButton"; text: "Flip V"; onClicked: canvas.flipTransformVertical() }
+                        BarButton { objectName: "resetTransformButton"; text: "Reset"; onClicked: canvas.resetTransform() }
+                    }
+                    Row {
+                        id: applyRow
+                        visible: canvas.transforming
+                        spacing: 2
+                        BarButton { objectName: "applyTransformButton"; text: "Apply"; highlighted: true; onClicked: canvas.applyTransform()
+                            ToolTip.visible: hovered; ToolTip.text: "Apply (Enter). One undo step. Pixels moved off the canvas are cut off." }
+                        BarButton { objectName: "cancelTransformButton"; text: "Cancel"; onClicked: canvas.cancelTransform()
+                            ToolTip.visible: hovered; ToolTip.text: "Cancel (Esc): the drawing stays exactly as it was" }
+                    }
+                }
             }
 
             Rectangle {
@@ -911,6 +1118,21 @@ ApplicationWindow {
     Shortcut { sequences: ["Ctrl+Shift+N"]; enabled: !canvas.opening; onActivated: canvas.addLayer() }
     Shortcut { sequence: "B"; enabled: !canvas.opening; onActivated: canvas.tool = CanvasItem.Brush }
     Shortcut { sequence: "E"; enabled: !canvas.opening; onActivated: canvas.tool = CanvasItem.Eraser }
+    Shortcut { sequence: "M"; enabled: !canvas.opening; onActivated: canvas.tool = CanvasItem.Select }
+    Shortcut { sequence: "Ctrl+T"; enabled: !canvas.opening && !canvas.transforming; onActivated: canvas.tool = CanvasItem.Transform }
+    // Not while a number field is being edited: there Enter confirms the number.
+    Shortcut { sequences: ["Return", "Enter"]; enabled: canvas.transforming && !(window.activeFocusItem instanceof TextInput)
+        onActivated: canvas.applyTransform() }
+    Shortcut { sequence: "Escape"; enabled: canvas.transforming && !(window.activeFocusItem instanceof TextInput)
+        onActivated: canvas.cancelTransform() }
+    Shortcut { sequences: [StandardKey.SelectAll]; enabled: !canvas.opening; onActivated: canvas.selectAll() }
+    Shortcut { sequences: ["Ctrl+Shift+A", "Ctrl+D"]; enabled: !canvas.opening; onActivated: canvas.deselect() }
+    Shortcut { sequence: "Ctrl+Shift+D"; enabled: !canvas.opening; onActivated: canvas.reselect() }
+    Shortcut { sequence: "Ctrl+Shift+I"; enabled: !canvas.opening; onActivated: canvas.invertSelection() }
+    Shortcut { sequences: [StandardKey.Copy]; enabled: !canvas.opening; onActivated: window.runEdit(canvas.copySelection()) }
+    Shortcut { sequences: [StandardKey.Cut]; enabled: !canvas.opening; onActivated: window.runEdit(canvas.cutSelection()) }
+    Shortcut { sequences: [StandardKey.Paste]; enabled: !canvas.opening; onActivated: window.runEdit(canvas.paste()) }
+    Shortcut { sequences: [StandardKey.Delete, "Backspace"]; enabled: !canvas.opening && !canvas.transforming; onActivated: canvas.clearSelected() }
     Shortcut { sequence: "["; enabled: !canvas.opening; onActivated: canvas.brushSize = Math.max(1, Math.round(canvas.brushSize / 1.2)) }
     Shortcut { sequence: "]"; enabled: !canvas.opening; onActivated: canvas.brushSize = Math.min(256, Math.round(canvas.brushSize * 1.2) + 1) }
     Shortcut { sequences: [StandardKey.ZoomIn, "Ctrl+="]; onActivated: canvas.zoomIn() }

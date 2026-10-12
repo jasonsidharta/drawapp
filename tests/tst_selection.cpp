@@ -401,6 +401,10 @@ private slots:
         QVERIFY(std::abs(stays.x() - anchor.x()) < 1e-9 && std::abs(stays.y() - anchor.y()) < 1e-9);
         t.dragScaleHandle(TransformSession::Handle::Right, QPointF(400, 100), false); // one axis
         QVERIFY(std::abs(t.width() - (400 - 60)) < 1e-6);
+        // From the centre (Alt): the centre stays put and both sides grow.
+        const QPointF centre = t.center();
+        t.dragScaleHandle(TransformSession::Handle::BottomRight, t.handlePosition(TransformSession::Handle::BottomRight, 0) + QPointF(30, 30), true, true);
+        QVERIFY(std::abs(t.center().x() - centre.x()) < 1e-6 && std::abs(t.center().y() - centre.y()) < 1e-6);
         // Dragging past the opposite side stops at one pixel instead of flipping.
         t.dragScaleHandle(TransformSession::Handle::Right, QPointF(-500, 100), false);
         QVERIFY(t.width() >= 1.0 - 1e-9 && t.scaleX() > 0);
@@ -500,6 +504,7 @@ private slots:
         QCOMPARE(t.hitTest(QPointF(150, 181), 8, 30), H::Bottom);
         QCOMPARE(t.hitTest(QPointF(150, 70), 8, 30), H::Rotate); // the knob above the top edge
         QCOMPARE(t.hitTest(QPointF(150, 140), 8, 30), H::Pivot);
+        QCOMPARE(t.hitTest(QPointF(154, 140), 8, 30), H::Move); // the pivot's target is small
         QCOMPARE(t.hitTest(QPointF(120, 160), 8, 30), H::Move);
         QCOMPARE(t.hitTest(QPointF(350, 250), 8, 30), H::Rotate); // outside rotates
     }

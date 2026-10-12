@@ -68,8 +68,9 @@ public:
     // Rotates around the pivot to an absolute angle.
     void setRotation(double degrees);
     // Scales by dragging a handle to pointer (document coordinates); the opposite corner or edge
-    // stays put. keepAspect scales both axes by the same factor, also from edge handles.
-    void dragScaleHandle(Handle handle, const QPointF &pointer, bool keepAspect);
+    // stays put, or with fromCenter the box's centre. keepAspect scales both axes by the same
+    // factor, also from edge handles.
+    void dragScaleHandle(Handle handle, const QPointF &pointer, bool keepAspect, bool fromCenter = false);
     // Sets the box size in pixels around the pivot.
     void setSize(double width, double height);
     void setPivot(const QPointF &docPos);

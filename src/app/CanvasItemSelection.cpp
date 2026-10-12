@@ -204,7 +204,7 @@ void CanvasItem::beginSelectGesture(const QPointF &viewPos)
     m_pointerTask = PointerTask::Select;
     // Shift adds, Alt subtracts, both intersect (when the gesture starts); otherwise the mode
     // chosen in the toolbar (for touch).
-    const Qt::KeyboardModifiers mods = QGuiApplication::keyboardModifiers();
+    const Qt::KeyboardModifiers mods = m_pointerModifiers;
     const bool shift = mods.testFlag(Qt::ShiftModifier), alt = mods.testFlag(Qt::AltModifier);
     m_gestureMode = shift && alt ? SelectionMode::Intersect
                   : shift        ? SelectionMode::Add
@@ -463,7 +463,7 @@ void CanvasItem::continueTransformDrag(const QPointF &viewPos)
 {
     using H = TransformSession::Handle;
     const QPointF doc = m_view.viewToDoc(viewPos);
-    const Qt::KeyboardModifiers mods = QGuiApplication::keyboardModifiers();
+    const Qt::KeyboardModifiers mods = m_pointerModifiers;
     switch (m_dragHandle) {
     case H::None:
         return;
@@ -484,8 +484,9 @@ void CanvasItem::continueTransformDrag(const QPointF &viewPos)
         break;
     }
     default:
-        // Shift inverts the aspect setting for this drag.
-        m_transform.dragScaleHandle(m_dragHandle, doc, m_keepAspect != mods.testFlag(Qt::ShiftModifier));
+        // Shift inverts the aspect setting for this drag; Alt scales from the centre.
+        m_transform.dragScaleHandle(m_dragHandle, doc, m_keepAspect != mods.testFlag(Qt::ShiftModifier),
+                                    mods.testFlag(Qt::AltModifier));
         break;
     }
     updateTransformPreview(TransformSession::Quality::Fast);
