@@ -50,8 +50,8 @@ qint64 availablePhysicalMemory();
 // DrawApp from driving the device into paging (measured: docs/m10-performance.md).
 qint64 physicalFloor();
 void setPhysicalFloorForTesting(qint64 bytes); // <= 0 restores the default; checks at once
-// Why the last refusal happened, for messages: "the memory limit (7870 MiB)" or "the device's
-// free memory (412 MiB left)".
+// Why the last refusal happened, for messages: "the memory limit of 7870 MiB" or "the device's
+// free memory, 412 MiB left".
 QString shortageText();
 
 // Frees memory: called with the number of bytes still wanted (the shortfall, after the evictors

@@ -7,7 +7,9 @@
 #include <QtGlobal>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #if defined(Q_OS_WIN)
@@ -149,9 +151,29 @@ qint64 MemoryBudget::availablePhysicalMemory()
     if (GlobalMemoryStatusEx(&status))
         return qint64(status.ullAvailPhys);
     return -1;
-#elif defined(Q_OS_UNIX) && defined(_SC_AVPHYS_PAGES)
+#elif defined(Q_OS_UNIX)
+    // Linux and Android: MemAvailable counts reclaimable caches; sysconf(_SC_AVPHYS_PAGES) is only
+    // MemFree, which on the Android emulator was 325 MiB with 1980 MiB actually available, so the
+    // guard refused ordinary work.
+    if (FILE *f = std::fopen("/proc/meminfo", "r")) {
+        char line[128];
+        qint64 kb = -1;
+        while (std::fgets(line, sizeof(line), f)) {
+            if (std::strncmp(line, "MemAvailable:", 13) == 0) {
+                kb = std::atoll(line + 13);
+                break;
+            }
+        }
+        std::fclose(f);
+        if (kb >= 0)
+            return kb * 1024;
+    }
+#if defined(_SC_AVPHYS_PAGES)
     const long pages = sysconf(_SC_AVPHYS_PAGES), size = sysconf(_SC_PAGESIZE);
     return pages > 0 && size > 0 ? qint64(pages) * size : -1;
+#else
+    return -1;
+#endif
 #else
     return -1;
 #endif
@@ -180,10 +202,10 @@ QString MemoryBudget::shortageText()
 {
     if (s_lastRefusalSystem.load()) {
         const qint64 available = s_lastAvailable.load();
-        return available >= 0 ? QStringLiteral("the device's free memory (%1 MiB left)").arg(available / (1024 * 1024))
+        return available >= 0 ? QStringLiteral("the device's free memory, %1 MiB left").arg(available / (1024 * 1024))
                               : QStringLiteral("the device's free memory");
     }
-    return QStringLiteral("the memory limit (%1 MiB)").arg(limit() / (1024 * 1024));
+    return QStringLiteral("the memory limit of %1 MiB").arg(limit() / (1024 * 1024));
 }
 
 void MemoryBudget::release(qint64 bytes, Category category)
