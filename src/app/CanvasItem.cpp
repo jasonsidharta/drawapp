@@ -178,6 +178,19 @@ void CanvasItem::setTool(Tool tool)
 {
     if (tool == m_tool)
         return;
+    if (tool == Transform) {
+        // Choosing the tool starts a transform; it ends with Apply or Cancel.
+        const QString why = beginTransform();
+        if (!why.isEmpty()) {
+            emit notice(why);
+            emit toolChanged(); // the buttons go back to the current tool
+        }
+        return;
+    }
+    if (m_transform.isActive())
+        applyTransform(); // switching tools keeps the transform, as most editors do
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
     m_tool = tool;
     m_brushes.setEraserSlot(tool == Eraser);
     emit toolChanged();
@@ -194,6 +207,11 @@ QString CanvasItem::documentTitle() const
 
 void CanvasItem::undo()
 {
+    // Undo during a transform cancels it: the preview was never part of the document.
+    if (m_transform.isActive()) {
+        cancelTransform();
+        return;
+    }
     // An edit in progress is committed first, so undo removes it as a whole.
     if (m_gesture == Gesture::Stroke)
         endStroke();
@@ -204,6 +222,8 @@ void CanvasItem::undo()
 
 void CanvasItem::redo()
 {
+    if (m_transform.isActive())
+        return;
     if (m_gesture == Gesture::Stroke)
         endStroke();
     if (!m_history.canRedo())
@@ -219,7 +239,11 @@ void CanvasItem::applyHistoryResult(const UndoCommand::Result &result)
         m_document.refreshComposite(result.dirty);
         updateDocumentRect(result.dirty);
     }
-    markContentChanged();
+    if (result.selection)
+        selectionUpdated();
+    // Selection-only steps do not change artwork (nothing new for recovery).
+    if (!result.dirty.isEmpty() || result.structure || result.activate)
+        markContentChanged();
     emit historyChanged();
     if (result.structure || result.activate)
         emit layersChanged();
@@ -265,8 +289,7 @@ QVariantList CanvasItem::layers() const
 
 void CanvasItem::setActiveLayer(int id)
 {
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
+    finishPendingEdits();
     if (quint64(id) == m_document.activeLayerId() || m_document.indexOf(quint64(id)) < 0)
         return;
     m_document.setActiveLayer(quint64(id)); // selection only: not an edit, not undoable
@@ -288,8 +311,7 @@ QString CanvasItem::activeLayerBlockReason() const
 
 void CanvasItem::addLayer()
 {
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
+    finishPendingEdits();
     if (m_document.count() >= maxLayers()) {
         emit notice(QStringLiteral("This canvas can have at most %1 layers.").arg(maxLayers()));
         return;
@@ -309,8 +331,7 @@ void CanvasItem::addLayer()
 
 void CanvasItem::duplicateLayer(int id)
 {
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
+    finishPendingEdits();
     const int source = m_document.indexOf(quint64(id));
     if (source < 0)
         return;
@@ -325,7 +346,7 @@ void CanvasItem::duplicateLayer(int id)
     m_document.insertLayer(source + 1, std::move(copy));
     m_document.setActiveLayer(newId);
     m_document.refreshComposite();
-    update();
+    updateAll();
     pushCommand(UndoCommand::layerInserted(newId, source + 1, QStringLiteral("Duplicate layer")));
     markContentChanged();
     emit layersChanged();
@@ -333,8 +354,7 @@ void CanvasItem::duplicateLayer(int id)
 
 void CanvasItem::deleteLayer(int id)
 {
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
+    finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
         return;
@@ -344,7 +364,7 @@ void CanvasItem::deleteLayer(int id)
     }
     LayerData removed = m_document.takeLayer(index); // the layer below becomes active if needed
     m_document.refreshComposite();
-    update();
+    updateAll();
     pushCommand(UndoCommand::layerRemoved(std::move(removed), index, QStringLiteral("Delete layer")));
     markContentChanged();
     emit layersChanged();
@@ -352,14 +372,13 @@ void CanvasItem::deleteLayer(int id)
 
 void CanvasItem::moveLayerUp(int id)
 {
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
+    finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0 || index >= m_document.count() - 1)
         return;
     m_document.moveLayer(index, index + 1);
     m_document.refreshComposite();
-    update();
+    updateAll();
     pushCommand(UndoCommand::moved(quint64(id), index, QStringLiteral("Move layer up")));
     markContentChanged();
     emit layersChanged();
@@ -367,14 +386,13 @@ void CanvasItem::moveLayerUp(int id)
 
 void CanvasItem::moveLayerDown(int id)
 {
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
+    finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index <= 0)
         return;
     m_document.moveLayer(index, index - 1);
     m_document.refreshComposite();
-    update();
+    updateAll();
     pushCommand(UndoCommand::moved(quint64(id), index, QStringLiteral("Move layer down")));
     markContentChanged();
     emit layersChanged();
@@ -382,8 +400,7 @@ void CanvasItem::moveLayerDown(int id)
 
 void CanvasItem::setLayerProperties(int id, const LayerProperties &props, const QString &label)
 {
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
+    finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
         return;
@@ -399,7 +416,7 @@ void CanvasItem::setLayerProperties(int id, const LayerProperties &props, const 
     layer.locked = props.locked;
     if (pixelsChange) {
         m_document.refreshComposite();
-        update();
+        updateAll();
     }
     pushCommand(UndoCommand::properties(quint64(id), before, label));
     markContentChanged();
@@ -438,6 +455,7 @@ void CanvasItem::setLayerLocked(int id, bool locked)
 
 void CanvasItem::previewLayerOpacity(int id, qreal opacity)
 {
+    finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
         return;
@@ -454,12 +472,13 @@ void CanvasItem::previewLayerOpacity(int id, qreal opacity)
         return;
     layer.opacity = opacity;
     m_document.refreshComposite();
-    update();
+    updateAll();
     markContentChanged(); // the layer list is refreshed when the drag is committed
 }
 
 void CanvasItem::commitLayerOpacity(int id, qreal opacity)
 {
+    finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
         return;
@@ -475,28 +494,14 @@ void CanvasItem::commitLayerOpacity(int id, qreal opacity)
     if (wasDragging) {
         // The composite may still show a preview value if the drag ended where it started.
         m_document.refreshComposite();
-        update();
+        updateAll();
         emit layersChanged();
     }
 }
 
 void CanvasItem::clearActiveLayer()
 {
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
-    const QString reason = activeLayerBlockReason();
-    if (!reason.isEmpty()) {
-        emit notice(QString(reason).replace(QStringLiteral("Can't paint"), QStringLiteral("Can't clear")));
-        return;
-    }
-    const int index = m_document.activeIndex();
-    TileSnapshot before;
-    const QRect changed = RasterDocument::clear(m_document.pixels(index), &before);
-    if (commitPixels(m_document.activeLayerId(), std::move(before), QStringLiteral("Clear layer"))) {
-        m_document.refreshComposite(changed);
-        markContentChanged();
-        update();
-    }
+    clearSelected(); // the selected part, or the whole layer without a selection
 }
 
 // --- documents and files ---
@@ -505,22 +510,28 @@ void CanvasItem::replaceDocument(const LayeredDocument &document)
 {
     if (m_gesture == Gesture::Stroke)
         endStroke();
+    // An open transform belongs to the old document: it is dropped (never part of a file).
+    if (m_transform.isActive())
+        cancelTransform();
     m_gesture = Gesture::None;
     m_opacityDragLayerId = 0;
     // The previous document was saved or explicitly discarded: its recovery data goes too.
     discardRecoveryFile();
     m_document = document;
+    m_reselect = Selection();
+    m_selectionOutline = QPainterPath();
     m_history.clear();
     m_savedStateId = m_history.stateId();
     ++m_documentId;
     ++m_contentRevision;
     m_oldestUnrecoveredMs = -1;
     m_view.fit(QSizeF(m_document.size()), size());
-    update();
+    updateAll();
     emit documentChanged();
     emit historyChanged();
     emit viewChanged();
     emit layersChanged();
+    emit selectionChanged();
 }
 
 void CanvasItem::newDocument()
@@ -553,6 +564,8 @@ QString CanvasItem::fileBusyText() const
 
 QString CanvasItem::openFile(const QUrl &url)
 {
+    if (m_transform.isActive())
+        return QStringLiteral("Apply or cancel the transform first (Enter applies, Esc cancels).");
     if (fileBusy())
         return QStringLiteral("Wait until the current save or open has finished.");
     if (m_conflict)
@@ -622,6 +635,8 @@ void CanvasItem::applyOpened(const DocumentData &document, const QString &path, 
 
 QString CanvasItem::saveFile()
 {
+    if (m_transform.isActive())
+        return QStringLiteral("Apply or cancel the transform first (Enter applies, Esc cancels).");
     if (m_filePath.isEmpty())
         return QStringLiteral("Choose a file name first (Save As).");
     return startSave(m_filePath, m_fileUrl);
@@ -629,6 +644,8 @@ QString CanvasItem::saveFile()
 
 QString CanvasItem::saveFileAs(const QUrl &url)
 {
+    if (m_transform.isActive())
+        return QStringLiteral("Apply or cancel the transform first (Enter applies, Esc cancels).");
     QString path = pathFromUrl(url);
     QUrl target = url;
     ensureSuffix(path, target, QString::fromLatin1(ProjectFile::Extension));
@@ -800,6 +817,8 @@ void CanvasItem::onSaveFinished(quint64 id, const QString &path, const SafeSave:
 
 QString CanvasItem::exportPng(const QUrl &url)
 {
+    if (m_transform.isActive())
+        return QStringLiteral("Apply or cancel the transform first (Enter applies, Esc cancels).");
     if (fileBusy() || m_pendingOverwrite)
         return QStringLiteral("Wait until the current file operation has finished.");
     if (m_gesture == Gesture::Stroke)
@@ -868,7 +887,8 @@ void CanvasItem::paint(QPainter *painter)
 
     const QRect exposed = painter->hasClipping() ? painter->clipBoundingRect().toAlignedRect()
                                                  : boundingRect().toAlignedRect();
-    ViewRenderer::render(*painter, m_document.composite(), m_view, exposed);
+    ViewRenderer::render(*painter, displayedComposite(), m_view, exposed);
+    drawOverlays(painter);
 
     if (m_statsEnabled) {
         const qint64 ns = timer.nsecsElapsed();
@@ -1080,8 +1100,12 @@ void CanvasItem::touchEvent(QTouchEvent *event)
         if (m_gesture != Gesture::Pinch) {
             // A second finger turns a one-finger stroke into a view gesture. Marks already
             // made stay and become one undo step.
-            if (m_gesture == Gesture::Stroke)
-                endStroke();
+            if (m_gesture == Gesture::Stroke) {
+                if (m_pointerTask == PointerTask::Select)
+                    abortPointerGesture();
+                else
+                    endStroke();
+            }
             m_gesture = Gesture::Pinch;
         } else {
             m_view.panBy(center - m_lastPinchCenter);
@@ -1114,6 +1138,15 @@ void CanvasItem::keyPressEvent(QKeyEvent *event)
 {
     if (event->key() == Qt::Key_Escape && m_gesture == Gesture::Stroke) {
         cancelStroke();
+        event->accept();
+        return;
+    }
+    if (m_transform.isActive() && (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Return
+                                   || event->key() == Qt::Key_Enter)) {
+        if (event->key() == Qt::Key_Escape)
+            cancelTransform();
+        else
+            applyTransform();
         event->accept();
         return;
     }
@@ -1158,6 +1191,14 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
     if (m_statsEnabled)
         timer.start();
 
+    if (m_tool == Select || m_tool == Transform) {
+        m_strokeKind = kind;
+        if (m_tool == Select)
+            beginSelectGesture(viewPos);
+        else
+            beginTransformDrag(viewPos);
+        return;
+    }
     m_strokeClock.start();
     m_lastPressure = pressure;
     m_lastTilt = tilt;
@@ -1179,10 +1220,17 @@ bool CanvasItem::startStroke(const StrokeSample &sample, PointerKind kind, bool 
         emit notice(blocked); // the gesture stays None, so the rest of this press does nothing
         return false;
     }
+    // Painting goes through the selection; an empty selection allows nothing.
+    const Selection &selected = m_document.selection();
+    if (selected.isEmpty()) {
+        emit notice(QStringLiteral("Nothing is selected, so nothing can be painted. Deselect (Ctrl+Shift+A) to paint everywhere."));
+        return false;
+    }
     const int index = m_document.indexOf(m_document.activeLayerId());
     if (index < 0)
         return false;
     m_gesture = Gesture::Stroke;
+    m_pointerTask = PointerTask::Paint;
     m_strokeLayerId = m_document.activeLayerId();
     m_strokeKind = kind;
     m_strokeMode = erase ? BrushMode::Erase : BrushMode::Paint;
@@ -1192,8 +1240,8 @@ bool CanvasItem::startStroke(const StrokeSample &sample, PointerKind kind, bool 
     m_strokeBlend = settings.blend;
     m_engine = std::make_unique<StrokeEngine>(settings, m_brushColor, ++m_strokeCount,
                                               settings.smoothing / 100.0 * MaxSmoothingRadius / m_view.zoom());
-    if (!m_strokeClip.isNull() && m_strokeClip.size() == m_document.size())
-        m_engine->setClipMask(m_strokeClip);
+    if (selected.isActive())
+        m_engine->setClipMask(selected.mask()); // applied once, when each pixel is composited
     QImage &layer = m_document.pixels(index);
     const qint64 dabs = m_engine->dabCount();
     const QRect changed = m_engine->begin(layer, sample, m_strokeBefore);
@@ -1205,6 +1253,14 @@ bool CanvasItem::startStroke(const StrokeSample &sample, PointerKind kind, bool 
 
 void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt)
 {
+    if (m_gesture == Gesture::Stroke && m_pointerTask == PointerTask::Select) {
+        continueSelectGesture(viewPos);
+        return;
+    }
+    if (m_gesture == Gesture::Stroke && m_pointerTask == PointerTask::Transform) {
+        continueTransformDrag(viewPos);
+        return;
+    }
     if (!m_engine)
         return;
     QElapsedTimer timer;
@@ -1237,7 +1293,7 @@ void CanvasItem::extendStroke(const StrokeSample &sample)
 
 bool CanvasItem::drawStroke(const std::vector<StrokeSample> &samples, bool erase)
 {
-    if (samples.empty() || m_gesture != Gesture::None)
+    if (samples.empty() || m_gesture != Gesture::None || m_transform.isActive())
         return false;
     m_strokeClock.start();
     if (!startStroke(samples.front(), PointerKind::Mouse, erase))
@@ -1246,11 +1302,6 @@ bool CanvasItem::drawStroke(const std::vector<StrokeSample> &samples, bool erase
         extendStroke(samples[i]);
     endStroke();
     return true;
-}
-
-void CanvasItem::setStrokeClipMask(const QImage &mask)
-{
-    m_strokeClip = mask.isNull() ? QImage() : mask.convertToFormat(QImage::Format_Grayscale8);
 }
 
 void CanvasItem::advanceAirbrush()
@@ -1274,6 +1325,15 @@ void CanvasItem::endStroke()
     // the smoothed line is completed to the last input position at once and the marks it made
     // become one undo step.
     m_airbrushTimer.stop();
+    if (m_gesture == Gesture::Stroke && m_pointerTask != PointerTask::Paint) {
+        if (m_pointerTask == PointerTask::Select)
+            finishSelectGesture();
+        else
+            finishTransformDrag();
+        m_pointerTask = PointerTask::Paint;
+        m_gesture = Gesture::None;
+        return;
+    }
     if (m_gesture == Gesture::Stroke) {
         const int index = m_document.indexOf(m_strokeLayerId);
         if (m_engine && index >= 0) {
@@ -1297,6 +1357,10 @@ void CanvasItem::cancelStroke()
     m_airbrushTimer.stop();
     if (m_gesture != Gesture::Stroke)
         return;
+    if (m_pointerTask != PointerTask::Paint) {
+        abortPointerGesture();
+        return;
+    }
     // The snapshot holds every pixel the stroke changed as it was before, so swapping it back
     // restores the layer exactly.
     const int index = m_document.indexOf(m_strokeLayerId);
@@ -1624,7 +1688,7 @@ void CanvasItem::viewModified()
 {
     if (m_gesture != Gesture::Pan)
         setCursor(m_spaceHeld ? Qt::OpenHandCursor : Qt::CrossCursor);
-    update();
+    updateAll();
     emit viewChanged();
 }
 

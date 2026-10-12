@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DocumentData.h"
+#include "Selection.h"
 
 #include <QImage>
 #include <QRect>
@@ -40,8 +41,14 @@ public:
     void refreshComposite(const QRect &rect);
     void refreshComposite() { refreshComposite(m_composite.rect()); }
 
-    // Shallow copy for saving and recovery: images are shared until either side writes.
+    // Shallow copy for saving and recovery: images are shared until either side writes. The
+    // selection is not part of it: selections are not saved in project or recovery files.
     DocumentData snapshot() const;
+
+    // The selection (document space, separate from layer pixels). Changing it never changes
+    // artwork; record a selection undo command when the user changes it.
+    const Selection &selection() const { return m_selection; }
+    void setSelection(const Selection &selection) { m_selection = selection; }
 
     // --- mutations (no history; callers record undo commands) ---
     QImage &pixels(int index) { return m_layers[size_t(index)].image; }
@@ -60,4 +67,5 @@ private:
     quint64 m_activeId = 0;
     quint64 m_nextId = 1;
     QImage m_composite;
+    Selection m_selection;
 };

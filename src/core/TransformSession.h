@@ -1,0 +1,114 @@
+#pragma once
+
+#include "Selection.h"
+
+#include <QImage>
+#include <QPointF>
+#include <QPolygonF>
+#include <QRect>
+#include <vector>
+
+// An interactive affine transform (move, scale, rotate, flip) of one layer's pixels: the selected
+// part when there is a selection, otherwise the whole layer's artwork.
+//
+// begin() caches the source once:
+//   source = layer × selection   (cropped to the selection's bounds, or to the layer's content)
+//   base   = layer × (1 − selection), with complementary rounding so source + base = layer
+// Every preview is rendered from this cache (never from an earlier preview), into a separate
+// image: the document is not touched until the caller applies the result. Colour is resampled
+// premultiplied and clamped to alpha, so transparent pixels cannot leak colour into edges.
+//
+// Geometry: a source point q maps to  center + R(rotation) · S(scaleX, scaleY) · (q − c0),  c0
+// being the source rectangle's centre. Negative scales are flips. The pivot (rotation centre) is
+// attached to the content.
+class TransformSession
+{
+public:
+    enum class Handle {
+        None, Move, Rotate, Pivot,
+        TopLeft, Top, TopRight, Right, BottomRight, Bottom, BottomLeft, Left
+    };
+    enum class Quality { Fast, Final }; // bilinear while dragging; bicubic (Catmull–Rom) for the result
+
+    // Scale limits: at most 32×, and never smaller than one pixel across.
+    static constexpr double MaxScale = 32.0;
+
+    // Starts a transform of layer (premultiplied ARGB32, document size). Returns false, leaving
+    // the session inactive, when there is nothing to transform: an empty selection, or no
+    // selection and a fully transparent layer.
+    bool begin(const QImage &layer, const Selection &selection);
+    void end();
+    bool isActive() const { return !m_sourceRect.isEmpty(); }
+
+    QSize documentSize() const { return m_docSize; }
+    QRect sourceRect() const { return m_sourceRect; }
+    bool hasSelection() const { return m_selection.isActive(); }
+
+    QPointF center() const { return m_center; }
+    double scaleX() const { return m_sx; }
+    double scaleY() const { return m_sy; }
+    double rotation() const { return m_rotation; } // degrees, clockwise on screen
+    QPointF pivot() const;                          // document position of the rotation centre
+    // Size of the transformed box in pixels (always positive).
+    double width() const { return std::abs(m_sx) * m_sourceRect.width(); }
+    double height() const { return std::abs(m_sy) * m_sourceRect.height(); }
+    bool isIdentity() const;
+
+    // The transformed source rectangle: top-left, top-right, bottom-right, bottom-left.
+    QPolygonF quad() const;
+    // Pixel-aligned bounds of quad() (not clipped to the canvas).
+    QRect targetRect() const;
+    // The layer area Apply changes: (source ∪ target) ∩ canvas.
+    QRect changedRect() const;
+
+    // --- editing ---
+    // Without scaling or rotation the position snaps to whole pixels (no resampling).
+    void moveBy(const QPointF &delta);
+    void setCenter(const QPointF &center);
+    // Rotates around the pivot to an absolute angle.
+    void setRotation(double degrees);
+    // Scales by dragging a handle to pointer (document coordinates); the opposite corner or edge
+    // stays put. keepAspect scales both axes by the same factor, also from edge handles.
+    void dragScaleHandle(Handle handle, const QPointF &pointer, bool keepAspect);
+    // Sets the box size in pixels around the pivot.
+    void setSize(double width, double height);
+    void setPivot(const QPointF &docPos);
+    void flipHorizontal();
+    void flipVertical();
+    void reset();
+
+    // Which part of the transform box is at pos. tolerance and knobDistance are in document
+    // pixels (the caller converts from screen pixels). Inside the box is Move; near the box but
+    // not on a handle is Rotate.
+    Handle hitTest(const QPointF &pos, double tolerance, double knobDistance) const;
+    QPointF handlePosition(Handle handle, double knobDistance) const;
+
+    // --- rendering ---
+    // Writes the transformed layer (base with the transformed source over it) into out
+    // (document size) within area.
+    void render(QImage &out, const QRect &area, Quality quality) const;
+    // The selection after Apply: the source's mask, transformed. "None" when there was none.
+    Selection transformedSelection() const;
+
+    QPointF mapToDocument(const QPointF &sourcePoint) const;
+    QPointF mapToSource(const QPointF &docPoint) const;
+
+private:
+    QPointF localHandle(Handle handle) const; // relative to c0, unscaled
+    void keepPivotAt(const QPointF &pivotDoc);
+    void sampleRow(int y, int x0, int x1, QRgb *out, const QRgb *base, Quality quality) const;
+    void clampScales();
+    void snapUnscaledMove();
+
+    QSize m_docSize;
+    QRect m_sourceRect;
+    Selection m_selection;
+    QImage m_base;                 // document size; null when the whole layer is the source
+    std::vector<QImage> m_source;  // source pixels and 2× reductions (premultiplied ARGB32)
+    QImage m_sourceMask;           // the selection over m_sourceRect (Grayscale8), when selected
+
+    QPointF m_center;
+    double m_sx = 1, m_sy = 1;
+    double m_rotation = 0;
+    QPointF m_pivotLocal; // relative to c0, in source pixels
+};

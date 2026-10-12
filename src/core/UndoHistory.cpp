@@ -55,11 +55,29 @@ UndoCommand UndoCommand::moved(quint64 layerId, int fromIndex, const QString &la
     return c;
 }
 
+UndoCommand UndoCommand::selection(const Selection &before, const QString &label)
+{
+    UndoCommand c;
+    c.m_kind = Kind::Selection;
+    c.m_label = label;
+    c.m_selection = before;
+    return c;
+}
+
+UndoCommand &UndoCommand::withSelection(const Selection &before)
+{
+    m_selection = before;
+    return *this;
+}
+
 qsizetype UndoCommand::byteSize() const
 {
+    const qsizetype selectionBytes = m_selection ? m_selection->byteSize() : 0;
     switch (m_kind) {
+    case Kind::Selection:
+        return selectionBytes;
     case Kind::Pixels:
-        return m_tiles.byteSize();
+        return m_tiles.byteSize() + selectionBytes;
     case Kind::Presence:
         // Counted in full even if the pixels are still shared with another layer (duplicate).
         return m_stored ? m_stored->image.sizeInBytes() : 0;
@@ -73,11 +91,24 @@ UndoCommand::Result UndoCommand::swap(LayeredDocument &doc)
     Result result;
     const QRect all(QPoint(0, 0), doc.size());
     switch (m_kind) {
+    case Kind::Selection: {
+        const Selection current = doc.selection();
+        doc.setSelection(*m_selection);
+        m_selection = current;
+        result.selection = true;
+        break;
+    }
     case Kind::Pixels: {
         const int index = doc.indexOf(m_layerId);
         if (index < 0)
             return result;
         result.dirty = m_tiles.swapWith(doc.pixels(index));
+        if (m_selection) {
+            const Selection current = doc.selection();
+            doc.setSelection(*m_selection);
+            m_selection = current;
+            result.selection = true;
+        }
         break;
     }
     case Kind::Presence:
@@ -173,18 +204,33 @@ UndoCommand::Result UndoHistory::redo(LayeredDocument &doc)
     return result;
 }
 
+quint64 UndoHistory::stateId() const
+{
+    for (auto it = m_undo.rbegin(); it != m_undo.rend(); ++it)
+        if (it->command.changesArtwork())
+            return it->id;
+    return m_baseId;
+}
+
 void UndoHistory::enforceBudget()
 {
     // The undo stack's bottom state becomes the evicted entry's resulting state.
     while (m_bytes > m_budget && !m_undo.empty()) {
         m_bytes -= m_undo.front().bytes;
-        m_baseId = m_undo.front().id;
+        if (m_undo.front().command.changesArtwork())
+            m_baseId = m_undo.front().id;
         m_undo.pop_front();
     }
     while (m_bytes > m_budget && !m_redo.empty()) {
         m_bytes -= m_redo.front().bytes;
         m_redo.pop_front();
     }
+}
+
+void UndoHistory::relabelLast(const QString &label)
+{
+    if (!m_undo.empty())
+        m_undo.back().command.setLabel(label);
 }
 
 void UndoHistory::clear()

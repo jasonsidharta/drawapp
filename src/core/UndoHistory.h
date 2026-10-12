@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DocumentData.h"
+#include "Selection.h"
 #include "TileSnapshot.h"
 
 #include <QRect>
@@ -34,21 +35,31 @@ public:
     static UndoCommand properties(quint64 layerId, const LayerProperties &before, const QString &label);
     // A layer moved; fromIndex is where it was.
     static UndoCommand moved(quint64 layerId, int fromIndex, const QString &label);
+    // The selection changed; before is the previous selection. Selection changes do not change
+    // artwork, so they never make the document "unsaved" (see UndoHistory::stateId).
+    static UndoCommand selection(const Selection &before, const QString &label);
+    // Adds a selection change to a pixel command, undone and redone with it (transform apply).
+    UndoCommand &withSelection(const Selection &before);
 
     struct Result
     {
         QRect dirty;           // document area whose composite changed
         bool structure = false; // layers were added, removed, reordered or changed properties
         quint64 activate = 0;   // layer to make active, 0 = keep the current choice
+        bool selection = false; // the selection changed
     };
     Result swap(LayeredDocument &doc);
 
     QString label() const { return m_label; }
-    // Pixel memory this command retains right now (tile copies or a removed layer's image).
+    void setLabel(const QString &label) { m_label = label; }
+    // Pixel memory this command retains right now (tile copies, a removed layer's image or a
+    // selection mask).
     qsizetype byteSize() const;
+    // False for selection-only commands.
+    bool changesArtwork() const { return m_kind != Kind::Selection; }
 
 private:
-    enum class Kind { Pixels, Presence, Properties, Move };
+    enum class Kind { Pixels, Presence, Properties, Move, Selection };
     Kind m_kind = Kind::Pixels;
     QString m_label;
     quint64 m_layerId = 0;
@@ -56,6 +67,7 @@ private:
     std::optional<LayerData> m_stored; // Presence: the layer while it is not in the document
     int m_index = 0;                   // Presence: position to restore; Move: the other position
     LayerProperties m_props;
+    std::optional<Selection> m_selection; // Selection, or Pixels with a selection change
 };
 
 // Linear undo/redo under one memory budget shared by undo and redo entries. Pushing an edit drops
@@ -78,14 +90,17 @@ public:
     bool canRedo() const { return !m_redo.empty(); }
     QString undoLabel() const { return m_undo.empty() ? QString() : m_undo.back().command.label(); }
     QString redoLabel() const { return m_redo.empty() ? QString() : m_redo.back().command.label(); }
+    // Renames the newest undo entry (for an action built from another, such as Cut from Clear).
+    void relabelLast(const QString &label);
     int undoCount() const { return int(m_undo.size()); }
     int redoCount() const { return int(m_redo.size()); }
     qsizetype bytesUsed() const { return m_bytes; }
     qsizetype budgetBytes() const { return m_budget; }
 
-    // Identifies the document state reached through history; compared with the id recorded at
-    // save time to tell whether there are unsaved changes.
-    quint64 stateId() const { return m_undo.empty() ? m_baseId : m_undo.back().id; }
+    // Identifies the artwork state reached through history; compared with the id recorded at
+    // save time to tell whether there are unsaved changes. Selection-only entries are skipped:
+    // selections are not saved, so changing one does not make the document unsaved.
+    quint64 stateId() const;
 
 private:
     struct Entry

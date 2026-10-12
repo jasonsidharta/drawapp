@@ -122,7 +122,9 @@ private:
     void rasterize(const DabParams &dab, const QRect &rect);
     void compositeTouched(QImage &image, const TileSnapshot &before);
     void composite(QImage &image, const QRect &rect, const TileSnapshot &before);
-    void smudge(QImage &image, const DabParams &dab, const QRect &rect);
+    void smudge(QImage &image, const DabParams &dab, const QRect &rect, const TileSnapshot &before);
+    void smudgeInto(QImage &target, const QPoint &origin, const DabParams &dab, const QRect &rect);
+    QRgb workPixel(const QImage &image, int x, int y) const;
     double textureAt(int x, int y) const;
     double passExponent(double diameter) const;
     CoverageTile &coverageTile(int column, int row);
@@ -167,4 +169,6 @@ private:
     std::vector<float> m_patch;
     int m_patchSize = 0;
     bool m_patchLoaded = false;
+    // Smudge under a selection: the unclipped result, per 64 × 64 tile touched.
+    std::unordered_map<qint64, QImage> m_work;
 };

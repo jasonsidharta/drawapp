@@ -2,6 +2,7 @@
 // touch through QTest, pen through constructed QTabletEvents. Pen hardware is not involved.
 
 #include "BrushScratchpad.h"
+#include "Selection.h"
 #include "BrushThumbnails.h"
 #include "CanvasItem.h"
 #include "FakeProvider.h"
@@ -2023,30 +2024,335 @@ private slots:
         QCOMPARE(m_canvas->history().undoCount(), steps + 4); // only the lock and visibility changes
     }
 
-    void strokeClipMaskLimitsEveryKindOfBrush()
+    void selectionLimitsEveryPreset()
     {
         m_canvas->setBrushSize(300);
         QVERIFY(m_canvas->drawStroke(docCurve({0, 700}, {2047, 700}, 0)));
-        QImage mask(m_canvas->documentSize(), QImage::Format_Grayscale8);
-        mask.fill(0);
-        for (int y = 0; y < mask.height(); ++y)
-            std::fill_n(mask.scanLine(y), 1024, uchar(255));
-        m_canvas->setStrokeClipMask(mask);
-        for (const char *id : {"builtin.textured-paint", "builtin.blend-smudge", "builtin.soft-eraser"}) {
+        QPainterPath left;
+        left.addRect(QRectF(0, 0, 1024, 1536));
+        m_canvas->selectPath(left, SelectionMode::Replace);
+        QVERIFY(m_canvas->hasSelection());
+        qreal y = 560; // each preset on its own path across the dark band
+        for (const BrushPreset &p : BrushPresets::builtIns()) {
             const QImage before = doc().copy();
-            QVERIFY(m_canvas->brushes()->select(QString::fromLatin1(id)));
+            QVERIFY(m_canvas->brushes()->select(p.id));
             m_canvas->setBrushColor(QColor(40, 90, 200));
-            QVERIFY(m_canvas->drawStroke(docCurve({200, 600}, {1900, 800})));
-            QVERIFY2(doc() != before, id);
+            QVERIFY(m_canvas->drawStroke(docCurve({200, y}, {1900, y + 120})));
+            y += 30;
+            QVERIFY2(doc() != before, qPrintable(p.id));
             for (int y = 0; y < doc().height(); y += 7)
                 for (int x = 1024; x < doc().width(); x += 7)
-                    QVERIFY2(doc().pixel(x, y) == before.pixel(x, y), id);
+                    QVERIFY2(doc().pixel(x, y) == before.pixel(x, y), qPrintable(p.id));
         }
-        m_canvas->setStrokeClipMask(QImage());
+        m_canvas->deselect();
         QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.solid-round")));
         const QImage before = doc().copy();
         QVERIFY(m_canvas->drawStroke(docCurve({1100, 300}, {1900, 300}, 0)));
-        QVERIFY(doc() != before); // without the mask, the right half paints again
+        QVERIFY(doc() != before); // without a selection, the right half paints again
+    }
+
+    // --- selections on the canvas ---
+
+    void dragSelect(QPoint from, QPoint to, Qt::KeyboardModifiers mods = Qt::NoModifier)
+    {
+        QTest::mousePress(m_window.get(), Qt::LeftButton, mods, from);
+        for (int i = 1; i <= 6; ++i)
+            QTest::mouseMove(m_window.get(), from + (to - from) * i / 6);
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, mods, to);
+    }
+
+    void selectionToolsUnderZoomAndPan()
+    {
+        // Zoomed in and panned: the selection lands where the shape was drawn in the document.
+        sendWheel(QPointF(300, 300), 240);
+        m_canvas->setTool(CanvasItem::Select);
+        m_canvas->setSelectShape(CanvasItem::RectangleShape);
+        dragSelect({200, 150}, {400, 300});
+        const QRect expected = QRectF(toDoc(QPointF(200, 150)), toDoc(QPointF(400, 300))).toAlignedRect();
+        const QRect got = m_canvas->selection().bounds();
+        QVERIFY2(std::abs(got.left() - expected.left()) <= 1 && std::abs(got.right() - expected.right()) <= 1
+                     && std::abs(got.top() - expected.top()) <= 1 && std::abs(got.bottom() - expected.bottom()) <= 1,
+                 qPrintable(QString("%1,%2 %3x%4").arg(got.x()).arg(got.y()).arg(got.width()).arg(got.height())));
+        QVERIFY(!m_canvas->isModified()); // selecting is not an unsaved change
+
+        // Shift adds, Alt subtracts, both intersect.
+        m_canvas->setSelectShape(CanvasItem::EllipseShape);
+        dragSelect({350, 250}, {500, 400}, Qt::ShiftModifier);
+        QVERIFY(m_canvas->selection().bounds().right() > got.right());
+        const int added = m_canvas->selection().bounds().width();
+        dragSelect({100, 100}, {300, 450}, Qt::AltModifier);
+        QVERIFY(m_canvas->selection().bounds().width() < added);
+        // Intersect with a rectangle around the whole view leaves the selection as it was.
+        const Selection beforeIntersect = m_canvas->selection();
+        m_canvas->setSelectShape(CanvasItem::RectangleShape);
+        const int stepsBefore = m_canvas->history().undoCount();
+        dragSelect({1, 1}, {898, 638}, Qt::ShiftModifier | Qt::AltModifier);
+        QVERIFY(m_canvas->selection() == beforeIntersect);
+        QCOMPARE(m_canvas->history().undoCount(), stepsBefore); // no change, no undo step
+        // Intersect with a smaller rectangle does change it.
+        dragSelect({1, 1}, {450, 638}, Qt::ShiftModifier | Qt::AltModifier);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Intersect selection"));
+        QVERIFY(m_canvas->selection().bounds().width() < beforeIntersect.bounds().width());
+
+        // The lasso, then a plain click deselects; Reselect brings it back; undo steps through.
+        m_canvas->setSelectShape(CanvasItem::LassoShape);
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(500, 200));
+        for (const QPoint p : {QPoint(600, 210), QPoint(620, 320), QPoint(520, 330), QPoint(480, 260)})
+            QTest::mouseMove(m_window.get(), p);
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(480, 260));
+        QVERIFY(m_canvas->selection().coverageAt(int(toDoc(QPointF(550, 270)).x()), int(toDoc(QPointF(550, 270)).y())) == 255);
+        QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(700, 500));
+        QVERIFY(!m_canvas->hasSelection());
+        QVERIFY(m_canvas->canReselect());
+        m_canvas->reselect();
+        QVERIFY(m_canvas->hasSelection());
+        m_canvas->undo();
+        QVERIFY(!m_canvas->hasSelection());
+        m_canvas->undo();
+        QVERIFY(m_canvas->hasSelection());
+        // Escape abandons a shape being drawn.
+        const Selection kept = m_canvas->selection();
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(100, 500));
+        QTest::mouseMove(m_window.get(), QPoint(300, 600));
+        QTest::keyClick(m_window.get(), Qt::Key_Escape);
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(300, 600));
+        QVERIFY(m_canvas->selection() == kept);
+        QVERIFY(!m_canvas->isModified());
+        screenshot("selection_outline");
+    }
+
+    void paintingIsClippedToTheSelectionUnderZoomAndPan()
+    {
+        sendWheel(QPointF(450, 320), 120);
+        QPainterPath ellipse;
+        ellipse.addEllipse(QRectF(toDoc(QPointF(250, 200)), toDoc(QPointF(550, 450))));
+        m_canvas->selectPath(ellipse, SelectionMode::Replace);
+        m_canvas->setBrushSize(60);
+        mouseStroke({{100, 320}, {800, 320}});
+        const auto alphaView = [&](int x, int y) { return alphaAt(toDoc(QPointF(x, y))); };
+        QCOMPARE(alphaView(400, 320), 255); // inside
+        QCOMPARE(alphaView(150, 320), 0);   // outside, though the stroke passed there
+        QCOMPARE(alphaView(700, 320), 0);
+        // Soft edge: partial, never darker than the selection's own coverage.
+        const QPointF edge = toDoc(QPointF(250, 325));
+        const int s = m_canvas->selection().coverageAt(int(edge.x()), int(edge.y()));
+        QVERIFY(std::abs(alphaAt(edge) - s) <= 1);
+        QCOMPARE(m_canvas->history().undoCount(), 2); // the selection and one stroke
+        screenshot("paint_in_selection");
+    }
+
+    void emptySelectionNeverPaintsEverywhere()
+    {
+        QPainterPath r;
+        r.addRect(QRectF(100, 100, 300, 200));
+        m_canvas->selectPath(r, SelectionMode::Replace);
+        m_canvas->selectPath(r, SelectionMode::Subtract);
+        QVERIFY(m_canvas->hasSelection());
+        QVERIFY(m_canvas->selectionEmpty());
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        const QImage before = doc().copy();
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(doc(), before);
+        QVERIFY(!notices.isEmpty());
+        QVERIFY(notices.last().at(0).toString().contains("Nothing is selected"));
+        QVERIFY(!m_canvas->drawStroke(docCurve({100, 100}, {800, 300})));
+        QCOMPARE(m_canvas->copySelection().isEmpty(), false);
+        QCOMPARE(m_canvas->beginTransform().isEmpty(), false);
+        m_canvas->deselect();
+        mouseStroke({{100, 300}, {600, 300}});
+        QVERIFY(doc() != before);
+    }
+
+    void eraserAndSmudgeStopAtTheSelectionEdge()
+    {
+        m_canvas->setBrushSize(200);
+        mouseStroke({{100, 300}, {800, 300}});
+        QPainterPath half;
+        half.addRect(QRectF(QPointF(0, 0), QPointF(toDoc(QPointF(450, 0)).x(), 1536)));
+        m_canvas->selectPath(half, SelectionMode::Replace);
+        const QImage before = doc().copy();
+        for (const char *id : {"builtin.hard-eraser", "builtin.blend-smudge"}) {
+            QVERIFY(m_canvas->brushes()->select(QString::fromLatin1(id)));
+            m_canvas->setBrushSize(80);
+            mouseStroke({{300, 240}, {700, 360}, {300, 330}});
+        }
+        const int edgeX = int(toDoc(QPointF(450, 0)).x());
+        for (int y = 0; y < doc().height(); y += 5)
+            for (int x = edgeX; x < doc().width(); x += 5)
+                QVERIFY2(doc().pixel(x, y) == before.pixel(x, y), qPrintable(QString("%1,%2").arg(x).arg(y)));
+        QVERIFY(doc() != before);
+    }
+
+    // --- transforms on the canvas ---
+
+    void transformByHandlesApplyUndoRedo()
+    {
+        m_canvas->setBrushSize(40);
+        mouseStroke({{200, 200}, {400, 300}});
+        const QImage original = layerImage(0).copy();
+        QPainterPath r;
+        r.addRect(QRectF(toDoc(QPointF(170, 170)), toDoc(QPointF(430, 330))));
+        m_canvas->selectPath(r, SelectionMode::Replace);
+        const int steps = m_canvas->history().undoCount();
+        m_canvas->setTool(CanvasItem::Transform);
+        QVERIFY(m_canvas->isTransforming());
+        // Drag the bottom-right handle outwards: proportional (keep aspect is on by default).
+        const TransformSession &t = m_canvas->transformSession();
+        const QPointF corner = m_canvas->viewTransform().docToView(t.handlePosition(TransformSession::Handle::BottomRight, 0));
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, corner.toPoint());
+        for (int i = 1; i <= 5; ++i)
+            QTest::mouseMove(m_window.get(), (corner + QPointF(20, 20) * i).toPoint());
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, (corner + QPointF(100, 100)).toPoint());
+        QVERIFY(m_canvas->transformWidth() > t.sourceRect().width() * 1.2);
+        QCOMPARE(layerImage(0), original); // the preview does not touch the document
+        QVERIFY(m_canvas->displayedComposite() != doc());
+        // Move it by dragging inside, then rotate with the knob.
+        const QPointF inside = m_canvas->viewTransform().docToView(t.center());
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, (inside + QPointF(10, 0)).toPoint());
+        QTest::mouseMove(m_window.get(), (inside + QPointF(60, 40)).toPoint());
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, (inside + QPointF(60, 40)).toPoint());
+        QVERIFY(std::abs(m_canvas->transformX() - t.sourceRect().center().x()) > 10);
+        m_canvas->setTransformValue("rotation", 30);
+        QCOMPARE(m_canvas->transformRotation(), 30.0);
+        screenshot("transform_preview");
+        QTest::keyClick(m_window.get(), Qt::Key_Return);
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
+        const QImage applied = layerImage(0).copy();
+        QVERIFY(applied != original);
+        QVERIFY(m_canvas->selection().bounds() != r.boundingRect().toAlignedRect()); // follows the pixels
+        m_canvas->undo();
+        QCOMPARE(layerImage(0), original);
+        QCOMPARE(m_canvas->selection().bounds(), Selection::fromMask(Selection::rasterize(doc().size(), r)).bounds());
+        m_canvas->redo();
+        QCOMPARE(layerImage(0), applied);
+        QVERIFY(m_canvas->isModified());
+    }
+
+    void transformCancelRestoresExactlyAndUndoCancels()
+    {
+        m_canvas->setBrushSize(30);
+        mouseStroke({{200, 200}, {500, 260}});
+        const QImage original = layerImage(0).copy();
+        const int steps = m_canvas->history().undoCount();
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("width", 50);
+        m_canvas->flipTransformHorizontal();
+        QTest::keyClick(m_window.get(), Qt::Key_Escape);
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(layerImage(0), original);
+        QCOMPARE(m_canvas->displayedComposite(), doc());
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        // Undo while transforming cancels the transform, not the stroke before it.
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("x", 100);
+        m_canvas->undo();
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(layerImage(0), original);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        // Apply without changing anything records nothing.
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->applyTransform();
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+    }
+
+    void transformRespectsLayerRules()
+    {
+        m_canvas->setBrushSize(30);
+        mouseStroke({{200, 200}, {500, 260}});
+        const int id = m_canvas->activeLayerId();
+        m_canvas->setLayerLocked(id, true);
+        QVERIFY(m_canvas->beginTransform().contains("locked"));
+        m_canvas->setLayerLocked(id, false);
+        m_canvas->setLayerVisible(id, false);
+        QVERIFY(m_canvas->beginTransform().contains("hidden"));
+        m_canvas->setLayerVisible(id, true);
+        m_canvas->addLayer();
+        QVERIFY(m_canvas->beginTransform().contains("nothing to transform")); // the new layer is empty
+        m_canvas->setActiveLayer(id);
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("x", 300);
+        // Another layer action applies the transform first, as its own undo step.
+        m_canvas->addLayer();
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Add layer"));
+        m_canvas->undo();
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
+    }
+
+    void savingAndRecoveryDuringAPreview()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QTemporaryDir dir;
+        m_canvas->setBrushSize(40);
+        mouseStroke({{200, 200}, {500, 260}});
+        const QImage beforeTransform = doc().copy();
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("x", 900);
+        // Explicit file actions wait for Apply or Cancel; autosave keeps the document as it was.
+        QVERIFY(m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("t.drawapp"))).contains("Apply or cancel"));
+        QVERIFY(m_canvas->exportPng(QUrl::fromLocalFile(dir.filePath("t.png"))).contains("Apply or cancel"));
+        QVERIFY(m_canvas->openFile(QUrl::fromLocalFile(dir.filePath("t.drawapp"))).contains("Apply or cancel"));
+        QVERIFY(autosaveAndWait());
+        QCOMPARE(recoveredImage(), beforeTransform); // the preview is not in the recovery copy
+        m_canvas->applyTransform();
+        QVERIFY(autosaveAndWait());
+        QCOMPARE(recoveredImage(), doc()); // after Apply it is
+        QCOMPARE(saveAs(QUrl::fromLocalFile(dir.filePath("t.drawapp"))), QString());
+        QCOMPARE(ProjectFile::load(dir.filePath("t.drawapp")).document.composite(), doc());
+        // Replacing the document drops an open preview.
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->newDocument();
+        QVERIFY(!m_canvas->isTransforming());
+        QVERIFY(!m_canvas->hasSelection());
+        QCOMPARE(qAlpha(doc().pixel(300, 300)), 0);
+    }
+
+    // --- clipboard ---
+
+    void copyCutAndPaste()
+    {
+        m_canvas->setBrushSize(60);
+        mouseStroke({{200, 250}, {600, 250}});
+        const QImage original = layerImage(0).copy();
+        QCOMPARE(m_canvas->paste(), QStringLiteral("There is nothing to paste."));
+        QPainterPath r;
+        r.addRect(QRectF(toDoc(QPointF(300, 200)), toDoc(QPointF(450, 300))));
+        m_canvas->selectPath(r, SelectionMode::Replace);
+        QCOMPARE(m_canvas->copySelection(), QString());
+        QVERIFY(m_canvas->canPaste());
+        const int steps = m_canvas->history().undoCount();
+        QCOMPARE(m_canvas->paste(), QString());
+        QCOMPARE(m_canvas->layerCount(), 2);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Paste"));
+        // The pasted layer holds exactly the selected pixels, at their original place.
+        const QImage pasted = layerImage(1);
+        const QPointF in = toDoc(QPointF(350, 250)), out = toDoc(QPointF(250, 250));
+        QCOMPARE(pasted.pixel(in.toPoint()), original.pixel(in.toPoint()));
+        QCOMPARE(qAlpha(pasted.pixel(out.toPoint())), 0);
+        QVERIFY(m_canvas->isModified());
+        m_canvas->undo();
+        QCOMPARE(m_canvas->layerCount(), 1);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+
+        // Cut leaves the complement, pasting puts it back on a new layer: the picture is the same.
+        const QImage composite = doc().copy();
+        QCOMPARE(m_canvas->cutSelection(), QString());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Cut"));
+        QCOMPARE(qAlpha(layerImage(0).pixel(in.toPoint())), 0);
+        QCOMPARE(m_canvas->paste(), QString());
+        QCOMPARE(doc(), composite);
+        m_canvas->undo();
+        m_canvas->undo();
+        QCOMPARE(layerImage(0), original);
+
+        // Without a selection, Copy takes the whole layer.
+        m_canvas->deselect();
+        QCOMPARE(m_canvas->copySelection(), QString());
+        QCOMPARE(m_canvas->paste(), QString());
+        QCOMPARE(layerImage(1), original);
     }
 
     void presetStrokesWhileSavingAndAutosaving()

@@ -28,10 +28,12 @@ add_library(drawcore STATIC
     src/core/RecoveryFile.cpp src/core/RecoveryFile.h
     src/core/RecoveryManager.cpp src/core/RecoveryManager.h
     src/core/SafeSave.cpp src/core/SafeSave.h
+    src/core/Selection.cpp src/core/Selection.h
     src/core/StrokeEngine.cpp src/core/StrokeEngine.h
     src/core/StrokeSmoother.cpp src/core/StrokeSmoother.h
     src/core/StrokeSpacer.cpp src/core/StrokeSpacer.h
     src/core/TileSnapshot.cpp src/core/TileSnapshot.h
+    src/core/TransformSession.cpp src/core/TransformSession.h
     src/core/UndoHistory.cpp src/core/UndoHistory.h
     src/core/ViewRenderer.cpp src/core/ViewRenderer.h
     src/core/ViewTransform.cpp src/core/ViewTransform.h
@@ -45,7 +47,7 @@ qt_add_qml_module(drawapp_ui
     URI DrawApp
     VERSION 1.0
     QML_FILES src/app/Main.qml src/app/BrushPanel.qml
-    SOURCES src/app/CanvasItem.cpp src/app/CanvasItem.h
+    SOURCES src/app/CanvasItem.cpp src/app/CanvasItem.h src/app/CanvasItemSelection.cpp
             src/app/BrushLibrary.cpp src/app/BrushLibrary.h
             src/app/BrushScratchpad.cpp src/app/BrushScratchpad.h
             src/app/BrushThumbnails.cpp src/app/BrushThumbnails.h

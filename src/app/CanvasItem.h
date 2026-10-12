@@ -5,10 +5,12 @@
 #include "ProjectIo.h"
 #include "RasterDocument.h"
 #include "RecoveryManager.h"
+#include "Selection.h"
 #include "BrushLibrary.h"
 #include "BrushSettings.h"
 #include "StrokeEngine.h"
 #include "TileSnapshot.h"
+#include "TransformSession.h"
 #include "UndoHistory.h"
 #include "ViewTransform.h"
 
@@ -44,6 +46,21 @@ class CanvasItem : public QQuickPaintedItem
     // 0 = off .. 100; the pull-string length is smoothing / 100 × MaxSmoothingRadius view pixels.
     Q_PROPERTY(int smoothing READ smoothing WRITE setSmoothing NOTIFY brushSettingsChanged)
     Q_PROPERTY(Tool tool READ tool WRITE setTool NOTIFY toolChanged)
+    // Selection tool options and state (see Selection; selections are not saved in files).
+    Q_PROPERTY(SelectShape selectShape READ selectShape WRITE setSelectShape NOTIFY selectToolChanged)
+    Q_PROPERTY(SelectOp selectMode READ selectMode WRITE setSelectMode NOTIFY selectToolChanged)
+    Q_PROPERTY(bool hasSelection READ hasSelection NOTIFY selectionChanged)
+    Q_PROPERTY(bool selectionEmpty READ selectionEmpty NOTIFY selectionChanged)
+    Q_PROPERTY(bool canReselect READ canReselect NOTIFY selectionChanged)
+    Q_PROPERTY(bool canPaste READ canPaste NOTIFY clipboardChanged)
+    // A transform preview is open (see TransformSession); the numbers describe its box.
+    Q_PROPERTY(bool transforming READ isTransforming NOTIFY transformChanged)
+    Q_PROPERTY(qreal transformX READ transformX NOTIFY transformChanged)
+    Q_PROPERTY(qreal transformY READ transformY NOTIFY transformChanged)
+    Q_PROPERTY(qreal transformWidth READ transformWidth NOTIFY transformChanged)
+    Q_PROPERTY(qreal transformHeight READ transformHeight NOTIFY transformChanged)
+    Q_PROPERTY(qreal transformRotation READ transformRotation NOTIFY transformChanged)
+    Q_PROPERTY(bool keepAspect READ keepAspect WRITE setKeepAspect NOTIFY transformChanged)
     Q_PROPERTY(qreal zoom READ zoom NOTIFY viewChanged)
     Q_PROPERTY(QSize documentSize READ documentSize NOTIFY documentChanged)
     Q_PROPERTY(QString inputStatus READ inputStatus NOTIFY inputStatusChanged)
@@ -75,8 +92,15 @@ class CanvasItem : public QQuickPaintedItem
     Q_PROPERTY(QString overwriteDetails READ overwriteDetails NOTIFY overwriteConfirmationChanged)
 
 public:
-    enum Tool { Brush, Eraser };
+    enum Tool { Brush, Eraser, Select, Transform };
     Q_ENUM(Tool)
+    enum SelectShape { RectangleShape, EllipseShape, LassoShape };
+    Q_ENUM(SelectShape)
+    enum SelectOp { Replace, Add, Subtract, Intersect };
+    Q_ENUM(SelectOp)
+    // Handle sizes in screen pixels: touch-sized hit areas.
+    static constexpr qreal HandleHitRadius = 22.0;
+    static constexpr qreal RotateKnobDistance = 40.0;
 
     static constexpr int MinBrushSize = 1;
     static constexpr int MaxBrushSize = 256;
@@ -95,10 +119,53 @@ public:
     // future automation; no pointer events are involved. Returns false (and changes nothing) if
     // the active layer cannot be painted or another gesture is in progress.
     bool drawStroke(const std::vector<StrokeSample> &samples, bool erase = false);
-    // Limits painting to a mask (Format_Grayscale8, document size, 255 = editable) from the next
-    // stroke on; a null image removes the limit. The integration point for selections, which do
-    // not exist yet.
-    void setStrokeClipMask(const QImage &mask);
+    // Combines a shape (document coordinates) with the selection, as one undo step, like the
+    // selection tools. For tests and automation.
+    void selectPath(const QPainterPath &docPath, SelectionMode mode);
+    const Selection &selection() const { return m_document.selection(); }
+    const TransformSession &transformSession() const { return m_transform; }
+    // What the view shows: the document, or the transform preview while one is open.
+    const QImage &displayedComposite() const;
+
+    SelectShape selectShape() const { return m_selectShape; }
+    void setSelectShape(SelectShape shape);
+    SelectOp selectMode() const { return m_selectMode; }
+    void setSelectMode(SelectOp mode);
+    bool hasSelection() const { return m_document.selection().isActive(); }
+    bool selectionEmpty() const { return m_document.selection().isEmpty(); }
+    bool canReselect() const { return m_reselect.isActive() && !m_reselect.isEmpty(); }
+    bool canPaste() const;
+    bool isTransforming() const { return m_transform.isActive(); }
+    qreal transformX() const { return m_transform.center().x(); }
+    qreal transformY() const { return m_transform.center().y(); }
+    qreal transformWidth() const { return m_transform.width(); }
+    qreal transformHeight() const { return m_transform.height(); }
+    qreal transformRotation() const { return m_transform.rotation(); }
+    bool keepAspect() const { return m_keepAspect; }
+    void setKeepAspect(bool keep);
+
+    Q_INVOKABLE void selectAll();
+    Q_INVOKABLE void deselect();
+    Q_INVOKABLE void invertSelection();
+    Q_INVOKABLE void reselect();
+    // Clears the selected pixels of the active layer (the whole layer without a selection).
+    Q_INVOKABLE void clearSelected();
+    // Copy and Cut take the selected pixels of the active layer (soft edges as partial alpha), or
+    // the whole layer without a selection. Paste puts them on a new layer above the active one at
+    // their original place. Each returns an empty string or the reason it did nothing.
+    Q_INVOKABLE QString copySelection();
+    Q_INVOKABLE QString cutSelection();
+    Q_INVOKABLE QString paste();
+    // Starts a transform of the selected pixels (or the active layer); Apply is one undo step,
+    // Cancel restores the original exactly. Returns an empty string or the reason it cannot start.
+    Q_INVOKABLE QString beginTransform();
+    Q_INVOKABLE void applyTransform();
+    Q_INVOKABLE void cancelTransform();
+    // key: "x", "y" (box centre), "width", "height" (pixels), "rotation" (degrees).
+    Q_INVOKABLE void setTransformValue(const QString &key, qreal value);
+    Q_INVOKABLE void flipTransformHorizontal();
+    Q_INVOKABLE void flipTransformVertical();
+    Q_INVOKABLE void resetTransform();
 
     int brushSize() const;
     void setBrushSize(int size);
@@ -214,6 +281,10 @@ signals:
     void brushColorChanged();
     void brushSettingsChanged();
     void toolChanged();
+    void selectToolChanged();
+    void selectionChanged();
+    void transformChanged();
+    void clipboardChanged();
     void viewChanged();
     void inputStatusChanged();
     void documentChanged();
@@ -254,6 +325,8 @@ protected:
 
 private:
     enum class Gesture { None, Stroke, Pan, Pinch };
+    // What a Stroke gesture does: paint, draw a selection shape, or drag the transform box.
+    enum class PointerTask { Paint, Select, Transform };
 
     void watchWindow(QQuickWindow *window);
     bool handleTabletEvent(QTabletEvent *event);
@@ -265,6 +338,26 @@ private:
     void endStroke();
     // Undoes the stroke in progress completely (Escape); nothing enters the history.
     void cancelStroke();
+    // Selection and transform gestures (CanvasItemSelection.cpp).
+    void beginSelectGesture(const QPointF &viewPos);
+    void continueSelectGesture(const QPointF &viewPos);
+    void finishSelectGesture();
+    void beginTransformDrag(const QPointF &viewPos);
+    void continueTransformDrag(const QPointF &viewPos);
+    void finishTransformDrag();
+    void abortPointerGesture();
+    void setSelectionWithUndo(const Selection &next, const QString &label);
+    void selectionUpdated();
+    void updateTransformPreview(TransformSession::Quality quality);
+    // Ends what is in progress before another document edit: a stroke or gesture, and an open
+    // transform (applied).
+    void finishPendingEdits();
+    void endTransformSession();
+    void drawOverlays(QPainter *painter);
+    // Repaints the whole item. QQuickPaintedItem::update() without a rectangle is lost if a
+    // partial update(rect) follows before the next frame (the pending area becomes that rect), so
+    // full repaints pass the item's rectangle explicitly.
+    void updateAll() { update(boundingRect().toAlignedRect()); }
     // The document-space part of beginStroke/continueStroke.
     bool startStroke(const StrokeSample &sample, PointerKind kind, bool erase);
     void extendStroke(const StrokeSample &sample);
@@ -386,7 +479,35 @@ private:
     QElapsedTimer m_strokeClock;
     QTimer m_airbrushTimer;
     quint64 m_strokeCount = 0; // per-stroke random seed
-    QImage m_strokeClip;
+    PointerTask m_pointerTask = PointerTask::Paint;
+
+    // --- selection ---
+    SelectShape m_selectShape = RectangleShape;
+    SelectOp m_selectMode = Replace;
+    SelectionMode m_gestureMode = SelectionMode::Replace;
+    QPointF m_selectStartView;
+    std::vector<QPointF> m_selectPoints; // document coordinates (start and current, or the lasso)
+    Selection m_reselect;                // brought back by Reselect
+    QPainterPath m_selectionOutline;     // document coordinates, cached per selection change
+
+    // --- transform ---
+    TransformSession m_transform;
+    quint64 m_transformLayerId = 0;
+    Tool m_toolBeforeTransform = Brush;
+    bool m_keepAspect = true;
+    QImage m_previewLayer;     // the transformed layer, rendered from the session's source
+    QImage m_previewComposite; // the document with the preview layer, what the view shows
+    QRect m_previewRect;       // area the preview last differed from the document in
+    TransformSession::Handle m_dragHandle = TransformSession::Handle::None;
+    QPointF m_dragLastDoc;
+    QPointF m_dragStartCenter;
+    double m_dragStartRotation = 0;
+    double m_dragStartAngle = 0;
+
+    // --- clipboard (internal; also offered to the system clipboard) ---
+    QImage m_clipImage;
+    QPoint m_clipOrigin;
+    QSize m_clipDocSize;
     qreal m_lastPressure = 1.0;
     QPointF m_lastTilt;
     bool m_lastHasTilt = false;
