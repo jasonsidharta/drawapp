@@ -71,6 +71,25 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     });
     m_applyProgressTimer.setInterval(100);
     connect(&m_applyProgressTimer, &QTimer::timeout, this, &CanvasItem::applyProgressChanged);
+    // Undo history sized from the memory limit, and given up oldest-first when memory runs out
+    // (after the view caches, which are cheaper to lose).
+    m_history = UndoHistory(UndoHistory::budgetForLimit(MemoryBudget::limit()));
+    m_undoEvictor = MemoryBudget::addEvictor(
+        [this](qint64 wanted) {
+            int dropped = 0;
+            const qsizetype freed = m_history.shed(qsizetype(wanted), &dropped);
+            if (dropped > 0)
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, dropped] {
+                        emit notice(QStringLiteral("Memory is running low: the %1 oldest undo step(s) were removed to make room.")
+                                        .arg(dropped));
+                        emit historyChanged();
+                    },
+                    Qt::QueuedConnection);
+            return qint64(freed);
+        },
+        10);
     setAcceptedMouseButtons(Qt::LeftButton | Qt::MiddleButton);
     setAcceptTouchEvents(true);
     setAcceptHoverEvents(true); // the polygon lasso's rubber band
@@ -182,6 +201,70 @@ void CanvasItem::setBrushColor(const QColor &color)
     emit brushColorChanged();
 }
 
+CanvasItem::~CanvasItem()
+{
+    MemoryBudget::removeEvictor(m_undoEvictor);
+}
+
+void CanvasItem::refreshComposite(const QRect &rect)
+{
+    if (!m_document.refreshComposite(rect.isNull() ? QRect(QPoint(0, 0), m_document.size()) : rect))
+        emit notice(QStringLiteral("Not enough memory to update the whole view (memory limit %1 MiB). "
+                                   "The drawing itself is unchanged; free memory (undo history, layers) and zoom to refresh.")
+                        .arg(MemoryBudget::limit() / (1024 * 1024)));
+}
+
+bool CanvasItem::confirmIfNotUndoable(qsizetype undoBytes, const QString &what, std::function<void()> action)
+{
+    if (m_confirmed || undoBytes <= m_history.budgetBytes())
+        return false;
+    auto size = [](qint64 bytes) {
+        return bytes >= 1024 * 1024 ? QStringLiteral("%1 MiB").arg(bytes / (1024 * 1024))
+                                    : QStringLiteral("%1 KiB").arg(std::max<qint64>(1, bytes / 1024));
+    };
+    m_confirmationText = QStringLiteral("%1 changes about %2 of pixels, more than the undo history can hold (%3). "
+                                        "If you continue, it cannot be undone.")
+                             .arg(what, size(undoBytes), size(m_history.budgetBytes()));
+    m_confirmedAction = std::move(action);
+    emit confirmationChanged();
+    return true;
+}
+
+void CanvasItem::answerConfirmation(bool proceed)
+{
+    std::function<void()> action = std::move(m_confirmedAction);
+    m_confirmedAction = nullptr;
+    m_confirmationText.clear();
+    emit confirmationChanged();
+    if (!proceed || !action)
+        return;
+    m_confirmed = true;
+    action();
+    m_confirmed = false;
+}
+
+QString CanvasItem::memoryReport() const
+{
+    using MemoryBudget::Category;
+    auto mib = [](qint64 b) { return QString::number(double(b) / (1024 * 1024), 'f', 1); };
+    const qint64 used = MemoryBudget::usedTotal(), limit = MemoryBudget::limit();
+    QString s = QStringLiteral("In use: %1 MiB of %2 MiB (limit)\n").arg(mib(used), mib(limit));
+    s += QStringLiteral("  Layers and undo history: %1 MiB\n").arg(mib(MemoryBudget::used(Category::Document)));
+    s += QStringLiteral("  Composite: %1 MiB\n").arg(mib(MemoryBudget::used(Category::Composite)));
+    s += QStringLiteral("  View caches: %1 MiB\n").arg(mib(MemoryBudget::used(Category::Cache)));
+    s += QStringLiteral("  Transform preview: %1 MiB\n").arg(mib(MemoryBudget::used(Category::Preview)));
+    s += QStringLiteral("  Temporary: %1 MiB\n").arg(mib(MemoryBudget::used(Category::Temporary)));
+    s += QStringLiteral("Undo history: %1 MiB of %2 MiB, %3 undo and %4 redo step(s)\n")
+             .arg(mib(m_history.bytesUsed()), mib(m_history.budgetBytes()))
+             .arg(m_history.undoCount())
+             .arg(m_history.redoCount());
+    s += QStringLiteral("Peak since start: %1 MiB").arg(mib(MemoryBudget::peakTotal()));
+    if (const qint64 ram = MemoryBudget::physicalMemory(); ram > 0)
+        s += QStringLiteral("\nPhysical memory: %1 MiB").arg(mib(ram));
+    s += QStringLiteral("\n(Pixel data only: the program itself, fonts and the window need more.)");
+    return s;
+}
+
 void CanvasItem::setTool(Tool tool)
 {
     if (tool == m_tool)
@@ -253,7 +336,7 @@ void CanvasItem::applyHistoryResult(const UndoCommand::Result &result)
     if (result.activate)
         m_document.setActiveLayer(result.activate);
     if (!result.dirty.isEmpty()) {
-        m_document.refreshComposite(result.dirty);
+        refreshComposite(result.dirty);
         updateDocumentRect(result.dirty);
     }
     if (result.selection)
@@ -432,7 +515,7 @@ void CanvasItem::duplicateLayer(int id)
     m_document.insertLayer(source + 1, std::move(copy));
     m_document.setActiveLayer(newId);
     m_selectedLayers = {newId};
-    m_document.refreshComposite();
+    refreshComposite();
     updateAll();
     pushCommand(UndoCommand::layerInserted(newId, source + 1, QStringLiteral("Duplicate layer")));
     markContentChanged();
@@ -451,9 +534,13 @@ void CanvasItem::deleteLayer(int id)
         emit notice(QStringLiteral("A drawing needs at least one layer."));
         return;
     }
+    if (confirmIfNotUndoable(m_document.layer(index).image.allocatedBytes(),
+                             QStringLiteral("Deleting \"%1\"").arg(m_document.layer(index).name),
+                             [this, id] { deleteLayer(id); }))
+        return;
     LayerData removed = m_document.takeLayer(index); // the layer below becomes active if needed
     sanitizeLayerSelection();
-    m_document.refreshComposite();
+    refreshComposite();
     updateAll();
     pushCommand(UndoCommand::layerRemoved(std::move(removed), index, QStringLiteral("Delete layer")));
     markContentChanged();
@@ -469,7 +556,7 @@ void CanvasItem::moveLayerUp(int id)
     if (index < 0 || index >= m_document.count() - 1)
         return;
     m_document.moveLayer(index, index + 1);
-    m_document.refreshComposite();
+    refreshComposite();
     updateAll();
     pushCommand(UndoCommand::moved(quint64(id), index, QStringLiteral("Move layer up")));
     markContentChanged();
@@ -485,7 +572,7 @@ void CanvasItem::moveLayerDown(int id)
     if (index <= 0)
         return;
     m_document.moveLayer(index, index - 1);
-    m_document.refreshComposite();
+    refreshComposite();
     updateAll();
     pushCommand(UndoCommand::moved(quint64(id), index, QStringLiteral("Move layer down")));
     markContentChanged();
@@ -509,7 +596,7 @@ void CanvasItem::setLayerProperties(int id, const LayerProperties &props, const 
     layer.opacity = props.opacity;
     layer.locked = props.locked;
     if (pixelsChange) {
-        m_document.refreshComposite();
+        refreshComposite();
         updateAll();
     }
     pushCommand(UndoCommand::properties(quint64(id), before, label));
@@ -573,7 +660,7 @@ void CanvasItem::previewLayerOpacity(int id, qreal opacity)
     if (layer.opacity == opacity)
         return;
     layer.opacity = opacity;
-    m_document.refreshComposite();
+    refreshComposite();
     updateAll();
     markContentChanged(); // the layer list is refreshed when the drag is committed
 }
@@ -597,7 +684,7 @@ void CanvasItem::commitLayerOpacity(int id, qreal opacity)
     setLayerProperties(id, {layer.name, layer.visible, opacity, layer.locked}, QStringLiteral("Change layer opacity"));
     if (wasDragging) {
         // The composite may still show a preview value if the drag ended where it started.
-        m_document.refreshComposite();
+        refreshComposite();
         updateAll();
         emit layersChanged();
     }
@@ -1578,7 +1665,7 @@ void CanvasItem::strokePixelsChanged(const QRect &changed, qint64 dabs)
     const bool firstAfterSnapshot = m_firstEditAfterSnapshot;
     if (firstAfterSnapshot)
         firstEditTimer.start();
-    m_document.refreshComposite(changed);
+    refreshComposite(changed);
     markContentChanged();
     if (firstAfterSnapshot) {
         m_firstEditAfterSnapshot = false;

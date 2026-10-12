@@ -79,7 +79,18 @@ quint64 ProjectIo::exportPng(const DocumentData &snapshot, const QString &path, 
             QBuffer buffer(&bytes);
             buffer.open(QIODevice::WriteOnly);
             QImageWriter writer(&buffer, "png");
-            if (!writer.write(snapshot.composite().convertToFormat(QImage::Format_ARGB32))) {
+            QImage flat = snapshot.composite(); // null if the memory budget refuses it
+            if (flat.isNull()) {
+                SafeSave::Result failed;
+                failed.error = QStringLiteral("Not enough memory to export: the flattened %1 × %2 image needs %3 MiB "
+                                              "(memory limit %4 MiB). The drawing is unchanged.")
+                                   .arg(snapshot.size.width()).arg(snapshot.size.height())
+                                   .arg(qint64(snapshot.size.width()) * snapshot.size.height() * 4 / (1024 * 1024))
+                                   .arg(MemoryBudget::limit() / (1024 * 1024));
+                return failed;
+            }
+            flat.convertTo(QImage::Format_ARGB32); // in place: no second copy
+            if (!writer.write(flat)) {
                 SafeSave::Result failed;
                 failed.error = QStringLiteral("Could not encode the PNG image: %1").arg(writer.errorString());
                 return failed;

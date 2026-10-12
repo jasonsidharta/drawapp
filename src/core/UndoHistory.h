@@ -84,6 +84,9 @@ class UndoHistory
 {
 public:
     static constexpr qsizetype DefaultBudgetBytes = qsizetype(128) * 1024 * 1024;
+    // The app's budget (milestone 10): a quarter of the memory limit, at least 32 MiB and at
+    // most 2 GiB (512 MiB with an 8 GiB desktop default limit; 256 MiB on a 4 GiB phone).
+    static qsizetype budgetForLimit(qint64 memoryLimit);
 
     explicit UndoHistory(qsizetype budgetBytes = DefaultBudgetBytes);
 
@@ -91,6 +94,10 @@ public:
     UndoCommand::Result undo(LayeredDocument &doc);
     UndoCommand::Result redo(LayeredDocument &doc);
     void clear();
+    // Drops the oldest undo entries, then the farthest redo entries, until at least `wanted`
+    // bytes are released (memory pressure). Returns the bytes those entries were counted for;
+    // *dropped (optional) receives how many entries went.
+    qsizetype shed(qsizetype wanted, int *dropped = nullptr);
 
     bool canUndo() const { return !m_undo.empty(); }
     bool canRedo() const { return !m_redo.empty(); }

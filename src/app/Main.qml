@@ -208,6 +208,8 @@ ApplicationWindow {
                     MenuItem { text: "Save As…   (Ctrl+Shift+S)"; enabled: !canvas.fileBusy; onTriggered: window.saveAsDocument(null) }
                     MenuSeparator {}
                     MenuItem { text: "Export PNG…   (Ctrl+Shift+E)"; enabled: !canvas.fileBusy; onTriggered: { if (!window.transformBlocks()) exportDialog.open() } }
+                    MenuSeparator {}
+                    MenuItem { objectName: "memoryMenuItem"; text: "Memory usage…"; onTriggered: memoryDialog.openReport() }
                 }
             }
             ToolButton {
@@ -1045,6 +1047,51 @@ ApplicationWindow {
             const error = canvas.exportPng(selectedFile) // the result arrives through onExportFinished
             if (error)
                 window.showError(error)
+        }
+    }
+
+    // An action whose undo record would not fit in the undo history (milestone 10): asked first.
+    Dialog {
+        id: notUndoableDialog
+        objectName: "notUndoableDialog"
+        anchors.centerIn: parent
+        width: Math.min(window.width - 32, 460)
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        visible: canvas.confirmationText !== ""
+        title: "This cannot be undone"
+        footer: DialogButtonBox {
+            Button { objectName: "notUndoableContinue"; text: "Continue"; DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole }
+            Button { objectName: "notUndoableCancel"; text: "Cancel"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        }
+        onDiscarded: canvas.answerConfirmation(true)
+        onRejected: canvas.answerConfirmation(false)
+        Label {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: canvas.confirmationText
+                  + "\n\nSaving first keeps the current version safe. Cancel leaves the drawing as it is."
+        }
+    }
+
+    Dialog {
+        id: memoryDialog
+        objectName: "memoryDialog"
+        anchors.centerIn: parent
+        width: Math.min(window.width - 32, 460)
+        modal: true
+        title: "Memory usage"
+        standardButtons: Dialog.Close
+        property string report: ""
+        function openReport() { report = canvas.memoryReport(); open() }
+        Label {
+            objectName: "memoryReportLabel"
+            width: parent.width
+            wrapMode: Text.Wrap
+            font.family: "monospace"
+            text: memoryDialog.report
+                  + "\n\nPainted areas use memory; empty canvas does not. When memory runs low, view caches "
+                  + "and then the oldest undo steps are given up first."
         }
     }
 

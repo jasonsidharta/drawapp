@@ -2460,8 +2460,9 @@ private slots:
 
     void editLargerThanTheUndoBudgetIsReported()
     {
-        // A multi-layer transform can exceed the whole undo budget on a large canvas; it is
-        // applied, but the artist is told that it cannot be undone.
+        // A multi-layer transform can exceed the whole undo budget on a large canvas. Since
+        // milestone 10 the artist is asked first (the cost is known before Apply); declining
+        // changes nothing; continuing applies it and says that it cannot be undone.
         const auto [colour, ink] = twoLayerCharacter();
         m_canvas->setLayerSelected(colour, true);
         m_canvas->setHistoryBudgetForTesting(8 * 1024); // less than one 64 x 64 tile
@@ -2469,7 +2470,16 @@ private slots:
         QSignalSpy notices(m_canvas, &CanvasItem::notice);
         QCOMPARE(m_canvas->beginTransform(), QString());
         m_canvas->setTransformValue("rotation", 30);
+        const QImage before = doc();
         m_canvas->applyTransform();
+        QVERIFY(m_canvas->isTransforming());
+        QVERIFY2(m_canvas->confirmationText().contains("cannot be undone"), qPrintable(m_canvas->confirmationText()));
+        m_canvas->answerConfirmation(false);
+        QVERIFY(m_canvas->confirmationText().isEmpty());
+        QVERIFY(m_canvas->isTransforming());
+        QCOMPARE(doc(), before);
+        m_canvas->applyTransform();
+        m_canvas->answerConfirmation(true);
         QVERIFY(!m_canvas->isTransforming());
         QVERIFY(!notices.isEmpty());
         QVERIFY2(notices.last().at(0).toString().contains("cannot be undone"), qPrintable(notices.last().at(0).toString()));
@@ -3025,6 +3035,98 @@ private slots:
         reference = TransformApply::Result(); // its tiles are the only new ones
         session.end();
         QCOMPARE(MemoryBudget::used(MemoryBudget::Category::Document), documentBytes);
+    }
+
+    // --- memory (milestone 10 stage 8) ---
+
+    void deleteAndClearAskWhenTheyCannotBeUndone()
+    {
+        const auto [colour, ink] = twoLayerCharacter();
+        Q_UNUSED(ink);
+        m_canvas->setHistoryBudgetForTesting(8 * 1024);
+        const auto restore = qScopeGuard([&] { m_canvas->setHistoryBudgetForTesting(UndoHistory::DefaultBudgetBytes); });
+        const int layers = m_canvas->layerCount();
+        m_canvas->deleteLayer(colour);
+        QVERIFY(!m_canvas->confirmationText().isEmpty());
+        QCOMPARE(m_canvas->layerCount(), layers); // nothing happens until answered
+        m_canvas->answerConfirmation(false);
+        QCOMPARE(m_canvas->layerCount(), layers);
+        m_canvas->deleteLayer(colour);
+        m_canvas->answerConfirmation(true);
+        QCOMPARE(m_canvas->layerCount(), layers - 1);
+        // Clear asks too; a blank layer (nothing to keep) does not.
+        const QImage before = doc();
+        m_canvas->clearActiveLayer();
+        QVERIFY(!m_canvas->confirmationText().isEmpty());
+        m_canvas->answerConfirmation(false);
+        QCOMPARE(doc(), before);
+        m_canvas->addLayer();
+        m_canvas->clearActiveLayer();
+        QVERIFY(m_canvas->confirmationText().isEmpty());
+    }
+
+    void undoBudgetFollowsTheMemoryLimit()
+    {
+        QCOMPARE(UndoHistory::budgetForLimit(qint64(8) << 30), qsizetype(2) << 30);   // 8 GiB limit: 2 GiB
+        QCOMPARE(UndoHistory::budgetForLimit(qint64(1) << 30), qsizetype(256) << 20); // 1 GiB: 256 MiB
+        QCOMPARE(UndoHistory::budgetForLimit(qint64(64) << 20), qsizetype(32) << 20); // floor
+        QCOMPARE(UndoHistory::budgetForLimit(qint64(64) << 30), qsizetype(2) << 30);  // ceiling
+        QCOMPARE(m_canvas->history().budgetBytes(), UndoHistory::budgetForLimit(MemoryBudget::limit()));
+    }
+
+    void oldUndoStepsGoWhenMemoryRunsOut()
+    {
+        // Under memory pressure the view caches go first, then the oldest undo steps, with a
+        // notice; the newest steps and the drawing stay.
+        // Strokes over paint: each undo step keeps the tiles it painted over (strokes over blank
+        // canvas keep nothing, so there would be nothing to free).
+        m_canvas->setBrushSize(120);
+        for (int i = 0; i < 7; ++i) {
+            m_canvas->setBrushColor(QColor::fromHsv(40 * i, 200, 200));
+            QVERIFY(m_canvas->drawStroke(docCurve({100, 300}, {900, 320}, 10 * i)));
+        }
+        const int steps = m_canvas->history().undoCount();
+        QVERIFY(steps >= 6);
+        const QImage drawing = doc();
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        QVERIFY(m_canvas->history().bytesUsed() > 0);
+        // More than the caches hold, so the undo history is asked too.
+        const qint64 freed = MemoryBudget::evict(MemoryBudget::used(MemoryBudget::Category::Cache)
+                                                 + m_canvas->history().bytesUsed() / 2 + 1);
+        QVERIFY(freed > 0);
+        QVERIFY(m_canvas->history().undoCount() < steps);
+        QVERIFY(m_canvas->history().undoCount() > 0);
+        QCOMPARE(doc(), drawing);
+        QTRY_VERIFY(!notices.isEmpty());
+        QVERIFY2(notices.last().at(0).toString().contains("oldest undo"), qPrintable(notices.last().at(0).toString()));
+        m_canvas->undo(); // the newest step still undoes
+        QVERIFY(doc() != drawing);
+    }
+
+    void memoryReportNamesEveryCategory()
+    {
+        m_canvas->drawStroke(docCurve({100, 300}, {900, 300}, 0));
+        const QString report = m_canvas->memoryReport();
+        for (const char *word : {"limit", "Layers and undo history", "Composite", "View caches", "Transform preview",
+                                 "Temporary", "Undo history", "Peak"})
+            QVERIFY2(report.contains(QLatin1String(word)), word);
+    }
+
+    void exportThatDoesNotFitIsRefusedClearly()
+    {
+        // Flattening for PNG needs the whole canvas at once; when the budget refuses it the export
+        // fails with a reason, and the drawing is untouched.
+        m_canvas->drawStroke(docCurve({100, 300}, {900, 300}, 0));
+        const QImage drawing = doc();
+        const qint64 limit = MemoryBudget::limit();
+        const auto restore = qScopeGuard([&] { MemoryBudget::setLimit(limit == MemoryBudget::defaultLimit() ? 0 : limit); });
+        MemoryBudget::setLimit(MemoryBudget::usedTotal() + 4 * 1024 * 1024); // less than 12 MiB of flat pixels
+        QTemporaryDir dir;
+        const QString error = exportPng(QUrl::fromLocalFile(dir.filePath("big.png")));
+        QVERIFY2(error.contains("Not enough memory to export"), qPrintable(error));
+        QVERIFY(!QFile::exists(dir.filePath("big.png")));
+        MemoryBudget::setLimit(limit == MemoryBudget::defaultLimit() ? 0 : limit);
+        QCOMPARE(doc(), drawing);
     }
 };
 

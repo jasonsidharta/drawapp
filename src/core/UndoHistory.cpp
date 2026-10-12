@@ -260,6 +260,25 @@ quint64 UndoHistory::stateId() const
     return m_baseId;
 }
 
+qsizetype UndoHistory::budgetForLimit(qint64 memoryLimit)
+{
+    return qsizetype(std::clamp<qint64>(memoryLimit / 4, qint64(32) << 20, qint64(2) << 30));
+}
+
+qsizetype UndoHistory::shed(qsizetype wanted, int *dropped)
+{
+    const qsizetype keep = std::max<qsizetype>(0, m_bytes - std::max<qsizetype>(wanted, 1));
+    const qsizetype before = m_bytes;
+    const int entries = int(m_undo.size() + m_redo.size());
+    const qsizetype budget = m_budget;
+    m_budget = keep;
+    enforceBudget();
+    m_budget = budget;
+    if (dropped)
+        *dropped = entries - int(m_undo.size() + m_redo.size());
+    return before - m_bytes;
+}
+
 void UndoHistory::enforceBudget()
 {
     // The undo stack's bottom state becomes the evicted entry's resulting state.

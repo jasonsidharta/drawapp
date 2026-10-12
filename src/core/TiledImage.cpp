@@ -201,6 +201,19 @@ qsizetype TiledImage::allocatedBytes() const
     return qsizetype(allocatedTileCount()) * tileBytes();
 }
 
+qsizetype TiledImage::allocatedBytes(const QRect &area) const
+{
+    const QRect a = area & rect();
+    if (a.isEmpty())
+        return 0;
+    qsizetype bytes = 0;
+    for (int r = rowOf(a.top()); r <= rowOf(a.bottom()); ++r)
+        for (int c = columnOf(a.left()); c <= columnOf(a.right()); ++c)
+            if (hasTile(c, r))
+                bytes += tileBytes();
+    return bytes;
+}
+
 QRect TiledImage::allocatedBounds() const
 {
     QRect r;

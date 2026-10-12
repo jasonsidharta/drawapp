@@ -142,6 +142,8 @@ public:
     int allocatedTileCount() const;
     // Bytes of this image's tiles (a tile shared with another image is counted in both).
     qsizetype allocatedBytes() const;
+    // Bytes of the allocated tiles that touch area.
+    qsizetype allocatedBytes(const QRect &area) const;
     // Union of the allocated tiles' rects (empty if none).
     QRect allocatedBounds() const;
     // Calls f(column, row, const uchar *data) for every allocated tile.

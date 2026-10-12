@@ -26,6 +26,7 @@
 #include <QUrl>
 #include <QVariantList>
 #include <QtQml/qqmlregistration.h>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -68,6 +69,8 @@ class CanvasItem : public QQuickPaintedItem
     Q_PROPERTY(bool transforming READ isTransforming NOTIFY transformChanged)
     // A transform is being applied on a worker thread (milestone 10); edits wait for it.
     Q_PROPERTY(bool applying READ isApplying NOTIFY applyChanged)
+    // An action that could not be undone is waiting for the artist's answer (milestone 10).
+    Q_PROPERTY(QString confirmationText READ confirmationText NOTIFY confirmationChanged)
     Q_PROPERTY(qreal applyProgress READ applyProgress NOTIFY applyProgressChanged)
     Q_PROPERTY(qreal transformX READ transformX NOTIFY transformChanged)
     Q_PROPERTY(qreal transformY READ transformY NOTIFY transformChanged)
@@ -122,6 +125,8 @@ public:
     static constexpr qreal MaxSmoothingRadius = StrokeEngine::MaxSmoothingRadius; // view pixels at smoothing 100
 
     explicit CanvasItem(QQuickItem *parent = nullptr);
+
+    ~CanvasItem() override;
 
     BrushLibrary *brushes() { return &m_brushes; }
     const BrushLibrary *brushes() const { return &m_brushes; }
@@ -203,6 +208,11 @@ public:
     Q_INVOKABLE void applyTransform();
     // Stops a transform being applied; the preview stays open and the document is unchanged.
     Q_INVOKABLE void cancelApply();
+    // Answers confirmationText: true runs the action without undo, false drops it.
+    Q_INVOKABLE void answerConfirmation(bool proceed);
+    QString confirmationText() const { return m_confirmationText; }
+    // Memory in use by category, the limit, and the undo history (for the Memory dialog).
+    Q_INVOKABLE QString memoryReport() const;
     bool isApplying() const { return m_apply.isRunning(); }
     qreal applyProgress() const { return m_apply.progress(); }
     // Tests: the work (changed pixels x layers) from which Apply runs on the worker thread.
@@ -337,6 +347,7 @@ signals:
     void selectionChanged();
     void transformChanged();
     void applyChanged();
+    void confirmationChanged();
     void applyProgressChanged();
     void clipboardChanged();
     void viewChanged();
@@ -400,6 +411,12 @@ private:
     void commitApply(const TransformApply::Result &result);
     // True (after a notice) while a transform is being applied: edits wait for it.
     bool applyBlocks();
+    // When an action's undo record would not fit in the history (undoBytes larger than its whole
+    // budget), asks first: returns true and keeps `action` for answerConfirmation(). Once confirmed,
+    // the action runs again and this returns false.
+    bool confirmIfNotUndoable(qsizetype undoBytes, const QString &what, std::function<void()> action);
+    // Rebuilds the composite over rect; says so if memory for it was refused.
+    void refreshComposite(const QRect &rect = QRect());
     QString applyBusyText() const;
     void cancelStroke();
     // Selection and transform gestures (CanvasItemSelection.cpp).
@@ -570,6 +587,10 @@ private:
     // --- transform ---
     TransformSession m_transform;
     TransformApply m_apply; // after m_transform: destroyed (cancelled and joined) first
+    QString m_confirmationText;
+    std::function<void()> m_confirmedAction;
+    bool m_confirmed = false;    // running a confirmed action: no second question
+    int m_undoEvictor = -1;      // MemoryBudget evictor dropping old undo steps under pressure
     QTimer m_applyProgressTimer;
     qint64 m_backgroundApplyPixels = 4 * 1024 * 1024;
     std::vector<quint64> m_transformLayerIds;

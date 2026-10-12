@@ -1243,6 +1243,44 @@ private slots:
         lib->resetCurrent();
     }
 
+    void memoryDialogsMilestone10()
+    {
+        // The memory report and the "cannot be undone" question, through the real QML.
+        draw({{200, 300}, {800, 320}});
+        QVERIFY(m_window->findChild<QObject *>("memoryDialog"));
+        QVERIFY(m_window->findChild<QObject *>("notUndoableDialog"));
+        QMetaObject::invokeMethod(m_window->findChild<QObject *>("memoryDialog"), "openReport");
+        QTRY_VERIFY(m_window->findChild<QObject *>("memoryDialog")->property("visible").toBool());
+        QQuickItem *label = nullptr;
+        QTRY_VERIFY((label = find("memoryReportLabel")) != nullptr);
+        const QString report = label->property("text").toString();
+        QVERIFY2(report.contains("Layers and undo history") && report.contains("limit"), qPrintable(report));
+        snap("m10_memory_report");
+        QQuickItem *close = waitForButton("Close");
+        QVERIFY(close);
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(close));
+        QTRY_VERIFY(!m_window->findChild<QObject *>("memoryDialog")->property("visible").toBool());
+
+        m_canvas->setHistoryBudgetForTesting(8 * 1024);
+        const QImage before = m_canvas->document().composite().toImage();
+        m_canvas->clearActiveLayer();
+        QTRY_VERIFY(m_window->findChild<QObject *>("notUndoableDialog")->property("visible").toBool());
+        QQuickItem *cancel = waitForButton("Cancel");
+        QVERIFY(cancel);
+        snap("m10_not_undoable");
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(cancel));
+        QTRY_VERIFY(m_canvas->confirmationText().isEmpty());
+        QCOMPARE(m_canvas->document().composite(), before);
+        m_canvas->clearActiveLayer();
+        QQuickItem *proceed = waitForButton("Continue");
+        QVERIFY(proceed);
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(proceed));
+        QTRY_VERIFY(m_canvas->confirmationText().isEmpty());
+        QTRY_COMPARE(m_canvas->document().layer(m_canvas->document().activeIndex()).image.allocatedTileCount(), 0);
+        QTRY_VERIFY(!m_window->findChild<QObject *>("notUndoableDialog")->property("visible").toBool());
+        m_canvas->setHistoryBudgetForTesting(UndoHistory::DefaultBudgetBytes);
+    }
+
     void overwriteOfAProviderDocumentIsConfirmed()
     {
         FakeProvider provider;
@@ -1369,6 +1407,7 @@ private slots:
         m_canvas->projectIo().setBeforeFinishHookForTesting({});
         QCOMPARE(ProjectFile::load(path).document.composite(), m_canvas->document().composite());
     }
+
 };
 
 QTEST_MAIN(TestUi)

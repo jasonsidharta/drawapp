@@ -165,8 +165,10 @@ Plan and order in the milestone 10 specification; research in `research/m10-*.md
 copy-on-write tiles, chosen by measurement); layers, composite, brushes, undo records, selection
 edits, transforms, clipboard and recovery snapshots on tiled storage; project format 3 (sparse
 tiles; versions 1 and 2 still read); a view pyramid for zoomed-out views; Apply on a worker thread
-with progress, cancellation, generations and atomic commit. Remaining: a reduced-resolution
-transform preview, memory-aware undo and refusal messages, recovery and fuzzing,
+with progress, cancellation, generations and atomic commit; memory-aware undo (budget from the
+memory limit, eviction under pressure, confirmation before non-undoable actions), a memory
+report and refusal messages. Remaining: a reduced-resolution transform preview, recovery and
+fuzzing,
 benchmarks of all workloads, Android validation, the artist workflows and the reports.
 
 ## Milestone 7: hardware validation (outstanding: no pen hardware yet)

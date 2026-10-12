@@ -343,6 +343,15 @@ void CanvasItem::clearSelected()
         return;
     }
     const QString label = selected.isActive() ? QStringLiteral("Clear selection") : QStringLiteral("Clear layer");
+    {
+        // The undo record keeps the painted tiles the clear touches.
+        const QRect area = selected.isActive() ? selected.bounds() : QRect(QPoint(0, 0), m_document.size());
+        qsizetype bytes = 0;
+        for (const quint64 id : selectedLayerIds())
+            bytes += m_document.layer(m_document.indexOf(id)).image.allocatedBytes(area);
+        if (confirmIfNotUndoable(bytes, label, [this] { clearSelected(); }))
+            return;
+    }
     std::vector<UndoCommand> children;
     QRect changedAll;
     for (const quint64 id : selectedLayerIds()) {
@@ -392,7 +401,7 @@ void CanvasItem::clearSelected()
     if (children.empty())
         return;
     pushCommand(children.size() == 1 ? std::move(children.front()) : UndoCommand::group(std::move(children), label));
-    m_document.refreshComposite(changedAll);
+    refreshComposite(changedAll);
     markContentChanged();
     updateDocumentRect(changedAll);
 }
@@ -689,6 +698,16 @@ void CanvasItem::applyTransformWith(bool background)
     // copy of the layer sharing its tiles, with the changed area's tiles rewritten. Only then is
     // the document changed, by exchanging tile references, which cannot fail. Pixels moved beyond
     // the canvas are cut off (layers are canvas-sized).
+    if (background) {
+        // Asked before, where the cost is known: the undo record keeps the layers' painted tiles in
+        // the changed area. (Implicit applies cannot ask; they say so afterwards, as strokes do.)
+        qsizetype bytes = 0;
+        for (const quint64 id : m_transformLayerIds)
+            if (const int index = m_document.indexOf(id); index >= 0)
+                bytes += m_document.layer(index).image.allocatedBytes(m_transform.changedRect());
+        if (confirmIfNotUndoable(bytes, QStringLiteral("This transform"), [this] { applyTransformWith(true); }))
+            return;
+    }
     TransformApply::Input input;
     input.session = m_transform.workerCopy();
     input.area = m_transform.changedRect();
@@ -773,7 +792,7 @@ void CanvasItem::commitApply(const TransformApply::Result &result)
             command.withSelection(oldSelection);
         pushCommand(std::move(command));
     }
-    m_document.refreshComposite(changed);
+    refreshComposite(changed);
     markContentChanged();
     endTransformSession();
     updateDocumentRect(changed);
@@ -1097,7 +1116,7 @@ QString CanvasItem::paste()
     m_document.setActiveLayer(added.back());
     m_selectedLayers = QSet<quint64>(added.begin(), added.end()); // ready to transform together
     pushCommand(children.size() == 1 ? std::move(children.front()) : UndoCommand::group(std::move(children), QStringLiteral("Paste")));
-    m_document.refreshComposite(changed);
+    refreshComposite(changed);
     markContentChanged();
     updateDocumentRect(changed);
     emit layersChanged();

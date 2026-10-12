@@ -44,7 +44,8 @@ qint64 physicalMemory(); // bytes, 0 if unknown
 // Frees reconstructible memory: called with the number of bytes wanted, returns bytes freed.
 // Evictors run only on the thread that registered them (the UI thread), never from a worker.
 using Evictor = std::function<qint64(qint64 wanted)>;
-int addEvictor(Evictor evictor);
+// Lower `order` runs first: reconstructible caches (0) before undo history (10).
+int addEvictor(Evictor evictor, int order = 0);
 void removeEvictor(int id);
 // Runs every evictor registered on the calling thread for at least `wanted` bytes (or all it
 // can); returns bytes freed. Used before starting large background work.

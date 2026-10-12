@@ -490,9 +490,9 @@ so it reads on light and dark artwork at any zoom. It is not animated.
   - Grow and shrink by a Euclidean distance; feather as three box blurs.
   - Moving or transforming the selection outline only.
   - Each is one selection undo step. Brushes still apply a feathered selection exactly once.
-- *Undo budget.* An edit larger than the whole 128 MiB budget is still not kept (milestone 1
-  rule). The canvas now shows a notice saying it cannot be undone; large multi-layer transforms
-  can reach this.
+- *Undo budget.* An edit larger than the whole undo budget is still not kept (milestone 1
+  rule). Since milestone 10 Apply asks first when its undo record would not fit; edits that
+  cannot be estimated beforehand show a notice afterwards.
 
 ## Undo and redo
 
@@ -507,7 +507,8 @@ so it reads on light and dark artwork at any zoom. It is not animated.
 - **Unit of undo**: one stroke however it ends; one panel action; one opacity-slider drag (the
   slider previews live without history, the release records one command from the drag's start
   value; a drag that ends at its start value records nothing).
-- **Budget**: 128 MiB for undo and redo together, counting the tiles history keeps alive and the
+- **Budget** (milestone 10): a quarter of the memory limit (at least 32 MiB, at most 2 GiB; the
+  milestone 9 budget was a fixed 128 MiB) for undo and redo together, counting the tiles history keeps alive and the
   painted tiles of removed layers (undoing Add or Duplicate moves that layer into the redo entry,
   which is counted too). Since milestone 10 an undo record refers to the old tiles instead of
   copying them: a stroke over unpainted tiles records "was transparent" and costs nothing, and a
@@ -515,6 +516,18 @@ so it reads on light and dark artwork at any zoom. It is not animated.
   redo; when over budget the oldest undo entries go first, then the farthest redo entries. A
   duplicated layer shares tiles with its source until either is edited, but history counts its
   tiles in full (conservative).
+- **Under memory pressure** the history is a `MemoryBudget` evictor that runs after the view
+  caches: the oldest undo steps (then the farthest redo steps) are given up, with a notice.
+- **Asked first** when the cost is known in advance: Apply of a transform, Clear and Delete layer
+  estimate their undo record (the painted tiles they touch); if it is larger than the whole
+  history budget, a dialog says that the action cannot be undone and offers Continue or Cancel.
+  Strokes and implicit applies cannot be estimated beforehand and still report afterwards.
+- **Memory usage** (File menu) lists the budget's categories, the undo history and the peak; it
+  counts pixel data only.
+- **Refusals**: an operation that cannot get memory changes nothing and says why: a stroke is
+  taken back, a transform does not start or does not apply (the preview stays), opening and
+  pasting are refused, a PNG export too large to flatten is refused, and a composite update that
+  is refused is reported (the drawing itself is unchanged).
 - **Not in history**: active-layer selection, zoom, pan, window size, tool/size/color.
 - **Unsaved state**: `stateId()` compared with the id recorded at save/open/new, as before.
 
@@ -706,7 +719,7 @@ on tiled storage (`docs/m10-performance.md`) and this list is updated with those
 - A full composite rebuild (visibility, opacity, order) takes about 5.6 ms at 5 layers and 12 ms
   at 10; an opacity drag recomposites on every slider move.
 - Memory: 16 KiB per painted 64 x 64 tile in each layer and in the composite (a fully painted
-  2048 x 1536 layer is still 12 MiB), plus up to 128 MiB of history, all within the
+  2048 x 1536 layer is still 12 MiB), plus the undo history (a quarter of the limit at most), all within the
   `MemoryBudget` limit. The selection mask is still one dense byte per canvas pixel (256 MiB at
   16384 x 16384).
 - The view copies the visible part of the drawn level into one buffer per repaint (kept between

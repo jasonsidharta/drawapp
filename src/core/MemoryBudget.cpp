@@ -1,5 +1,7 @@
 #include "MemoryBudget.h"
 
+#include <algorithm>
+
 #include <QMutex>
 #include <QThread>
 #include <QtGlobal>
@@ -30,6 +32,7 @@ struct EvictorEntry
     int id;
     QThread *thread;
     MemoryBudget::Evictor evictor;
+    int order = 0;
 };
 QMutex s_evictorMutex;
 std::vector<EvictorEntry> s_evictors;
@@ -167,11 +170,13 @@ qint64 MemoryBudget::defaultLimit()
     return std::max<qint64>(limit, qint64(256) * 1024 * 1024);
 }
 
-int MemoryBudget::addEvictor(Evictor evictor)
+int MemoryBudget::addEvictor(Evictor evictor, int order)
 {
     QMutexLocker lock(&s_evictorMutex);
     const int id = s_nextEvictorId++;
-    s_evictors.push_back({id, QThread::currentThread(), std::move(evictor)});
+    s_evictors.push_back({id, QThread::currentThread(), std::move(evictor), order});
+    std::stable_sort(s_evictors.begin(), s_evictors.end(),
+                     [](const EvictorEntry &a, const EvictorEntry &b) { return a.order < b.order; });
     return id;
 }
 
