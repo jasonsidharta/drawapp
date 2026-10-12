@@ -547,6 +547,22 @@ void TransformSession::sampleRow(int y, int x0, int x1, QRgb *out, const QRgb *b
     // Source position is affine in x: step once per pixel.
     QPointF p = mapToSource(QPointF(x0 + 0.5, y + 0.5)) - origin;
     const QPointF step = mapToSource(QPointF(x0 + 1.5, y + 0.5)) - origin - p;
+    // A whole-pixel move or flip lands every pixel centre on a source pixel centre: a copy.
+    const double fx = p.x() - 0.5, fy = p.y() - 0.5;
+    if (std::abs(std::abs(step.x()) - 1) < 1e-9 && std::abs(step.y()) < 1e-9 && std::abs(fx - std::round(fx)) < 1e-6
+        && std::abs(fy - std::round(fy)) < 1e-6) {
+        const QImage &src = m_source.front();
+        const int sy = int(std::round(fy));
+        const int dx = step.x() > 0 ? 1 : -1;
+        const QRgb *srcRow = (sy >= 0 && sy < src.height()) ? reinterpret_cast<const QRgb *>(src.constScanLine(sy)) : nullptr;
+        int sx = int(std::round(fx));
+        for (int x = x0; x < x1; ++x, sx += dx) {
+            const QRgb s = (srcRow && sx >= 0 && sx < src.width()) ? srcRow[sx] : 0;
+            const QRgb under = base ? base[x] : 0;
+            out[x] = qAlpha(s) ? over(s, under) : under;
+        }
+        return;
+    }
     for (int x = x0; x < x1; ++x, p += step) {
         const double sx = p.x() * levelScaleX, sy = p.y() * levelScaleY;
         QRgb src = 0;

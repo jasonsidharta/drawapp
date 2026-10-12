@@ -1,6 +1,6 @@
 // Times the CPU paths the app uses, for documents with 1, 5 and 10 layers. Prints Markdown tables.
 // These are CPU processing times on the calling thread, not input-to-display latency.
-// Usage: bench_core [repetitions] [presets]   ("presets": only the brush preset tables)
+// Usage: bench_core [repetitions] [presets|selection]   (only the brush preset or selection/transform tables)
 
 #include "BrushPresets.h"
 #include "LayeredDocument.h"
@@ -8,10 +8,12 @@
 #include "RasterDocument.h"
 #include "RecoveryFile.h"
 #include "SafeSave.h"
+#include "Selection.h"
 #include "StrokeEngine.h"
 #include "StrokeSmoother.h"
 #include "StrokeSpacer.h"
 #include "TileSnapshot.h"
+#include "TransformSession.h"
 #include "UndoHistory.h"
 #include "ViewRenderer.h"
 #include "ViewTransform.h"
@@ -19,6 +21,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QPainter>
+#include <QPainterPath>
 #include <QSaveFile>
 #include <QSysInfo>
 #include <QTemporaryDir>
@@ -412,6 +415,88 @@ void presetBench(int reps)
     }
 }
 
+// Selections and transforms on the 2048 x 1536 canvas: shapes, combining, the outline, and the
+// transform's begin / preview (Fast) / apply (Final) for a 512 px, a 1024 px and a full-canvas
+// source, plus the preview composite with 1, 5 and 10 layers. CPU time on the calling thread
+// (renders use a pool of worker threads; the time is wall time until they finish).
+void selectionTransformBench(int reps)
+{
+    const QSize size(LayeredDocument::DefaultWidth, LayeredDocument::DefaultHeight);
+    std::printf("\n### Selections (2048 x 1536 mask)\n\n| Operation | median ms | p95 ms | max ms |\n|---|---|---|---|\n");
+    QPainterPath rect, ellipse, lasso, all;
+    rect.addRect(QRectF(300, 200, 1024, 768));
+    ellipse.addEllipse(QRectF(300, 200, 1024, 768));
+    for (int i = 0; i < 600; ++i) {
+        const double a = i * 2 * M_PI / 600, r = 500 + 120 * std::sin(a * 7);
+        const QPointF p(1024 + r * std::cos(a), 768 + r * 0.75 * std::sin(a));
+        if (i == 0)
+            lasso.moveTo(p);
+        else
+            lasso.lineTo(p);
+    }
+    all.addRect(QRectF(0, 0, size.width(), size.height()));
+    auto row = [&](const char *label, const Stats &st) {
+        std::printf("| %s | %.2f | %.2f | %.2f |\n", label, st.medianMs, st.p95Ms, st.maxMs);
+    };
+    row("rasterize rectangle 1024 x 768", measure(reps, [&] { Selection::rasterize(size, rect); }));
+    row("rasterize ellipse 1024 x 768", measure(reps, [&] { Selection::rasterize(size, ellipse); }));
+    row("rasterize lasso (600 points)", measure(reps, [&] { Selection::rasterize(size, lasso); }));
+    const Selection base = Selection().combined(Selection::rasterize(size, ellipse), SelectionMode::Replace);
+    const QImage lassoMask = Selection::rasterize(size, lasso);
+    row("combine (Add) incl. bounds", measure(reps, [&] { base.combined(lassoMask, SelectionMode::Add); }));
+    row("invert incl. bounds", measure(reps, [&] { base.inverted(); }));
+    row("outline of the ellipse", measure(reps, [&] { base.outline(); }));
+    const Selection everything = Selection::all(size);
+    row("outline of Select All", measure(reps, [&] { everything.outline(); }));
+
+    std::printf("\n### Transforms (one layer of representative artwork)\n\n| Source | Operation | median ms | p95 ms | max ms |\n|---|---|---|---|---|\n");
+    LayeredDocument doc = makeDocument(5);
+    const QImage layer = doc.layer(doc.activeIndex()).image;
+    struct Case { const char *label; QRect sel; };
+    const Case cases[] = {{"512 x 512 selection", QRect(700, 500, 512, 512)},
+                          {"1024 x 1024 selection", QRect(500, 250, 1024, 1024)},
+                          {"whole layer (no selection)", QRect()}};
+    QImage out(size, QImage::Format_ARGB32_Premultiplied);
+    for (const Case &c : cases) {
+        QPainterPath p;
+        p.addRect(QRectF(c.sel));
+        const Selection sel = c.sel.isNull() ? Selection() : Selection().combined(Selection::rasterize(size, p), SelectionMode::Replace);
+        TransformSession t;
+        const Stats begin = measure(std::max(3, reps / 3), [&] { t.begin(layer, sel); });
+        std::printf("| %s | begin (cache source and base) | %.2f | %.2f | %.2f |\n", c.label, begin.medianMs, begin.p95Ms, begin.maxMs);
+        struct Op { const char *label; double scale, angle; };
+        for (const Op &op : {Op{"move", 1, 0}, Op{"scale 1.5x", 1.5, 0}, Op{"rotate 30 deg", 1, 30}, Op{"reduce to 0.3x", 0.3, 0}}) {
+            t.reset();
+            t.moveBy(QPointF(37, 21));
+            t.setSize(t.sourceRect().width() * op.scale, t.sourceRect().height() * op.scale);
+            t.setRotation(op.angle);
+            const QRect area = t.changedRect();
+            for (auto q : {TransformSession::Quality::Fast, TransformSession::Quality::Final}) {
+                const Stats st = measure(std::max(3, reps / 3), [&] { t.render(out, area, q); });
+                std::printf("| %s | %s, %s (%d x %d px) | %.2f | %.2f | %.2f |\n", c.label, op.label,
+                            q == TransformSession::Quality::Fast ? "preview (bilinear)" : "apply (bicubic)", area.width(),
+                            area.height(), st.medianMs, st.p95Ms, st.maxMs);
+            }
+        }
+        if (sel.isActive()) {
+            const Stats st = measure(std::max(3, reps / 3), [&] { t.transformedSelection(); });
+            std::printf("| %s | selection after apply | %.2f | %.2f | %.2f |\n", c.label, st.medianMs, st.p95Ms, st.maxMs);
+        }
+    }
+
+    std::printf("\n### Transform preview composite (full canvas area, worst case)\n\n| Layers | median ms | p95 ms | max ms |\n|---|---|---|---|\n");
+    for (int layers : {1, 5, 10}) {
+        LayeredDocument d = makeDocument(layers);
+        std::vector<LayerData> copy = d.layers();
+        QImage composite = d.composite();
+        const Stats st = measure(std::max(3, reps / 3), [&] { compositeLayers(composite, composite.rect(), copy); });
+        std::printf("| %d | %.2f | %.2f | %.2f |\n", layers, st.medianMs, st.p95Ms, st.maxMs);
+    }
+    std::printf("\nPreview memory while transforming: a copy of the layer and of the composite (12 + 12 MiB at "
+                "2048 x 1536), the session's base layer when there is a selection (12 MiB) and the source with "
+                "its reductions (about 1.33 x the source).\n");
+}
+
 void renderBench(const char *label, qreal zoom, const QRect &exposed, int reps)
 {
     LayeredDocument doc = makeDocument(5);
@@ -435,6 +520,11 @@ int main(int argc, char **argv)
                 LayeredDocument::DefaultHeight);
     if (argc > 2 && std::strcmp(argv[2], "presets") == 0) {
         presetBench(reps);
+    selectionTransformBench(reps);
+        return 0;
+    }
+    if (argc > 2 && std::strcmp(argv[2], "selection") == 0) {
+        selectionTransformBench(reps);
         return 0;
     }
     singleLayerComparison(reps);
