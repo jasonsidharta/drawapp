@@ -1158,34 +1158,11 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
     if (m_statsEnabled)
         timer.start();
 
-    const QString blocked = activeLayerBlockReason();
-    if (!blocked.isEmpty()) {
-        emit notice(blocked); // the gesture stays None, so the rest of this press does nothing
-        return;
-    }
-    const int index = m_document.indexOf(m_document.activeLayerId());
-    if (index < 0)
-        return;
-    m_gesture = Gesture::Stroke;
-    m_strokeLayerId = m_document.activeLayerId();
-    m_strokeKind = kind;
-    m_strokeMode = (eraserTip || m_tool == Eraser) ? BrushMode::Erase : BrushMode::Paint;
-    // Every brush setting is fixed for the whole stroke here. The smoothing distance is set in view
-    // pixels, so it feels the same at every zoom level.
-    const BrushSettings settings = strokeSettings(m_strokeMode == BrushMode::Erase);
-    m_strokeBlend = settings.blend;
-    m_engine = std::make_unique<StrokeEngine>(settings, m_brushColor, ++m_strokeCount,
-                                              settings.smoothing / 100.0 * MaxSmoothingRadius / m_view.zoom());
     m_strokeClock.start();
     m_lastPressure = pressure;
     m_lastTilt = tilt;
     m_lastHasTilt = hasTilt;
-    QImage &layer = m_document.pixels(index);
-    const qint64 dabs = m_engine->dabCount();
-    const QRect changed = m_engine->begin(layer, strokeSample(viewPos, pressure, tilt, hasTilt), m_strokeBefore);
-    strokePixelsChanged(changed, m_engine->dabCount() - dabs);
-    if (m_engine->usesTime())
-        m_airbrushTimer.start();
+    startStroke(strokeSample(viewPos, pressure, tilt, hasTilt), kind, eraserTip || m_tool == Eraser);
 
     if (m_statsEnabled) {
         const qint64 ns = timer.nsecsElapsed();
@@ -1195,12 +1172,40 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
     }
 }
 
+bool CanvasItem::startStroke(const StrokeSample &sample, PointerKind kind, bool erase)
+{
+    const QString blocked = activeLayerBlockReason();
+    if (!blocked.isEmpty()) {
+        emit notice(blocked); // the gesture stays None, so the rest of this press does nothing
+        return false;
+    }
+    const int index = m_document.indexOf(m_document.activeLayerId());
+    if (index < 0)
+        return false;
+    m_gesture = Gesture::Stroke;
+    m_strokeLayerId = m_document.activeLayerId();
+    m_strokeKind = kind;
+    m_strokeMode = erase ? BrushMode::Erase : BrushMode::Paint;
+    // Every brush setting is fixed for the whole stroke here. The smoothing distance is set in view
+    // pixels, so it feels the same at every zoom level.
+    const BrushSettings settings = strokeSettings(erase);
+    m_strokeBlend = settings.blend;
+    m_engine = std::make_unique<StrokeEngine>(settings, m_brushColor, ++m_strokeCount,
+                                              settings.smoothing / 100.0 * MaxSmoothingRadius / m_view.zoom());
+    if (!m_strokeClip.isNull() && m_strokeClip.size() == m_document.size())
+        m_engine->setClipMask(m_strokeClip);
+    QImage &layer = m_document.pixels(index);
+    const qint64 dabs = m_engine->dabCount();
+    const QRect changed = m_engine->begin(layer, sample, m_strokeBefore);
+    strokePixelsChanged(changed, m_engine->dabCount() - dabs);
+    if (m_engine->usesTime())
+        m_airbrushTimer.start();
+    return true;
+}
+
 void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt)
 {
     if (!m_engine)
-        return;
-    const int index = m_document.indexOf(m_strokeLayerId);
-    if (index < 0)
         return;
     QElapsedTimer timer;
     if (m_statsEnabled)
@@ -1209,10 +1214,7 @@ void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure, const QP
     m_lastPressure = pressure;
     m_lastTilt = tilt;
     m_lastHasTilt = hasTilt;
-    QImage &layer = m_document.pixels(index);
-    const qint64 dabs = m_engine->dabCount();
-    const QRect changed = m_engine->moveTo(layer, strokeSample(viewPos, pressure, tilt, hasTilt), m_strokeBefore);
-    strokePixelsChanged(changed, m_engine->dabCount() - dabs);
+    extendStroke(strokeSample(viewPos, pressure, tilt, hasTilt));
 
     if (m_statsEnabled) {
         const qint64 ns = timer.nsecsElapsed();
@@ -1220,6 +1222,35 @@ void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure, const QP
         m_statsInputNs += ns;
         m_statsInputMaxNs = std::max(m_statsInputMaxNs, ns);
     }
+}
+
+void CanvasItem::extendStroke(const StrokeSample &sample)
+{
+    const int index = m_document.indexOf(m_strokeLayerId);
+    if (!m_engine || index < 0)
+        return;
+    QImage &layer = m_document.pixels(index);
+    const qint64 dabs = m_engine->dabCount();
+    const QRect changed = m_engine->moveTo(layer, sample, m_strokeBefore);
+    strokePixelsChanged(changed, m_engine->dabCount() - dabs);
+}
+
+bool CanvasItem::drawStroke(const std::vector<StrokeSample> &samples, bool erase)
+{
+    if (samples.empty() || m_gesture != Gesture::None)
+        return false;
+    m_strokeClock.start();
+    if (!startStroke(samples.front(), PointerKind::Mouse, erase))
+        return false;
+    for (size_t i = 1; i < samples.size(); ++i)
+        extendStroke(samples[i]);
+    endStroke();
+    return true;
+}
+
+void CanvasItem::setStrokeClipMask(const QImage &mask)
+{
+    m_strokeClip = mask.isNull() ? QImage() : mask.convertToFormat(QImage::Format_Grayscale8);
 }
 
 void CanvasItem::advanceAirbrush()

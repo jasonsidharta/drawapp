@@ -90,6 +90,16 @@ public:
     // The settings a new stroke uses: the eraser's or the paint brush's working settings.
     BrushSettings strokeSettings(bool erase) const { return m_brushes.settings(erase); }
 
+    // Draws one whole stroke from samples in document coordinates through the same path as pointer
+    // input: active-layer checks, the current tool's working brush, one undo step. For tests and
+    // future automation; no pointer events are involved. Returns false (and changes nothing) if
+    // the active layer cannot be painted or another gesture is in progress.
+    bool drawStroke(const std::vector<StrokeSample> &samples, bool erase = false);
+    // Limits painting to a mask (Format_Grayscale8, document size, 255 = editable) from the next
+    // stroke on; a null image removes the limit. The integration point for selections, which do
+    // not exist yet.
+    void setStrokeClipMask(const QImage &mask);
+
     int brushSize() const;
     void setBrushSize(int size);
     QColor brushColor() const { return m_brushColor; }
@@ -255,6 +265,9 @@ private:
     void endStroke();
     // Undoes the stroke in progress completely (Escape); nothing enters the history.
     void cancelStroke();
+    // The document-space part of beginStroke/continueStroke.
+    bool startStroke(const StrokeSample &sample, PointerKind kind, bool erase);
+    void extendStroke(const StrokeSample &sample);
     void advanceAirbrush();
     StrokeSample strokeSample(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt) const;
     void beginPan(const QPointF &viewPos);
@@ -373,6 +386,7 @@ private:
     QElapsedTimer m_strokeClock;
     QTimer m_airbrushTimer;
     quint64 m_strokeCount = 0; // per-stroke random seed
+    QImage m_strokeClip;
     qreal m_lastPressure = 1.0;
     QPointF m_lastTilt;
     bool m_lastHasTilt = false;

@@ -1906,6 +1906,165 @@ private slots:
         }
     }
 
+    // --- brush presets in the document ---
+
+    // A curve in document coordinates with a pressure ramp, 8 ms between samples.
+    static std::vector<StrokeSample> docCurve(QPointF from, QPointF to, qreal bend = 40)
+    {
+        std::vector<StrokeSample> out;
+        for (int i = 0; i <= 40; ++i) {
+            const qreal t = i / 40.0;
+            StrokeSample s;
+            s.pos = from + (to - from) * t + QPointF(0, bend * std::sin(t * M_PI));
+            s.pressure = 0.3 + 0.7 * std::sin(t * M_PI);
+            s.timeMs = i * 8.0;
+            out.push_back(s);
+        }
+        return out;
+    }
+
+    void selectPresetForStroke(const BrushPreset &p)
+    {
+        QVERIFY(m_canvas->brushes()->select(p.id));
+        QCOMPARE(m_canvas->tool(), p.settings.blend == BrushBlend::Erase ? CanvasItem::Eraser : CanvasItem::Brush);
+    }
+
+    void everyPresetIsOneExactUndoStepOnTheActiveLayer()
+    {
+        const int bottom = m_canvas->activeLayerId();
+        m_canvas->setBrushColor(QColor(0, 140, 60));
+        m_canvas->setBrushSize(200);
+        QVERIFY(m_canvas->drawStroke(docCurve({100, 400}, {1900, 400}, 0)));
+        m_canvas->addLayer();
+        const int top = m_canvas->activeLayerId();
+        m_canvas->setBrushColor(QColor(200, 40, 40));
+        m_canvas->setBrushSize(120);
+        QVERIFY(m_canvas->drawStroke(docCurve({100, 400}, {1900, 400}, 0))); // something to erase and smudge
+        m_canvas->setBrushColor(QColor(30, 30, 90));
+        const QImage bottomPixels = layerImage(layerIndex(bottom));
+        int y = 300;
+        for (const BrushPreset &p : BrushPresets::builtIns()) {
+            selectPresetForStroke(p);
+            const QImage before = layerImage(layerIndex(top));
+            const int steps = m_canvas->history().undoCount();
+            // Each stroke crosses the red band (y 340..460), so erasers and smudge have paint to work on.
+            QVERIFY(m_canvas->drawStroke(docCurve({150, qreal(y)}, {1850, qreal(800 - y)})));
+            const QImage after = layerImage(layerIndex(top));
+            QVERIFY2(after != before, qPrintable(p.id));
+            QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+            QCOMPARE(layerImage(layerIndex(bottom)), bottomPixels); // only the active layer changes
+            m_canvas->undo();
+            QVERIFY2(layerImage(layerIndex(top)) == before, qPrintable(p.id + " undo"));
+            m_canvas->redo();
+            QVERIFY2(layerImage(layerIndex(top)) == after, qPrintable(p.id + " redo"));
+            y += 25;
+        }
+        QVERIFY(m_canvas->isModified());
+        m_canvas->fitToView();
+        screenshot("presets_on_layers");
+    }
+
+    void lockedAndHiddenLayersRefuseEveryPreset()
+    {
+        m_canvas->setBrushSize(80);
+        QVERIFY(m_canvas->drawStroke(docCurve({100, 400}, {1900, 400}, 0)));
+        const int id = m_canvas->activeLayerId();
+        const QImage pixels = doc().copy();
+        const int steps = m_canvas->history().undoCount();
+        for (bool lock : {true, false}) {
+            if (lock)
+                m_canvas->setLayerLocked(id, true);
+            else
+                m_canvas->setLayerVisible(id, false);
+            for (const BrushPreset &p : BrushPresets::builtIns()) {
+                selectPresetForStroke(p);
+                QVERIFY2(!m_canvas->drawStroke(docCurve({100, 300}, {1900, 500})), qPrintable(p.id));
+            }
+            QCOMPARE(layerImage(layerIndex(id)), pixels);
+            if (lock)
+                m_canvas->setLayerLocked(id, false);
+            else
+                m_canvas->setLayerVisible(id, true);
+        }
+        QCOMPARE(m_canvas->history().undoCount(), steps + 4); // only the lock and visibility changes
+    }
+
+    void strokeClipMaskLimitsEveryKindOfBrush()
+    {
+        m_canvas->setBrushSize(300);
+        QVERIFY(m_canvas->drawStroke(docCurve({0, 700}, {2047, 700}, 0)));
+        QImage mask(m_canvas->documentSize(), QImage::Format_Grayscale8);
+        mask.fill(0);
+        for (int y = 0; y < mask.height(); ++y)
+            std::fill_n(mask.scanLine(y), 1024, uchar(255));
+        m_canvas->setStrokeClipMask(mask);
+        for (const char *id : {"builtin.textured-paint", "builtin.blend-smudge", "builtin.soft-eraser"}) {
+            const QImage before = doc().copy();
+            QVERIFY(m_canvas->brushes()->select(QString::fromLatin1(id)));
+            m_canvas->setBrushColor(QColor(40, 90, 200));
+            QVERIFY(m_canvas->drawStroke(docCurve({200, 600}, {1900, 800})));
+            QVERIFY2(doc() != before, id);
+            for (int y = 0; y < doc().height(); y += 7)
+                for (int x = 1024; x < doc().width(); x += 7)
+                    QVERIFY2(doc().pixel(x, y) == before.pixel(x, y), id);
+        }
+        m_canvas->setStrokeClipMask(QImage());
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.solid-round")));
+        const QImage before = doc().copy();
+        QVERIFY(m_canvas->drawStroke(docCurve({1100, 300}, {1900, 300}, 0)));
+        QVERIFY(doc() != before); // without the mask, the right half paints again
+    }
+
+    void presetStrokesWhileSavingAndAutosaving()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QTemporaryDir dir;
+        const QString path = dir.filePath("presets.drawapp");
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.textured-paint")));
+        QVERIFY(m_canvas->drawStroke(docCurve({100, 300}, {1900, 300})));
+        const QImage atSave = doc().copy();
+        QSemaphore gate;
+        m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(path)), QString());
+        // While the save runs: smudge, airbrush and pencil strokes, and a recovery write.
+        for (const char *id : {"builtin.blend-smudge", "builtin.soft-airbrush", "builtin.sketch-pencil"}) {
+            QVERIFY(m_canvas->brushes()->select(QString::fromLatin1(id)));
+            QVERIFY(m_canvas->drawStroke(docCurve({300, 150}, {1700, 600})));
+        }
+        QVERIFY(autosaveAndWait());
+        gate.release();
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 1; }, 10000));
+        m_canvas->projectIo().setBeforeFinishHookForTesting({});
+        QVERIFY(finished.first().at(0).toBool());
+        QCOMPARE(ProjectFile::load(path).document.composite(), atSave); // the state when Save was chosen
+        QCOMPARE(recoveredImage(), doc());                             // everything
+        QVERIFY(m_canvas->isModified());
+        for (int i = 0; i < 3; ++i)
+            m_canvas->undo();
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(doc(), atSave);
+    }
+
+    void airbrushStrokeInProgressIsRecovered()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.soft-airbrush")));
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(300, 300));
+        QTest::qWait(150); // spraying while held still
+        QVERIFY(autosaveAndWait());
+        // The recovery copy has the unfinished stroke as it was when written; the airbrush kept
+        // spraying since, so the live document can only be darker.
+        const QPoint p = toDoc(QPointF(300, 300)).toPoint();
+        const int recovered = qAlpha(recoveredImage().pixel(p));
+        QVERIFY(recovered > 0);
+        QVERIFY(recovered <= alphaAt(QPointF(p)));
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(300, 300));
+        QCOMPARE(m_canvas->history().undoCount(), 1);
+    }
+
     void shutdownKeepsOrRemovesRecovery()
     {
         m_recoveryDir = std::make_unique<QTemporaryDir>();
