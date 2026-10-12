@@ -1281,6 +1281,237 @@ private slots:
         m_canvas->setHistoryBudgetForTesting(UndoHistory::DefaultBudgetBytes);
     }
 
+    // Milestone 10: fifteen tasks on large and many-layer canvases, through Main.qml and the real
+    // CanvasItem with SYNTHETIC input (mouse events and generated stroke samples), offscreen. This
+    // is automated workflow coverage, not hands-on validation by an artist, and says nothing
+    // about pen feel. Screenshots: tst_ui_m10w_*.png.
+    void artistWorkflowsMilestone10()
+    {
+        const auto restore = qScopeGuard([&] {
+            m_canvas->transformApplyForTesting().holdForTesting(false);
+            if (m_canvas->isApplying())
+                m_canvas->cancelApply();
+            if (m_canvas->isTransforming())
+                m_canvas->cancelTransform();
+            m_canvas->setBackgroundApplyThresholdForTesting(4 * 1024 * 1024);
+            m_canvas->deselect();
+            m_canvas->setTool(CanvasItem::Brush);
+            m_canvas->newDocument();
+        });
+        auto curve = [](QPointF a, QPointF b, double bend, int n = 80) {
+            std::vector<StrokeSample> v;
+            for (int i = 0; i <= n; ++i) {
+                const double t = double(i) / n;
+                StrokeSample s;
+                s.pos = a + (b - a) * t + QPointF(0, bend * std::sin(t * 3.14159));
+                s.pressure = 0.4 + 0.6 * std::sin(t * 3.14159);
+                s.timeMs = i * 4.0;
+                v.push_back(s);
+            }
+            return v;
+        };
+        auto tiles = [&]() {
+            qint64 n = 0;
+            for (const LayerData &l : m_canvas->document().layers())
+                n += l.image.allocatedTileCount();
+            return n;
+        };
+        auto newCanvas = [&](int preset) {
+            QObject *dialog = m_window->findChild<QObject *>("newCanvasDialog");
+            QVERIFY(dialog);
+            QMetaObject::invokeMethod(dialog, "open");
+            QTRY_VERIFY(dialog->property("visible").toBool());
+            click(QStringLiteral("canvasPreset_%1").arg(preset));
+            QQuickItem *ok = waitForButton("OK");
+            QVERIFY(ok);
+            QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(ok));
+            QTRY_COMPARE(m_canvas->documentSize().width(), preset);
+        };
+        m_canvas->newDocument();
+
+        // 1. A 16384 x 16384 canvas from the New canvas dialog: no pixels allocated yet.
+        newCanvas(16384);
+        QCOMPARE(m_canvas->documentSize(), QSize(16384, 16384));
+        QCOMPARE(tiles(), 0);
+        snap("m10w_01_huge_blank");
+
+        // 2. Long sketch strokes across the whole sheet: only the tiles they cross are allocated.
+        m_canvas->setTool(CanvasItem::Brush);
+        m_canvas->setBrushSize(24);
+        for (int i = 0; i < 6; ++i)
+            QVERIFY(m_canvas->drawStroke(curve({800.0 + 400 * i, 1500}, {15000.0 - 300 * i, 14500}, 900.0 - 300 * i)));
+        const qint64 sketched = tiles();
+        QVERIFY(sketched > 0);
+        QVERIFY2(sketched < 65536 / 10, qPrintable(QString::number(sketched))); // under a tenth of the sheet
+        QVERIFY(MemoryBudget::used(MemoryBudget::Category::Document) < qint64(256) << 20);
+
+        // 3. The whole sheet fitted on screen (view pyramid): the strokes are visible.
+        m_canvas->fitToView();
+        QVERIFY(m_canvas->zoom() < 0.1);
+        snap("m10w_03_huge_fit");
+        const QImage fit = m_window->grabWindow();
+        const QPointF onStroke = m_canvas->mapToScene(m_canvas->viewTransform().docToView(QPointF(800, 1500)));
+        int dark = 0;
+        for (int dy = -4; dy <= 4; ++dy)
+            for (int dx = -4; dx <= 4; ++dx)
+                dark += qGray(fit.pixel(onStroke.toPoint() + QPoint(dx, dy))) < 120;
+        QVERIFY2(dark > 0, "the stroke is not visible at the fit zoom");
+
+        // 4. Zoom in to 100 % and keep drawing (the pixels at full resolution).
+        m_canvas->zoomToActualSize();
+        QCOMPARE(m_canvas->zoom(), 1.0);
+        draw({{8000, 8000}, {8300, 8100}});
+        snap("m10w_04_huge_actual_size");
+
+        // 5. Twenty layers (milestone 9 allowed 42 at 2048 x 1536 and 8 at 4096², fewer here).
+        for (int i = 0; i < 19; ++i)
+            click("addLayerButton");
+        QTRY_COMPARE(m_canvas->layerCount(), 20);
+        for (int i = 0; i < 5; ++i) {
+            m_canvas->setActiveLayer(int(m_canvas->document().layer(5 + i * 3).id));
+            m_canvas->setBrushColor(QColor::fromHsv(60 * i, 200, 200));
+            QVERIFY(m_canvas->drawStroke(curve({2000.0 * i + 500, 3000}, {2000.0 * i + 2400, 9000}, 400)));
+        }
+        m_canvas->fitToView();
+        snap("m10w_05_twenty_layers");
+
+        // 6. Erasing a stroke completely gives its tiles back.
+        const int erasedLayer = int(m_canvas->document().layer(5).id);
+        m_canvas->setActiveLayer(erasedLayer);
+        const qint64 before = m_canvas->document().layer(5).image.allocatedTileCount();
+        QVERIFY(before > 0);
+        m_canvas->setTool(CanvasItem::Eraser);
+        m_canvas->setBrushSize(200);
+        for (int i = 0; i < 4; ++i)
+            QVERIFY(m_canvas->drawStroke(curve({500.0 + 20 * i, 2900}, {2400.0 + 20 * i, 9100}, 400, 400), true));
+        QVERIFY2(m_canvas->document().layer(5).image.allocatedTileCount() < before / 4,
+                 qPrintable(QString("%1 -> %2").arg(before).arg(m_canvas->document().layer(5).image.allocatedTileCount())));
+        m_canvas->setTool(CanvasItem::Brush);
+
+        // 7. Undo and redo through many steps return exactly to each state.
+        const QImage now = m_canvas->document().composite().copy(QRect(0, 0, 12000, 12000).intersected(QRect(0, 0, 4096, 4096)));
+        const int steps = m_canvas->history().undoCount();
+        QVERIFY(steps >= 10);
+        for (int i = 0; i < 10; ++i)
+            click("undoButton");
+        for (int i = 0; i < 10; ++i)
+            m_canvas->redo();
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        QCOMPARE(m_canvas->document().composite().copy(QRect(0, 0, 4096, 4096)), now);
+
+        // 8. The memory report.
+        QMetaObject::invokeMethod(m_window->findChild<QObject *>("memoryDialog"), "openReport");
+        QQuickItem *close = waitForButton("Close");
+        QVERIFY(close);
+        snap("m10w_08_memory");
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(close));
+
+        // 9. Save the huge many-layer project and open it again: same layers and pixels.
+        QTemporaryDir dir;
+        const QString huge = dir.filePath("huge.drawapp");
+        QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(huge)); }, true), QString());
+        QVERIFY2(QFileInfo(huge).size() < 32 * 1024 * 1024, qPrintable(QString::number(QFileInfo(huge).size())));
+        const QImage saved = m_canvas->document().composite().copy(QRect(6000, 6000, 3000, 3000));
+        m_canvas->newDocument();
+        QCOMPARE(waitFor([&] { return m_canvas->openFile(QUrl::fromLocalFile(huge)); }, false), QString());
+        QCOMPARE(m_canvas->layerCount(), 20);
+        QCOMPARE(m_canvas->document().composite().copy(QRect(6000, 6000, 3000, 3000)), saved);
+
+        // 10. A project saved by milestone 9 opens and is saved again in the new format.
+        const QString old = dir.filePath("old.drawapp");
+        QVERIFY(QFile::copy(QStringLiteral(DRAWAPP_SOURCE_DIR "/tests/golden/compat/m9-layered.drawapp"), old));
+        QFile::setPermissions(old, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        QCOMPARE(waitFor([&] { return m_canvas->openFile(QUrl::fromLocalFile(old)); }, false), QString());
+        QCOMPARE(m_canvas->layerCount(), 3);
+        m_canvas->setActiveLayer(42); // "Colour" (the active "Sketch" layer is hidden in that file)
+        draw({{50, 50}, {250, 150}});
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(waitFor([&] { return m_canvas->saveFile(); }, true), QString());
+        QCOMPARE(ProjectFile::load(old).version, 3);
+
+        // 11. Transform six large layers together; Apply runs in the background with progress
+        // (held at a gate by the test, so the progress state can be seen), Stop, then Apply.
+        newCanvas(4096);
+        for (int i = 0; i < 5; ++i)
+            click("addLayerButton");
+        QTRY_COMPARE(m_canvas->layerCount(), 6);
+        for (int i = 0; i < 6; ++i) {
+            m_canvas->setActiveLayer(int(m_canvas->document().layer(i).id));
+            m_canvas->setBrushSize(120);
+            m_canvas->setBrushColor(QColor::fromHsv(50 * i, 180, 210));
+            QVERIFY(m_canvas->drawStroke(curve({300.0, 300.0 + 550 * i}, {3800.0, 500.0 + 550 * i}, 200)));
+        }
+        for (const LayerData &l : m_canvas->document().layers())
+            m_canvas->setLayerSelected(int(l.id), true);
+        m_canvas->fitToView();
+        const QImage beforeTransform = m_canvas->document().composite().toImage();
+        const int stepsBefore = m_canvas->history().undoCount();
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("rotation", 12);
+        m_canvas->setTransformValue("width", m_canvas->transformWidth() * 0.8);
+        TransformApply &job = m_canvas->transformApplyForTesting();
+        job.holdForTesting(true);
+        snap("m10w_11_before_apply");
+        QTest::keyClick(m_window, Qt::Key_Return); // Enter applies
+        QTRY_VERIFY2(m_canvas->isApplying(),
+                     qPrintable(QString("transforming %1, question \"%2\", area %3 x %4")
+                                    .arg(m_canvas->isTransforming())
+                                    .arg(m_canvas->confirmationText())
+                                    .arg(m_canvas->transformSession().changedRect().width())
+                                    .arg(m_canvas->transformSession().changedRect().height())));
+        QVERIFY(waitFor("applyProgressBar"));
+        snap("m10w_11_applying");
+
+        // 12. While applying, painting is refused with a message; the view still zooms.
+        draw({{1000, 1000}, {1400, 1100}});
+        QTRY_VERIFY(find("noticeLabel") && find("noticeLabel")->property("text").toString().contains("still being applied"));
+        m_canvas->zoomIn();
+        click("cancelTransformButton"); // "Stop": the drawing stays, the preview stays
+        QTRY_VERIFY(!m_canvas->isApplying());
+        QVERIFY(m_canvas->isTransforming());
+        QCOMPARE(m_canvas->document().composite().toImage(), beforeTransform);
+        job.holdForTesting(false);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QTRY_VERIFY_WITH_TIMEOUT(!m_canvas->isTransforming(), 30000);
+        QCOMPARE(m_canvas->history().undoCount(), stepsBefore + 1);
+        QVERIFY(m_canvas->document().composite().toImage() != beforeTransform);
+        snap("m10w_12_applied");
+        m_canvas->undo();
+        QCOMPARE(m_canvas->document().composite().toImage(), beforeTransform);
+        m_canvas->redo();
+
+        // 13. Magic wand on the large canvas selects one painted band.
+        m_canvas->setActiveLayer(int(m_canvas->document().layer(2).id));
+        m_canvas->setTool(CanvasItem::Select);
+        m_canvas->setSelectShape(CanvasItem::WandShape);
+        m_canvas->setWandSampleAll(true);
+        m_canvas->zoomToActualSize();
+        const QPointF band = m_canvas->viewTransform().viewToDoc(QPointF(m_canvas->width() / 2, m_canvas->height() / 2));
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, docToScene(band));
+        QTRY_VERIFY(m_canvas->hasSelection());
+        snap("m10w_13_wand");
+        m_canvas->deselect();
+        m_canvas->setTool(CanvasItem::Brush);
+
+        // 14. Copy a region of every layer and paste it as new layers.
+        for (const LayerData &l : m_canvas->document().layers())
+            m_canvas->setLayerSelected(int(l.id), true);
+        m_canvas->selectAll();
+        QCOMPARE(m_canvas->copySelection(), QString());
+        const int layersBefore = m_canvas->layerCount();
+        QCOMPARE(m_canvas->paste(), QString());
+        QCOMPARE(m_canvas->layerCount(), 2 * layersBefore);
+        m_canvas->deselect();
+
+        // 15. Export the 4096 x 4096 drawing as PNG.
+        const QString png = dir.filePath("large.png");
+        QSignalSpy exported(m_canvas, &CanvasItem::exportFinished);
+        QCOMPARE(m_canvas->exportPng(QUrl::fromLocalFile(png)), QString());
+        QTRY_VERIFY_WITH_TIMEOUT(exported.count() == 1, 30000);
+        QVERIFY(exported.first().at(0).toBool());
+        QCOMPARE(QImage(png).size(), QSize(4096, 4096));
+    }
+
     void overwriteOfAProviderDocumentIsConfirmed()
     {
         FakeProvider provider;

@@ -19,6 +19,8 @@ ViewPyramid::~ViewPyramid()
 qint64 ViewPyramid::dropBuffer()
 {
     const qint64 bytes = m_scratchBytes;
+    m_bufferValid = false;
+    m_bufferStamps.clear();
     m_scratch = QImage();
     if (bytes > 0)
         MemoryBudget::release(bytes, MemoryBudget::Category::Cache);
@@ -171,21 +173,40 @@ void ViewPyramid::build(const TiledImage &below, TiledImage &out, int column, in
 
 QImage ViewPyramid::pixels(const TiledImage &image, int level, const QRect &area)
 {
-    const QRect a = area & QRect(QPoint(0, 0), levelSize(image.size(), std::clamp(level, 0, MaxLevel)));
+    level = std::clamp(level, 0, MaxLevel);
+    const QRect levelRect(QPoint(0, 0), levelSize(image.size(), level));
+    const QRect a = area & levelRect;
     if (a.isEmpty())
         return QImage();
-    // The buffer first (growing it may evict the levels, which are not in use yet), then the level.
-    const qint64 needed = qint64(a.width()) * a.height() * 4;
-    if (needed > m_scratchBytes) {
-        if (!MemoryBudget::tryReserve(needed - m_scratchBytes, MemoryBudget::Category::Cache))
-            return QImage();
-        m_scratch = QImage();
-        m_scratch = QImage(int(std::min<qint64>(needed / 4, INT_MAX)), 1, QImage::Format_ARGB32_Premultiplied);
-        if (m_scratch.isNull()) {
-            MemoryBudget::release(needed - m_scratchBytes, MemoryBudget::Category::Cache);
-            return QImage();
+    const int ts = image.tileSize();
+    // The buffer keeps a tile-aligned area around the request (one tile of margin, so small pans
+    // reuse it) and, per tile, the stamp of the pixels it holds: later calls copy only tiles that
+    // changed. A different level, image size or an area outside it starts it again.
+    if (!m_bufferValid || level != m_bufferLevel || image.size() != m_bufferImageSize || !m_bufferArea.contains(a)) {
+        const QRect aligned(QPoint((a.left() / ts - 1) * ts, (a.top() / ts - 1) * ts),
+                            QPoint(((a.right() / ts) + 2) * ts - 1, ((a.bottom() / ts) + 2) * ts - 1));
+        const QRect buffer = aligned & levelRect;
+        // The buffer first (growing it may evict the levels, which are not in use yet).
+        const qint64 needed = qint64(buffer.width()) * buffer.height() * 4;
+        m_bufferValid = false;
+        if (needed > m_scratchBytes) {
+            if (!MemoryBudget::tryReserve(needed - m_scratchBytes, MemoryBudget::Category::Cache))
+                return QImage();
+            m_scratch = QImage();
+            m_scratch = QImage(int(std::min<qint64>(needed / 4, INT_MAX)), 1, QImage::Format_ARGB32_Premultiplied);
+            if (m_scratch.isNull()) {
+                MemoryBudget::release(needed - m_scratchBytes, MemoryBudget::Category::Cache);
+                return QImage();
+            }
+            m_scratchBytes = needed;
         }
-        m_scratchBytes = needed;
+        m_bufferArea = buffer;
+        m_bufferLevel = level;
+        m_bufferImageSize = image.size();
+        const int columns = (buffer.right() / ts) - (buffer.left() / ts) + 1;
+        const int rows = (buffer.bottom() / ts) - (buffer.top() / ts) + 1;
+        m_bufferStamps.assign(size_t(columns) * size_t(rows), ~quint64(0)); // nothing copied yet
+        m_bufferValid = true;
     }
     const TiledImage *source = this->level(image, level, a);
     if (!source)
@@ -193,10 +214,23 @@ QImage ViewPyramid::pixels(const TiledImage &image, int level, const QRect &area
     const bool wasBusy = m_busy;
     m_busy = true;
     uchar *bits = m_scratch.bits();
-    const qsizetype bpl = qsizetype(a.width()) * 4;
-    source->readInto(a, bits, bpl);
+    const qsizetype bpl = qsizetype(m_bufferArea.width()) * 4;
+    const int c0 = m_bufferArea.left() / ts, r0 = m_bufferArea.top() / ts;
+    const int columns = (m_bufferArea.right() / ts) - c0 + 1;
+    for (int r = a.top() / ts; r <= a.bottom() / ts; ++r)
+        for (int col = a.left() / ts; col <= a.right() / ts; ++col) {
+            quint64 &held = m_bufferStamps[size_t(r - r0) * size_t(columns) + size_t(col - c0)];
+            const quint64 now = source->tileStamp(col, r);
+            if (held == now)
+                continue;
+            const QRect t = source->tileRect(col, r) & m_bufferArea;
+            source->readInto(t, bits + qsizetype(t.top() - m_bufferArea.top()) * bpl + qsizetype(t.left() - m_bufferArea.left()) * 4,
+                             bpl);
+            held = now;
+        }
     m_busy = wasBusy;
-    return QImage(bits, a.width(), a.height(), bpl, QImage::Format_ARGB32_Premultiplied);
+    const uchar *origin = bits + qsizetype(a.top() - m_bufferArea.top()) * bpl + qsizetype(a.left() - m_bufferArea.left()) * 4;
+    return QImage(origin, a.width(), a.height(), bpl, QImage::Format_ARGB32_Premultiplied);
 }
 
 qint64 ViewPyramid::clear()

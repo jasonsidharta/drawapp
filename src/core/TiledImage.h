@@ -14,8 +14,10 @@ class TileBlock
 {
 public:
     // Nullptr when the memory budget or the allocator refuses. Zero-filled (transparent) unless
-    // copying from `source`.
-    static TileBlock *create(int bytes, MemoryBudget::Category category, const TileBlock *source = nullptr);
+    // copying from `source`, or left uninitialised when `uninitialized` (the caller writes every
+    // byte at once).
+    static TileBlock *create(int bytes, MemoryBudget::Category category, const TileBlock *source = nullptr,
+                             bool uninitialized = false);
 
     uchar *data() { return reinterpret_cast<uchar *>(this) + HeaderSize; }
     const uchar *data() const { return reinterpret_cast<const uchar *>(this) + HeaderSize; }

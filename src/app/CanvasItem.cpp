@@ -201,6 +201,17 @@ void CanvasItem::setBrushColor(const QColor &color)
     emit brushColorChanged();
 }
 
+namespace {
+
+// "12 MiB", or "96 KiB" below one MiB (never "0 MiB").
+QString sizeText(qint64 bytes)
+{
+    return bytes >= 1024 * 1024 ? QStringLiteral("%1 MiB").arg(bytes / (1024 * 1024))
+                                : QStringLiteral("%1 KiB").arg(std::max<qint64>(1, bytes / 1024));
+}
+
+} // namespace
+
 CanvasItem::~CanvasItem()
 {
     MemoryBudget::removeEvictor(m_undoEvictor);
@@ -218,10 +229,7 @@ bool CanvasItem::confirmIfNotUndoable(qsizetype undoBytes, const QString &what, 
 {
     if (m_confirmed || undoBytes <= m_history.budgetBytes())
         return false;
-    auto size = [](qint64 bytes) {
-        return bytes >= 1024 * 1024 ? QStringLiteral("%1 MiB").arg(bytes / (1024 * 1024))
-                                    : QStringLiteral("%1 KiB").arg(std::max<qint64>(1, bytes / 1024));
-    };
+    const auto size = sizeText;
     m_confirmationText = QStringLiteral("%1 changes about %2 of pixels, more than the undo history can hold (%3). "
                                         "If you continue, it cannot be undone.")
                              .arg(what, size(undoBytes), size(m_history.budgetBytes()));
@@ -379,11 +387,9 @@ void CanvasItem::pushCommand(UndoCommand command)
     const QString label = command.label();
     m_history.push(std::move(command));
     if (bytes > m_history.budgetBytes())
-        emit notice(QStringLiteral("\"%1\" changed %2 MiB of pixels, more than the undo history can hold (%3 MiB), "
+        emit notice(QStringLiteral("\"%1\" changed %2 of pixels, more than the undo history can hold (%3), "
                                    "so it cannot be undone.")
-                        .arg(label)
-                        .arg(bytes / (1024 * 1024))
-                        .arg(m_history.budgetBytes() / (1024 * 1024)));
+                        .arg(label, sizeText(bytes), sizeText(m_history.budgetBytes())));
     emit historyChanged();
 }
 
@@ -735,6 +741,18 @@ void CanvasItem::newDocument()
     replaceDocument(LayeredDocument());
     setFile({}, {});
     emit fileChanged();
+}
+
+QString CanvasItem::newDocumentSized(int width, int height)
+{
+    if (m_apply.isRunning())
+        return applyBusyText();
+    if (width < 1 || height < 1 || width > DocumentLimits::MaxSide || height > DocumentLimits::MaxSide)
+        return QStringLiteral("A canvas can be 1 to %1 pixels on each side.").arg(DocumentLimits::MaxSide);
+    replaceDocument(LayeredDocument(QSize(width, height)));
+    setFile({}, {});
+    emit fileChanged();
+    return {};
 }
 
 void CanvasItem::setFile(const QString &path, const QUrl &url, const QString &knownName)

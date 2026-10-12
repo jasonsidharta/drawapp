@@ -203,6 +203,8 @@ ApplicationWindow {
                     id: fileMenu
                     y: parent.height
                     MenuItem { text: "New   (Ctrl+N)"; enabled: !canvas.fileBusy; onTriggered: window.newDocument() }
+                    MenuItem { objectName: "newCanvasMenuItem"; text: "New canvas…   (Ctrl+Shift+N)"; enabled: !canvas.fileBusy
+                               onTriggered: newCanvasDialog.open() }
                     MenuItem { text: "Open…   (Ctrl+O)"; enabled: !canvas.fileBusy; onTriggered: window.openDocument() }
                     MenuItem { text: "Save   (Ctrl+S)"; enabled: !canvas.opening; onTriggered: window.saveDocument(null) }
                     MenuItem { text: "Save As…   (Ctrl+Shift+S)"; enabled: !canvas.fileBusy; onTriggered: window.saveAsDocument(null) }
@@ -1074,6 +1076,56 @@ ApplicationWindow {
         }
     }
 
+    // A canvas of any size up to 16384 x 16384 (milestone 10: memory follows what is painted).
+    Dialog {
+        id: newCanvasDialog
+        objectName: "newCanvasDialog"
+        anchors.centerIn: parent
+        width: Math.min(window.width - 32, 380)
+        modal: true
+        title: "New canvas"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onOpened: { widthField.text = "2048"; heightField.text = "1536" }
+        onAccepted: {
+            const w = parseInt(widthField.text), h = parseInt(heightField.text)
+            window.whenChangesHandled(() => {
+                const error = canvas.newDocumentSized(isNaN(w) ? 0 : w, isNaN(h) ? 0 : h)
+                if (error)
+                    window.showError(error)
+            })
+        }
+        ColumnLayout {
+            width: parent.width
+            Flow {
+                Layout.fillWidth: true
+                spacing: 4
+                Repeater {
+                    model: [[2048, 1536], [4096, 4096], [8192, 8192], [16384, 16384]]
+                    Button {
+                        objectName: "canvasPreset_" + modelData[0]
+                        text: modelData[0] + " × " + modelData[1]
+                        onClicked: { widthField.text = modelData[0]; heightField.text = modelData[1] }
+                    }
+                }
+            }
+            RowLayout {
+                Label { text: "Width" }
+                TextField { id: widthField; objectName: "canvasWidthField"; inputMethodHints: Qt.ImhDigitsOnly
+                            validator: IntValidator { bottom: 1; top: canvas.maxCanvasSide() } }
+                Label { text: "Height" }
+                TextField { id: heightField; objectName: "canvasHeightField"; inputMethodHints: Qt.ImhDigitsOnly
+                            validator: IntValidator { bottom: 1; top: canvas.maxCanvasSide() } }
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                font.pixelSize: 11
+                text: "Up to " + canvas.maxCanvasSide() + " pixels per side. Empty canvas uses almost no memory; "
+                      + "memory grows with what you paint."
+            }
+        }
+    }
+
     Dialog {
         id: memoryDialog
         objectName: "memoryDialog"
@@ -1294,6 +1346,7 @@ ApplicationWindow {
     Shortcut { sequences: [StandardKey.Undo]; enabled: !canvas.opening; onActivated: canvas.undo() }
     Shortcut { sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; enabled: !canvas.opening; onActivated: canvas.redo() }
     Shortcut { sequences: [StandardKey.New]; onActivated: window.newDocument() }
+    Shortcut { sequences: ["Ctrl+Shift+N"]; enabled: !canvas.fileBusy; onActivated: newCanvasDialog.open() }
     Shortcut { sequences: [StandardKey.Open]; onActivated: window.openDocument() }
     Shortcut { sequences: [StandardKey.Save]; onActivated: window.saveDocument(null) }
     Shortcut { sequences: ["Ctrl+Shift+S"]; onActivated: window.saveAsDocument(null) }

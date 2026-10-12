@@ -258,6 +258,10 @@ public:
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
     Q_INVOKABLE void newDocument();
+    // A new canvas of the given size (1 to 16384 pixels per side, milestone 10); empty on
+    // success, otherwise why not. Memory is used only where it is painted.
+    Q_INVOKABLE QString newDocumentSized(int width, int height);
+    Q_INVOKABLE int maxCanvasSide() const { return DocumentLimits::MaxSide; }
     // Saving and opening run on a worker thread. These return an empty string when the operation
     // started (or, for Save during a save to the same file, was queued) and otherwise a message to
     // show. The outcome arrives later through saveFinished / openFinished.

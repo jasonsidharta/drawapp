@@ -49,6 +49,7 @@ add_test(NAME tst_canvas COMMAND tst_canvas)
 # Loads the real Main.qml (static QML module) and drives the toolbar and layer panel.
 qt_add_executable(tst_ui tst_ui.cpp)
 target_link_libraries(tst_ui PRIVATE drawapp_ui drawapp_uiplugin Qt6::Test)
+target_compile_definitions(tst_ui PRIVATE DRAWAPP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME tst_ui COMMAND tst_ui)
 
 # Real CanvasItem under synthetic strokes with autosave and an async save (not part of ctest).

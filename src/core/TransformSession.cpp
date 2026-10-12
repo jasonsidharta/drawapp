@@ -236,16 +236,17 @@ bool TransformSession::begin(const std::vector<TiledImage> &layers, const Select
         part.original = layer; // a snapshot: shares the layer's tiles, read only
         part.base = QImage(rect.size(), QImage::Format_ARGB32_Premultiplied);
         QImage source(rect.size(), QImage::Format_ARGB32_Premultiplied);
-        const QImage region = layer.copy(rect);
-        if (part.base.isNull() || source.isNull() || region.isNull()) {
+        if (part.base.isNull() || source.isNull()) {
             end(); // out of memory: nothing started
             m_beginOutOfMemory = true;
             return false;
         }
         // source = layer × s, base = layer − source (exactly complementary). Without a selection
         // everything in the rectangle is source.
+        std::vector<QRgb> row(size_t(rect.width()));
         for (int y = rect.top(); y <= rect.bottom(); ++y) {
-            const QRgb *in = reinterpret_cast<const QRgb *>(region.constScanLine(y - rect.top())) - rect.left();
+            readOriginal(layer, y, rect.left(), rect.right() + 1, row.data());
+            const QRgb *in = row.data() - rect.left();
             const uchar *s = selection.isActive() ? selection.mask().constScanLine(y) : nullptr;
             QRgb *base = reinterpret_cast<QRgb *>(part.base.scanLine(y - rect.top()));
             QRgb *src = reinterpret_cast<QRgb *>(source.scanLine(y - rect.top()));
@@ -650,9 +651,9 @@ bool TransformSession::render(int partIndex, TiledImage &out, const QRect &reque
     const QRect area = requested & out.rect();
     if (area.isEmpty())
         return true;
-    // A band of tile rows at a time (four: enough rows for the row pool to share): rendered in
-    // parallel into a dense band, then written. Cancellation is checked between bands.
-    const int band = out.tileSize() * 4;
+    // A band of tile rows at a time (sixteen: enough rows that the row pool uses every thread):
+    // rendered in parallel into a dense band, then written. Cancellation is checked between bands.
+    const int band = out.tileSize() * 16;
     QImage buffer(area.width(), band, QImage::Format_ARGB32_Premultiplied);
     if (buffer.isNull())
         return false;

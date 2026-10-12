@@ -1,5 +1,7 @@
 #include "ProjectFile.h"
 
+#include "Parallel.h"
+
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QFile>
@@ -138,36 +140,60 @@ QImage decompressLayer(QByteArrayView block, int width, int height, QString *err
 
 // --- version 3: tiles ---
 
-// One layer's tile stream (see ProjectFile.h). Transparent tiles are not stored.
+// Tiles are coded in parallel, a chunk at a time, so the memory held at once stays bounded.
+constexpr int TileChunk = 512;
+
+// One layer's tile stream (see ProjectFile.h). Transparent tiles are not stored. Tiles are
+// compressed in parallel; the stream is the same as compressing them one by one.
 QByteArray encodeTiles(const TiledImage &image, int *count)
 {
+    struct Tile
+    {
+        int column, row;
+        const uchar *data;
+    };
+    std::vector<Tile> tiles;
+    image.forEachTile([&](int column, int row, const uchar *data) { tiles.push_back({column, row, data}); });
     QByteArray block(4, '\0');
-    QByteArray raw;
     *count = 0;
-    image.forEachTile([&](int column, int row, const uchar *data) {
-        const QRect r = image.tileRect(column, row);
-        const qsizetype rowBytes = qsizetype(r.width()) * 4;
-        raw.resize(rowBytes * r.height());
-        for (int y = 0; y < r.height(); ++y)
-            std::memcpy(raw.data() + rowBytes * y, data + qsizetype(y) * image.tileStride(), size_t(rowBytes));
-        if (std::all_of(raw.cbegin(), raw.cend(), [](char c) { return c == 0; }))
-            return;
-        swapToFileOrder(reinterpret_cast<uchar *>(raw.data()), raw.size());
-        const QByteArray compressed = qCompress(raw);
-        char entry[12];
-        qToLittleEndian(quint32(column), entry);
-        qToLittleEndian(quint32(row), entry + 4);
-        qToLittleEndian(quint32(compressed.size()), entry + 8);
-        block.append(entry, sizeof(entry));
-        block.append(compressed);
-        ++*count;
-    });
+    std::vector<QByteArray> compressed;
+    for (size_t first = 0; first < tiles.size(); first += TileChunk) {
+        const int n = int(std::min<size_t>(TileChunk, tiles.size() - first));
+        compressed.assign(size_t(n), QByteArray());
+        parallelFor(0, n, 4, [&](int i) {
+            const Tile &t = tiles[first + size_t(i)];
+            const QRect r = image.tileRect(t.column, t.row);
+            const qsizetype rowBytes = qsizetype(r.width()) * 4;
+            QByteArray raw(rowBytes * r.height(), Qt::Uninitialized);
+            for (int y = 0; y < r.height(); ++y)
+                std::memcpy(raw.data() + rowBytes * y, t.data + qsizetype(y) * image.tileStride(), size_t(rowBytes));
+            if (std::all_of(raw.cbegin(), raw.cend(), [](char ch) { return ch == 0; }))
+                return; // transparent: not stored
+            swapToFileOrder(reinterpret_cast<uchar *>(raw.data()), raw.size());
+            compressed[size_t(i)] = qCompress(raw);
+        });
+        for (int i = 0; i < n; ++i) {
+            const QByteArray &data = compressed[size_t(i)];
+            if (data.isEmpty())
+                continue;
+            const Tile &t = tiles[first + size_t(i)];
+            char entry[12];
+            qToLittleEndian(quint32(t.column), entry);
+            qToLittleEndian(quint32(t.row), entry + 4);
+            qToLittleEndian(quint32(data.size()), entry + 8);
+            block.append(entry, sizeof(entry));
+            block.append(data);
+            ++*count;
+        }
+    }
     qToLittleEndian(quint32(*count), block.data());
     return block;
 }
 
 // Reads one layer's tile stream into out (a transparent layer of the canvas size), or only checks
-// it when out is null. Returns an empty string or the reason it was refused.
+// it when out is null. Returns an empty string or the reason it was refused. The entries are
+// checked in order first (positions, order, sizes); then tiles are decompressed and checked in
+// parallel, a chunk at a time, and written in order on this thread.
 QString decodeTiles(QByteArrayView block, int tileSize, QSize canvas, qint64 expectedCount, TiledImage *out)
 {
     if (block.size() < 4)
@@ -177,6 +203,14 @@ QString decodeTiles(QByteArrayView block, int tileSize, QSize canvas, qint64 exp
     const quint32 count = qFromLittleEndian<quint32>(block.data());
     if (count != expectedCount || count > columns * rows)
         return damaged(QStringLiteral("invalid tile count"));
+    struct Entry
+    {
+        QRect rect;
+        qsizetype offset;
+        quint32 length;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(count);
     qsizetype pos = 4;
     qint64 previous = -1;
     for (quint32 i = 0; i < count; ++i) {
@@ -196,26 +230,89 @@ QString decodeTiles(QByteArrayView block, int tileSize, QSize canvas, qint64 exp
             return damaged(QStringLiteral("invalid tile data size"));
         const QRect r = QRect(int(column) * tileSize, int(row) * tileSize, tileSize, tileSize)
                         & QRect(QPoint(0, 0), canvas);
-        const qsizetype rawSize = qsizetype(r.width()) * r.height() * 4;
         // Checked before qUncompress allocates (at most MaxTileSize² × 4 bytes).
-        if (qFromBigEndian<quint32>(block.data() + pos) != quint32(rawSize))
+        if (qFromBigEndian<quint32>(block.data() + pos) != quint32(qsizetype(r.width()) * r.height() * 4))
             return damaged(QStringLiteral("tile data size does not match the tile"));
-        QByteArray raw = qUncompress(reinterpret_cast<const uchar *>(block.data() + pos), length);
+        entries.push_back({r, pos, length});
         pos += length;
-        if (raw.size() != rawSize)
-            return damaged(QStringLiteral("pixel data cannot be decompressed"));
-        uchar *pixels = reinterpret_cast<uchar *>(raw.data());
-        if (!validPremultiplied(pixels, rawSize))
-            return damaged(QStringLiteral("invalid pixel values"));
-        if (!out)
-            continue;
-        swapToFileOrder(pixels, rawSize);
-        const QImage tile(pixels, r.width(), r.height(), qsizetype(r.width()) * 4, QImage::Format_ARGB32_Premultiplied);
-        if (!out->write(r.topLeft(), tile))
-            return outOfMemory();
     }
     if (pos != block.size())
         return damaged(QStringLiteral("unexpected data after the last tile"));
+
+    std::vector<QByteArray> raw;
+    std::vector<int> problem; // 0 ok, 1 cannot decompress, 2 invalid pixels, 3 transparent (ok)
+    std::vector<uchar *> destination;
+    for (size_t first = 0; first < entries.size(); first += TileChunk) {
+        const int n = int(std::min<size_t>(TileChunk, entries.size() - first));
+        raw.assign(size_t(n), QByteArray());
+        problem.assign(size_t(n), 0);
+        parallelFor(0, n, 4, [&](int i) {
+            const Entry &e = entries[first + size_t(i)];
+            const qsizetype rawSize = qsizetype(e.rect.width()) * e.rect.height() * 4;
+            QByteArray pixels = qUncompress(reinterpret_cast<const uchar *>(block.data() + e.offset), e.length);
+            if (pixels.size() != rawSize) {
+                problem[size_t(i)] = 1;
+                return;
+            }
+            uchar *bytes = reinterpret_cast<uchar *>(pixels.data());
+            if (!validPremultiplied(bytes, rawSize)) {
+                problem[size_t(i)] = 2;
+                return;
+            }
+            if (out) {
+                if (std::all_of(bytes, bytes + rawSize, [](uchar b) { return b == 0; })) {
+                    problem[size_t(i)] = 3; // all transparent: stays unallocated
+                    return;
+                }
+                swapToFileOrder(bytes, rawSize);
+                raw[size_t(i)] = std::move(pixels);
+            }
+        });
+        for (int i = 0; i < n; ++i) {
+            if (problem[size_t(i)] == 1)
+                return damaged(QStringLiteral("pixel data cannot be decompressed"));
+            if (problem[size_t(i)] == 2)
+                return damaged(QStringLiteral("invalid pixel values"));
+        }
+        if (!out)
+            continue;
+        if (tileSize == out->tileSize()) {
+            // Same grid: the tiles are allocated here (one thread: the layer's table is not
+            // thread-safe), then filled in parallel (each thread writes its own tiles).
+            destination.assign(size_t(n), nullptr);
+            for (int i = 0; i < n; ++i) {
+                if (problem[size_t(i)] == 3)
+                    continue;
+                const Entry &e = entries[first + size_t(i)];
+                destination[size_t(i)] = out->writableTileData(out->columnOf(e.rect.left()), out->rowOf(e.rect.top()));
+                if (!destination[size_t(i)])
+                    return outOfMemory();
+            }
+            parallelFor(0, n, 8, [&](int i) {
+                uchar *dst = destination[size_t(i)];
+                if (!dst)
+                    return;
+                const Entry &e = entries[first + size_t(i)];
+                const uchar *src = reinterpret_cast<const uchar *>(raw[size_t(i)].constData());
+                const qsizetype rowBytes = qsizetype(e.rect.width()) * 4;
+                for (int y = 0; y < e.rect.height(); ++y)
+                    std::memcpy(dst + qsizetype(y) * out->tileStride(), src + rowBytes * y, size_t(rowBytes));
+                raw[size_t(i)] = QByteArray(); // freed as soon as it is in the layer
+            });
+        } else {
+            for (int i = 0; i < n; ++i) {
+                if (problem[size_t(i)] == 3)
+                    continue;
+                const Entry &e = entries[first + size_t(i)];
+                const qsizetype rowBytes = qsizetype(e.rect.width()) * 4;
+                const QImage tile(reinterpret_cast<const uchar *>(raw[size_t(i)].constData()), e.rect.width(),
+                                  e.rect.height(), rowBytes, QImage::Format_ARGB32_Premultiplied);
+                if (!out->write(e.rect.topLeft(), tile))
+                    return outOfMemory();
+                raw[size_t(i)] = QByteArray();
+            }
+        }
+    }
     return {};
 }
 

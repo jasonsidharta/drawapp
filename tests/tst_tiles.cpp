@@ -1,6 +1,7 @@
 // Milestone 10: sparse tiled storage (TiledImage), copy-on-write snapshots, concurrent readers,
 // allocation failure and the memory budget. Headless, against the production classes.
 
+#include "DocumentData.h"
 #include "MemoryBudget.h"
 #include "TiledImage.h"
 #include "ViewPyramid.h"
@@ -575,6 +576,58 @@ private slots:
         // The marks are visible (darker than the checkerboard).
         const QPointF mark = view.docToView(QPointF(800 * 10 + 20, 700 * 10 + 20));
         QVERIFY(qGray(out.pixel(mark.toPoint())) < 150);
+    }
+
+    void tiledCompositingMatchesDenseCompositing()
+    {
+        // Every way the tiled composite is built (whole canvas tile by tile, brush-sized areas
+        // through one painter, areas at tile corners) gives exactly the dense milestone 9 result.
+        const QSize size(333, 217);
+        std::vector<LayerData> layers;
+        for (int i = 0; i < 5; ++i) {
+            LayerData l;
+            l.id = quint64(i + 1);
+            QImage img = pattern(size, quint32(40 + i));
+            // Leave holes, so some tiles are missing.
+            QPainter p(&img);
+            p.setCompositionMode(QPainter::CompositionMode_Clear);
+            p.fillRect(QRect(64 * (i % 3), 64, 140, 70), Qt::transparent);
+            p.end();
+            l.image = TiledImage::fromImage(img);
+            l.image.pruneTransparent();
+            l.opacity = i == 2 ? 0.37 : (i == 4 ? 0.8 : 1.0);
+            l.visible = i != 3;
+            layers.push_back(l);
+        }
+        QImage dense(size, QImage::Format_ARGB32_Premultiplied);
+        compositeLayers(dense, dense.rect(), layers);
+        TiledImage whole(size);
+        QVERIFY(compositeLayers(whole, whole.rect(), layers));
+        QVERIFY(whole == dense);
+        // Brush-sized refreshes, many places, into a composite that starts out stale.
+        TiledImage pieces(size);
+        QVERIFY(pieces.fillRect(pieces.rect(), qRgba(9, 9, 9, 9)));
+        QRandomGenerator rng(5);
+        for (int i = 0; i < 400; ++i) {
+            const QRect r(int(rng.bounded(size.width())) - 20, int(rng.bounded(size.height())) - 20,
+                          1 + int(rng.bounded(150)), 1 + int(rng.bounded(150)));
+            QVERIFY(compositeLayers(pieces, r, layers));
+        }
+        QVERIFY(compositeLayers(pieces, QRect(0, 0, 333, 217), layers)); // finish everything
+        QVERIFY(pieces == dense);
+        // Each small refresh alone equals the dense result inside it.
+        for (int i = 0; i < 200; ++i) {
+            TiledImage target(size);
+            QVERIFY(target.fillRect(target.rect(), qRgba(9, 9, 9, 9)));
+            const QRect r(int(rng.bounded(size.width() - 10)), int(rng.bounded(size.height() - 10)),
+                          2 + int(rng.bounded(180)), 2 + int(rng.bounded(180)));
+            QVERIFY(compositeLayers(target, r, layers));
+            const QRect inside = r & target.rect();
+            QCOMPARE(target.copy(inside), dense.copy(inside));
+            // Outside the area nothing changed.
+            QCOMPARE(target.pixel(inside.left() > 0 ? 0 : size.width() - 1, inside.top() > 0 ? 0 : size.height() - 1),
+                     qRgba(9, 9, 9, 9));
+        }
     }
 };
 

@@ -44,7 +44,7 @@ void TileBlock::touch()
     m_stamp = next.fetch_add(1, std::memory_order_relaxed);
 }
 
-TileBlock *TileBlock::create(int bytes, MemoryBudget::Category category, const TileBlock *source)
+TileBlock *TileBlock::create(int bytes, MemoryBudget::Category category, const TileBlock *source, bool uninitialized)
 {
     if (!MemoryBudget::tryReserve(bytes, category))
         return nullptr;
@@ -61,7 +61,7 @@ TileBlock *TileBlock::create(int bytes, MemoryBudget::Category category, const T
     block->touch();
     if (source)
         std::memcpy(block->data(), source->data(), size_t(bytes));
-    else
+    else if (!uninitialized)
         std::memset(block->data(), 0, size_t(bytes));
     return block;
 }
@@ -397,11 +397,37 @@ bool TiledImage::write(const QPoint &pos, const QImage &image)
                     }
             }
         }
-    // Phase 1: allocate or detach every tile to be written (changes no pixel).
+    // Phase 1: everything that can fail, changing no pixel. Partly covered tiles are allocated or
+    // detached in place (same pixels). A whole tile inside the image that the source covers
+    // completely gets a fresh block, not copied or cleared, kept aside until phase 2 so that a
+    // failure leaves the image as it was.
+    struct Fresh
+    {
+        int column, row;
+        TileRef block;
+    };
+    std::vector<Fresh> fresh;
     for (int tr = r0; tr <= r1; ++tr)
-        for (int tc = c0; tc <= c1; ++tc)
-            if (needed[size_t(tr - r0) * (c1 - c0 + 1) + (tc - c0)] && !prepareTile(tc, tr))
+        for (int tc = c0; tc <= c1; ++tc) {
+            if (!needed[size_t(tr - r0) * (c1 - c0 + 1) + (tc - c0)])
+                continue;
+            const QRect t = tileRect(tc, tr);
+            const TileBlock *current = tileRef(tc, tr).get();
+            const bool ownedAlone = current && !current->isShared(); // written in place, no copy anyway
+            if (!ownedAlone && t.width() == m_tileSize && t.height() == m_tileSize && target.contains(t)) {
+                TileBlock *b = TileBlock::create(tileBytes(), m_category, nullptr, true);
+                if (!b || !mutableSlot(tc, tr)) {
+                    if (b)
+                        b->deref();
+                    return false;
+                }
+                fresh.push_back({tc, tr, TileRef(b)});
+            } else if (!prepareTile(tc, tr)) {
                 return false;
+            }
+        }
+    for (Fresh &f : fresh)
+        m_tiles[qsizetype(f.row) * m_columns + f.column] = std::move(f.block);
     // Phase 2: copy pixels.
     for (int tr = r0; tr <= r1; ++tr)
         for (int tc = c0; tc <= c1; ++tc) {

@@ -12,12 +12,15 @@
 #include "BrushProperties.h"
 #include "LayeredDocument.h"
 #include "ProjectFile.h"
+#include "RecoveryFile.h"
 #include "RasterDocument.h"
 #include "Selection.h"
 #include "StrokeEngine.h"
 #include "TileSnapshot.h"
+#include "TransformApply.h"
 #include "TransformSession.h"
 #include "UndoHistory.h"
+#include "ViewPyramid.h"
 #include "ViewRenderer.h"
 #include "ViewTransform.h"
 
@@ -120,6 +123,35 @@ LayeredDocument makeDocument(QSize size, int layers)
     return doc;
 }
 
+// A mostly empty large canvas: a few layers with a handful of long strokes each (sketching on a
+// big sheet), the case sparse storage is for.
+LayeredDocument makeSparseDocument(QSize size, int layers)
+{
+    LayeredDocument doc(size);
+    doc.layerRef(0).name = QStringLiteral("Sketch 1");
+    for (int n = 0; n < layers; ++n) {
+        if (n > 0) {
+            LayerData layer;
+            layer.id = doc.allocateId();
+            layer.name = QStringLiteral("Sketch %1").arg(n + 1);
+            layer.image = TiledImage(doc.size());
+            doc.insertLayer(doc.count(), layer);
+        }
+        std::vector<Dab> dabs;
+        for (int s = 0; s < 6; ++s) {
+            const QPointF a(size.width() * (0.1 + 0.13 * s), size.height() * (0.1 + 0.11 * n));
+            const QPointF b(size.width() * (0.2 + 0.12 * s), size.height() * (0.6 + 0.05 * n));
+            const int steps = int(QLineF(a, b).length() / 3);
+            for (int i = 0; i <= steps; ++i)
+                dabs.push_back({a + (b - a) * (double(i) / steps), 9.0});
+        }
+        RasterDocument::stampDabs(doc.pixels(n), dabs, QColor::fromHsv((n * 61) % 360, 180, 120), BrushMode::Paint);
+    }
+    doc.setActiveLayer(doc.layer(doc.count() - 1).id);
+    doc.refreshComposite();
+    return doc;
+}
+
 // An input trace across the document: a wavy line with simulated pressure, 4 ms per event.
 std::vector<StrokeSample> trace(QSize size, int events, double pressureFloor = 0.3)
 {
@@ -191,41 +223,86 @@ StrokeResult runStroke(LayeredDocument &doc, const BrushSettings &settings, cons
     return r;
 }
 
-void documentBench(QSize size, int wantedLayers, int reps)
+void documentBench(QSize size, int wantedLayers, int reps, bool sparse = false)
 {
     const int maxLayers = LayeredDocument::maxLayersFor(size);
     const int layers = std::min(wantedLayers, maxLayers);
-    std::printf("\n### %d x %d, %d layer(s)\n\n", size.width(), size.height(), wantedLayers);
+    std::printf("\n### %d x %d, %d layer(s)%s\n\n", size.width(), size.height(), wantedLayers,
+                sparse ? ", sparse (a few long strokes per layer)" : "");
     if (layers < wantedLayers)
         std::printf("Refused by design: at most %d layers. Measured with %d layers instead.\n\n", maxLayers, layers);
     const Memory start = memory();
     QElapsedTimer t;
     t.start();
-    LayeredDocument doc = makeDocument(size, layers);
+    LayeredDocument doc = sparse ? makeSparseDocument(size, layers) : makeDocument(size, layers);
     const double createMs = t.nsecsElapsed() / 1e6;
     const Memory loaded = memory();
     const double layerMiB = double(size.width()) * size.height() * 4 / MiB;
+    qint64 layerBytes = 0;
+    for (const LayerData &l : doc.layers())
+        layerBytes += l.image.allocatedBytes();
 
-    std::printf("Layer pixels %.0f MiB (+ composite %.0f MiB). Private memory added by the document: %.0f MiB "
-                "(process %.0f MiB, working set %.0f MiB).\n\n",
-                layers * layerMiB, layerMiB, loaded.privateMiB - start.privateMiB, loaded.privateMiB, loaded.workingSetMiB);
+    std::printf("Dense equivalent: %.0f MiB of layers + %.0f MiB composite. Allocated tiles: layers %.1f MiB, composite "
+                "%.1f MiB. Private memory added by the document: %.0f MiB (process %.0f MiB, working set %.0f MiB).\n\n",
+                layers * layerMiB, layerMiB, layerBytes / MiB, doc.composite().allocatedBytes() / MiB,
+                loaded.privateMiB - start.privateMiB, loaded.privateMiB, loaded.workingSetMiB);
     std::printf("| Operation | median ms | p95 ms | max ms |\n|---|---|---|---|\n");
     std::printf("| create the test document (setup, not an app operation) | %.0f | - | - |\n", createMs);
     row("full composite rebuild", measure(std::max(3, reps / 3), [&] { doc.refreshComposite(); }));
     ViewTransform view;
     view.center(QSizeF(size), QSizeF(1920, 1080), std::min(1.0, std::min(1920.0 / size.width(), 1080.0 / size.height())));
     QImage target(1920, 1080, QImage::Format_ARGB32_Premultiplied);
-    row("render the view (fit, 1920 x 1080 window)", measure(reps, [&] {
+    row("render the view without the pyramid (fit; copies the whole visible area each frame; not the canvas's path)", measure(reps, [&] {
         QPainter p(&target);
         ViewRenderer::render(p, doc.composite(), view, QRect(0, 0, 1920, 1080));
     }), 3);
     QImage view100(1920, 1080, QImage::Format_ARGB32_Premultiplied);
     ViewTransform actual;
     actual.center(QSizeF(size), QSizeF(1920, 1080), 1.0);
-    row("render the view (100 %, 1920 x 1080 window)", measure(reps, [&] {
+    row("render the view without the pyramid (100 %)", measure(reps, [&] {
         QPainter p(&view100);
         ViewRenderer::render(p, doc.composite(), actual, QRect(0, 0, 1920, 1080));
     }), 3);
+    {
+        // As the canvas draws (milestone 10): through the view pyramid. The first frame builds the
+        // level; later frames reuse it.
+        ViewPyramid pyramid;
+        QElapsedTimer first;
+        first.start();
+        {
+            QPainter p(&target);
+            ViewRenderer::render(p, doc.composite(), pyramid, view, QRect(0, 0, 1920, 1080));
+        }
+        const double firstMs = first.nsecsElapsed() / 1e6;
+        std::printf("| render the view as the canvas does (fit, level %d of the pyramid), first frame (builds the level) | %.1f | - | - |\n",
+                    ViewPyramid::levelFor(view.zoom(), size), firstMs);
+        row("render the view as the canvas does (fit), later frames", measure(reps, [&] {
+            QPainter p(&target);
+            ViewRenderer::render(p, doc.composite(), pyramid, view, QRect(0, 0, 1920, 1080));
+        }), 3);
+        ViewPyramid pyramid100;
+        {
+            QPainter p(&view100);
+            ViewRenderer::render(p, doc.composite(), pyramid100, actual, QRect(0, 0, 1920, 1080));
+        }
+        row("render the view as the canvas does (100 %), later frames", measure(reps, [&] {
+            QPainter p(&view100);
+            ViewRenderer::render(p, doc.composite(), pyramid100, actual, QRect(0, 0, 1920, 1080));
+        }), 3);
+        ViewTransform panning = view;
+        row("render the view as the canvas does (fit), while panning 7 px per frame", measure(reps, [&] {
+            panning.panBy(QPointF(7, 3));
+            QPainter p(&target);
+            ViewRenderer::render(p, doc.composite(), pyramid, panning, QRect(0, 0, 1920, 1080));
+        }), 3);
+        ViewTransform smallest;
+        smallest.center(QSizeF(size), QSizeF(1920, 1080), ViewTransform::MinZoom);
+        row("render the view as the canvas does (5 %)", measure(reps, [&] {
+            QPainter p(&target);
+            ViewRenderer::render(p, doc.composite(), pyramid, smallest, QRect(0, 0, 1920, 1080));
+        }), 3);
+        std::printf("| (view pyramid memory after these frames: %.1f MiB) | - | - | - |\n", pyramid.byteSize() / MiB);
+    }
 
     BrushSettings solid = BrushPresets::builtIn(QStringLiteral("builtin.solid-round"))->settings;
     solid.size = 24;
@@ -246,9 +323,16 @@ void documentBench(QSize size, int wantedLayers, int reps)
     const DocumentData snapshot = doc.snapshot();
     row("save project (encode + atomic write)", measure(ioReps, [&] { ProjectFile::save(snapshot, path); }), 1);
     row("open project (read + verify + decode)", measure(ioReps, [&] { ProjectFile::load(path); }), 1);
+    {
+        // A recovery snapshot as the canvas writes it: copy on the UI thread, encode on a worker.
+        RecoveryFile::Metadata meta;
+        const Stats snap = measure(std::max(3, reps / 3), [&] { DocumentData d = doc.snapshot(); });
+        row("recovery: snapshot on the UI thread", snap, 4);
+        row("recovery: encode (worker)", measure(ioReps, [&] { RecoveryFile::encode(snapshot, meta); }), 1);
+    }
     const Memory end = memory();
-    std::printf("\nFile %.1f MiB. Process peak private memory %.0f MiB, peak working set %.0f MiB.\n",
-                QFileInfo(path).size() / MiB, end.peakPrivateMiB, end.peakWorkingSetMiB);
+    std::printf("\nFile %.1f MiB. Process peak private memory %.0f MiB, peak working set %.0f MiB. MemoryBudget peak %.0f MiB.\n",
+                QFileInfo(path).size() / MiB, end.peakPrivateMiB, end.peakWorkingSetMiB, MemoryBudget::peakTotal() / MiB);
 }
 
 struct EngineCase
@@ -442,18 +526,22 @@ void transformBench(QSize size, int wantedLayers, int reps)
         row("preview after release, merged copy (bicubic)", mergedFinal, 1);
         std::printf("| begin with the merged copy (merge + cache, once per transform) | %.1f | - | - |\n", setupMs);
     }
-    // Apply as CanvasItem does: each layer's final result rendered into a copy of the layer (sharing
-    // its tiles), then committed as one undo step by exchanging tile references.
+    // Apply as CanvasItem does (milestone 10): TransformApply prepares each layer's result as a copy
+    // of the layer with the changed tiles rewritten (on a worker thread in the app; timed here on
+    // this thread), then the commit exchanges tile references.
     std::vector<TiledImage> results;
     const Stats prepare = measure(std::max(2, reps / 10), [&] {
-        results.clear();
-        for (int p = 0; p < t.partCount(); ++p) {
-            results.push_back(doc.layer(doc.indexOf(ids[size_t(p)])).image);
-            t.render(p, results.back(), area, TransformSession::Quality::Final);
-            results.back().pruneTransparent(area);
-        }
+        TransformApply::Input in;
+        in.session = t.workerCopy();
+        in.layerIds = ids;
+        in.layers = images;
+        for (const TiledImage &img : images)
+            in.versions.push_back(img.version());
+        in.area = area;
+        TransformApply::Result r = TransformApply::run(std::move(in));
+        results = std::move(r.layers);
     });
-    row("apply: prepare all layers (bicubic)", prepare, 1);
+    row("apply: prepare all layers (bicubic; on the worker thread in the app)", prepare, 1);
     UndoHistory history;
     QElapsedTimer timer;
     timer.start();
@@ -469,7 +557,7 @@ void transformBench(QSize size, int wantedLayers, int reps)
     history.push(UndoCommand::group(std::move(commands), QStringLiteral("Transform")));
     doc.refreshComposite(area);
     const double commitMs = timer.nsecsElapsed() / 1e6;
-    std::printf("| apply: commit (copy in + one group undo entry, %.0f MiB kept by history) + composite | %.1f | - | - |\n",
+    std::printf("| apply: commit (exchange tile references + one group undo entry, %.0f MiB kept by history) + composite | %.1f | - | - |\n",
                 history.bytesUsed() / MiB, commitMs);
     std::vector<double> u, r;
     for (int i = 0; i < std::max(2, reps / 10); ++i) {
@@ -484,10 +572,15 @@ void transformBench(QSize size, int wantedLayers, int reps)
     }
     row("undo the transform (all layers) + composite", summarize(u), 1);
     row("redo the transform (all layers) + composite", summarize(r), 1);
-    std::printf("\nTransform session memory %.0f MiB (sources and reductions); preview layers %.0f MiB; process "
-                "private memory grew by %.0f MiB during the transform; peak private %.0f MiB.\n",
-                sessionBytes / MiB, double(area.width()) * area.height() * 4 * t.partCount() / MiB,
-                memory().privateMiB - before.privateMiB, memory().peakPrivateMiB);
+    qint64 previewBytes = 0;
+    for (size_t i = 1; i < preview.size(); ++i)
+        for (int r = preview[i].image.rowOf(area.top()); r <= preview[i].image.rowOf(area.bottom()); ++r)
+            for (int c = preview[i].image.columnOf(area.left()); c <= preview[i].image.columnOf(area.right()); ++c)
+                if (preview[i].image.hasTile(c, r) && !preview[i].image.sharesTileWith(doc.layer(int(i)).image, c, r))
+                    previewBytes += preview[i].image.tileBytes();
+    std::printf("\nTransform session memory %.0f MiB (sources and reductions); preview layers %.0f MiB of their own tiles; "
+                "process private memory grew by %.0f MiB during the transform; peak private %.0f MiB.\n",
+                sessionBytes / MiB, previewBytes / MiB, memory().privateMiB - before.privateMiB, memory().peakPrivateMiB);
 }
 
 } // namespace
@@ -502,19 +595,29 @@ int main(int argc, char **argv)
                 qPrintable(QSysInfo::currentCpuArchitecture()), reps);
     if (want("doc512"))
         documentBench(QSize(512, 512), 3, reps);
+    if (want("doc512x1"))
+        documentBench(QSize(512, 512), 1, reps);
     if (want("doc2048"))
         documentBench(QSize(2048, 1536), 10, reps);
+    if (want("doc4096x8"))
+        documentBench(QSize(4096, 4096), 8, reps); // the milestone 9 limit, for comparison
     if (want("doc4096"))
         documentBench(QSize(4096, 4096), 20, reps);
     if (want("doc8192"))
-        documentBench(QSize(8192, 8192), 2, reps);
+        documentBench(QSize(8192, 8192), 2, reps); // milestone 9's largest
+    if (want("doc8192x10"))
+        documentBench(QSize(8192, 8192), 10, reps);
+    if (want("sparse16384"))
+        documentBench(QSize(16384, 16384), 4, reps, true);
     if (want("brushes"))
         brushBench(reps);
     if (want("long"))
         longStrokeBench();
     if (want("transforms")) {
         transformBench(QSize(2048, 1536), 10, reps);
-        transformBench(QSize(4096, 4096), 20, reps);
+        transformBench(QSize(4096, 4096), 8, reps); // 7 layers moved, as in milestone 9
     }
+    if (want("transforms20"))
+        transformBench(QSize(4096, 4096), 20, reps);
     return 0;
 }

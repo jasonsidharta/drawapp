@@ -41,9 +41,11 @@ public:
     // &image.
     const TiledImage *level(const TiledImage &image, int level, const QRect &area);
 
-    // Level `level` over area as one dense image (area in that level's pixels; transparent outside
-    // the image), for drawing. The image uses a buffer kept between calls (so panning does not
-    // allocate every frame) and is valid until the next call. Null if memory was refused.
+    // Level `level` over area as one dense image (area in that level's pixels), for drawing. The
+    // image points into a buffer kept between calls, which holds a tile-aligned area around the
+    // request and copies again only the tiles whose stamps changed (so a repaint after a stroke
+    // copies a few tiles, and small pans none). Valid until the next call. Null if memory was
+    // refused.
     QImage pixels(const TiledImage &image, int level, const QRect &area);
 
     // Frees every level (they are rebuilt when next drawn). Returns the bytes freed.
@@ -73,5 +75,12 @@ private:
     bool m_busy = false;       // building or reading: the evictor must not clear now
     QImage m_scratch;          // pixels() buffer (one long row of m_scratchBytes / 4 pixels)
     qint64 m_scratchBytes = 0; // reserved as Category::Cache
+    // What the buffer holds: an area of one level of an image of this size, and per tile the
+    // stamp of the pixels copied (~0 = not copied).
+    bool m_bufferValid = false;
+    int m_bufferLevel = -1;
+    QSize m_bufferImageSize;
+    QRect m_bufferArea;
+    std::vector<quint64> m_bufferStamps;
     qint64 m_tilesBuilt = 0;
 };
