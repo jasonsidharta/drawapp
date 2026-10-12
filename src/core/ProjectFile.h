@@ -3,6 +3,7 @@
 #include "DocumentData.h"
 
 #include <QByteArray>
+#include <QIODevice>
 #include <QImage>
 #include <QString>
 
@@ -61,5 +62,9 @@ QString exportPng(const QImage &image, const QString &path);
 // Writes bytes through a temporary file that atomically replaces the local file at path, so a
 // failed write leaves any previous file intact. Refuses content URIs (see SafeSave).
 QString writeFileSafely(const QString &path, const QByteArray &bytes);
+// Reads the rest of device, but at most maxBytes + 1 bytes (so an oversized input can be told
+// apart). Allocates about what it reads: QIODevice::read(n) reserves n bytes up front, which for
+// the project limit would commit over 512 MiB to open a small file.
+QByteArray readBounded(QIODevice &device, qint64 maxBytes);
 
 } // namespace ProjectFile

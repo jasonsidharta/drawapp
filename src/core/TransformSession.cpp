@@ -558,8 +558,13 @@ void TransformSession::render(int partIndex, QImage &out, const QRect &requested
     const QRect area = requested & out.rect();
     if (area.isEmpty())
         return;
+    // Rows are written from several threads: detach out here, once, and hand them a plain
+    // pointer. QImage::scanLine() on a still-shared image (a preview copy of a document layer)
+    // would detach concurrently from every thread.
+    uchar *bits = out.bits();
+    const qsizetype bpl = out.bytesPerLine();
     renderRows(m_parts[size_t(partIndex)], area, quality,
-               [&](int y) { return reinterpret_cast<QRgb *>(out.scanLine(y)) + area.left(); });
+               [&](int y) { return reinterpret_cast<QRgb *>(bits + y * bpl) + area.left(); });
 }
 
 QImage TransformSession::renderRegion(int partIndex, const QRect &requested, Quality quality) const
@@ -574,8 +579,10 @@ QImage TransformSession::renderRegion(int partIndex, const QRect &requested, Qua
     QImage region(area.size(), QImage::Format_ARGB32_Premultiplied);
     if (region.isNull())
         return {}; // out of memory
+    uchar *bits = region.bits(); // see render(): no scanLine() from the worker threads
+    const qsizetype bpl = region.bytesPerLine();
     renderRows(m_parts[size_t(partIndex)], area, quality,
-               [&](int y) { return reinterpret_cast<QRgb *>(region.scanLine(y - area.top())); });
+               [&](int y) { return reinterpret_cast<QRgb *>(bits + (y - area.top()) * bpl); });
     return region;
 }
 
@@ -662,8 +669,10 @@ Selection TransformSession::transformedSelection() const
     mask.fill(0);
     const QRect target = targetRect() & mask.rect();
     const QPointF origin = m_sourceRect.topLeft();
+    uchar *bits = mask.bits(); // plain pointer for the worker threads (see render())
+    const qsizetype bpl = mask.bytesPerLine();
     parallelRows(target.top(), target.bottom() + 1, [&](int y) {
-        uchar *row = mask.scanLine(y);
+        uchar *row = bits + y * bpl;
         for (int x = target.left(); x <= target.right(); ++x) {
             const QPointF p = mapToSource(QPointF(x + 0.5, y + 0.5)) - origin - QPointF(0.5, 0.5);
             const int xi = int(std::floor(p.x())), yi = int(std::floor(p.y()));

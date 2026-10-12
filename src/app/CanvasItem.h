@@ -134,6 +134,12 @@ public:
     const Selection &selection() const { return m_document.selection(); }
     const TransformSession &transformSession() const { return m_transform; }
     TransformSession &transformSessionForTesting() { return m_transform; }
+    // Tests: a different undo budget (clears the history).
+    void setHistoryBudgetForTesting(qsizetype bytes)
+    {
+        m_history = UndoHistory(bytes);
+        emit historyChanged();
+    }
     // What the view shows: the document, or the transform preview while one is open.
     const QImage &displayedComposite() const;
 
@@ -540,7 +546,9 @@ private:
 
     // --- transform ---
     TransformSession m_transform;
-    std::vector<quint64> m_transformLayerIds; // bottom to top
+    std::vector<quint64> m_transformLayerIds;
+    // The session's last part is a merged copy of the (adjacent) layers, used for the preview.
+    bool m_previewMerged = false; // bottom to top
     Tool m_toolBeforeTransform = Brush;
     bool m_keepAspect = true;
     std::vector<QImage> m_previewLayers; // the transformed layers, rendered from the session's source

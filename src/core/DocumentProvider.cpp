@@ -1,5 +1,7 @@
 #include "DocumentProvider.h"
 
+#include "ProjectFile.h"
+
 #include <QFile>
 #include <QFileInfo>
 #include <QStorageInfo>
@@ -64,7 +66,7 @@ public:
             *error = file.errorString();
             return {};
         }
-        return file.read(maxBytes + 1);
+        return ProjectFile::readBounded(file, maxBytes);
     }
 };
 

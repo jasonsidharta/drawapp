@@ -6,6 +6,7 @@
 #include "TileSnapshot.h"
 #include "UndoHistory.h"
 
+#include <QBuffer>
 #include <QCryptographicHash>
 #include <QDataStream>
 #include <QDir>
@@ -777,6 +778,36 @@ private slots:
         DocumentData withoutHidden = doc;
         withoutHidden.layers.erase(withoutHidden.layers.begin() + 1);
         QCOMPARE(withoutHidden.composite(), composite);
+    }
+
+    void readBoundedAllocatesWhatItReads()
+    {
+        // Milestone 9 regression: QIODevice::read(limit) reserved the whole project limit
+        // (> 512 MiB of committed memory) to open a small file.
+        QTemporaryDir dir;
+        const QString path = dir.filePath("small.bin");
+        {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(QByteArray(1000, 'x'));
+        }
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QByteArray data = ProjectFile::readBounded(f, ProjectFile::MaxFileBytes);
+        QCOMPARE(data.size(), 1000);
+        QVERIFY(data.capacity() < 64 * 1024);
+        // Oversized input: one byte past the limit, so it can be refused.
+        QVERIFY(f.seek(0));
+        QCOMPARE(ProjectFile::readBounded(f, 300).size(), 301);
+        // A sequential device is read in bounded chunks.
+        QBuffer seq;
+        seq.setData(QByteArray(5000, 'y'));
+        QVERIFY(seq.open(QIODevice::ReadOnly));
+        QCOMPARE(ProjectFile::readBounded(seq, 1 << 20).size(), 5000);
+        // And a small project still opens.
+        const QString project = dir.filePath("p.drawapp");
+        QCOMPARE(ProjectFile::save(threeLayerDocument(QSize(30, 20)), project), QString());
+        QVERIFY(ProjectFile::load(project).ok());
     }
 };
 

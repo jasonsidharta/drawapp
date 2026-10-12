@@ -349,6 +349,25 @@ QString ProjectFile::save(const DocumentData &document, const QString &path)
     return writeFileSafely(path, encode(document));
 }
 
+QByteArray ProjectFile::readBounded(QIODevice &device, qint64 maxBytes)
+{
+    constexpr qint64 Chunk = qint64(1) << 20;
+    QByteArray data;
+    if (!device.isSequential()) {
+        const qint64 remaining = device.size() - device.pos();
+        if (remaining > 0)
+            data = device.read(std::min(remaining, maxBytes + 1)); // exactly the size, not the limit
+    }
+    // Sequential devices, and files that grew after their size was read: bounded chunks.
+    while (data.size() <= maxBytes) {
+        const QByteArray part = device.read(std::min(Chunk, maxBytes + 1 - data.size()));
+        if (part.isEmpty())
+            break;
+        data += part;
+    }
+    return data;
+}
+
 ProjectFile::LoadResult ProjectFile::load(const QString &path)
 {
     QFile file(path);
@@ -357,7 +376,7 @@ ProjectFile::LoadResult ProjectFile::load(const QString &path)
     if (!file.isSequential() && file.size() > MaxFileBytes)
         return failure(QStringLiteral("The file is too large to be a DrawApp project this version can open."));
     // Read at most one byte past the limit so an oversized file is rejected without loading it all.
-    const QByteArray data = file.read(MaxFileBytes + 1);
+    const QByteArray data = readBounded(file, MaxFileBytes);
     if (file.error() != QFileDevice::NoError)
         return failure(QStringLiteral("Could not read \"%1\": %2").arg(displayName(path), file.errorString()));
     if (data.size() > MaxFileBytes)

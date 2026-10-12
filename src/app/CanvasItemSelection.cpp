@@ -490,12 +490,37 @@ QString CanvasItem::beginTransform()
     std::vector<QImage> images;
     for (const quint64 id : ids)
         images.push_back(m_document.layer(m_document.indexOf(id)).image);
+    // Several adjacent layers without a selection: the preview is drawn from one merged copy (one
+    // resampling per frame instead of one per layer; source-over is associative, so only
+    // anti-aliased edges where the layers overlap can differ slightly). Apply transforms each layer.
+    bool merged = false;
+    if (!selected.isActive() && ids.size() > 1) {
+        bool adjacent = true;
+        for (size_t i = 1; i < ids.size(); ++i)
+            adjacent = adjacent && m_document.indexOf(ids[i]) == m_document.indexOf(ids[i - 1]) + 1;
+        if (adjacent) {
+            try {
+                QImage flat(m_document.size(), QImage::Format_ARGB32_Premultiplied);
+                if (!flat.isNull()) {
+                    std::vector<LayerData> stack;
+                    for (const quint64 id : ids)
+                        stack.push_back(m_document.layer(m_document.indexOf(id)));
+                    compositeLayers(flat, flat.rect(), stack);
+                    images.push_back(flat);
+                    merged = true;
+                }
+            } catch (const std::bad_alloc &) {
+                merged = false; // the per-layer preview still works
+            }
+        }
+    }
     if (!m_transform.begin(images, selected)) {
         if (ids.size() == 1)
             return QStringLiteral("The layer \"%1\" has nothing to transform.").arg(m_document.layer(m_document.indexOf(ids.front())).name);
         return QStringLiteral("The selected layers have nothing to transform.");
     }
     m_transformLayerIds = ids;
+    m_previewMerged = merged;
     m_toolBeforeTransform = m_tool == Transform ? Brush : m_tool;
     m_tool = Transform;
     // The preview lives in copies; the document is not touched until Apply.
@@ -522,12 +547,30 @@ void CanvasItem::updateTransformPreview(TransformSession::Quality quality)
     const QRect now = m_transform.changedRect();
     const QRect area = (now | m_previewRect) & QRect(QPoint(0, 0), m_document.size());
     std::vector<LayerData> layers = m_document.layers(); // shallow: images are shared
-    for (size_t i = 0; i < m_transformLayerIds.size(); ++i) {
-        const int index = m_document.indexOf(m_transformLayerIds[i]);
-        if (index < 0)
-            continue;
-        m_transform.render(int(i), m_previewLayers[i], area, quality);
-        layers[size_t(index)].image = m_previewLayers[i];
+    if (m_previewMerged) {
+        // The merged copy (the last part) stands in for the selected layers, at the bottom one's
+        // place in the stack; their opacities are already in it.
+        const size_t mergedPart = m_transformLayerIds.size();
+        m_transform.render(int(mergedPart), m_previewLayers[mergedPart], area, quality);
+        for (size_t i = 0; i < m_transformLayerIds.size(); ++i) {
+            const int index = m_document.indexOf(m_transformLayerIds[i]);
+            if (index < 0)
+                continue;
+            if (i == 0) {
+                layers[size_t(index)].image = m_previewLayers[mergedPart];
+                layers[size_t(index)].opacity = 1.0;
+            } else {
+                layers[size_t(index)].visible = false;
+            }
+        }
+    } else {
+        for (size_t i = 0; i < m_transformLayerIds.size(); ++i) {
+            const int index = m_document.indexOf(m_transformLayerIds[i]);
+            if (index < 0)
+                continue;
+            m_transform.render(int(i), m_previewLayers[i], area, quality);
+            layers[size_t(index)].image = m_previewLayers[i];
+        }
     }
     compositeLayers(m_previewComposite, area, layers);
     m_previewRect = now;
@@ -541,6 +584,7 @@ void CanvasItem::endTransformSession()
     m_transform.end();
     m_transformedOutline = QPainterPath();
     m_transformLayerIds.clear();
+    m_previewMerged = false;
     m_previewLayers.clear();
     m_previewComposite = QImage();
     m_previewRect = QRect();

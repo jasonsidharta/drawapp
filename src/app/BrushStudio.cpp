@@ -444,7 +444,7 @@ QString BrushStudio::readFile(const QUrl &url, qint64 maxBytes, QByteArray *byte
         QFile file(url.isLocalFile() ? url.toLocalFile() : url.toString());
         if (!file.open(QIODevice::ReadOnly))
             return QStringLiteral("Could not open \"%1\": %2").arg(displayName(url), file.errorString());
-        *bytes = file.read(maxBytes + 1);
+        *bytes = ProjectFile::readBounded(file, maxBytes);
     }
     if (bytes->size() > maxBytes)
         return QStringLiteral("\"%1\" is too large.").arg(displayName(url));

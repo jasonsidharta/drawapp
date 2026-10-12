@@ -271,7 +271,18 @@ bool CanvasItem::commitPixels(quint64 layerId, TileSnapshot before, const QStrin
 
 void CanvasItem::pushCommand(UndoCommand command)
 {
+    // An edit larger than the whole history budget cannot be kept (UndoHistory evicts it at
+    // once). Say so instead of letting Undo silently skip it; multi-layer transforms on large
+    // canvases can reach this.
+    const qsizetype bytes = command.byteSize();
+    const QString label = command.label();
     m_history.push(std::move(command));
+    if (bytes > m_history.budgetBytes())
+        emit notice(QStringLiteral("\"%1\" changed %2 MiB of pixels, more than the undo history can hold (%3 MiB), "
+                                   "so it cannot be undone.")
+                        .arg(label)
+                        .arg(bytes / (1024 * 1024))
+                        .arg(m_history.budgetBytes() / (1024 * 1024)));
     emit historyChanged();
 }
 

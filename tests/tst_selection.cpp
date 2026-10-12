@@ -583,6 +583,39 @@ private slots:
     }
 
     // --- multi-layer transforms ---
+
+    void previewIntoSharedCopiesNeverTouchesTheLayers()
+    {
+        // Milestone 9 regression: rows render on several threads, and QImage::scanLine() on a
+        // preview copy that still shared the layer's pixels detached concurrently (crash, or
+        // preview pixels written into the layer itself).
+        std::vector<QImage> layers;
+        for (int i = 0; i < 3; ++i) {
+            QImage img(2048, 1536, QImage::Format_ARGB32_Premultiplied);
+            img.fill(Qt::transparent);
+            QPainter p(&img);
+            p.fillRect(QRect(200 + 100 * i, 300, 900, 700), QColor::fromHsv(100 * i, 200, 220));
+            p.end();
+            layers.push_back(img);
+        }
+        std::vector<QByteArray> before;
+        for (const QImage &l : layers)
+            before.push_back(QByteArray(reinterpret_cast<const char *>(l.constBits()), l.sizeInBytes()));
+        TransformSession t;
+        QVERIFY(t.begin(layers, Selection()));
+        for (int round = 0; round < 6; ++round) {
+            t.setRotation(10 + round * 7);
+            t.setSize(t.sourceRect().width() * 1.15, t.sourceRect().height() * 1.15);
+            std::vector<QImage> previews = layers; // shared, as CanvasItem's preview copies start
+            for (int i = 0; i < t.partCount(); ++i)
+                t.render(i, previews[size_t(i)], t.changedRect(),
+                         round % 2 ? TransformSession::Quality::Final : TransformSession::Quality::Fast);
+            for (size_t i = 0; i < layers.size(); ++i) {
+                QCOMPARE(QByteArray(reinterpret_cast<const char *>(layers[i].constBits()), layers[i].sizeInBytes()), before[i]);
+                QVERIFY(previews[i] != layers[i]);
+            }
+        }
+    }
     void multiLayerTransformKeepsLayersAligned()
     {
         // Ink (a ring) and colour (a fill inside it) with different content bounds, plus a

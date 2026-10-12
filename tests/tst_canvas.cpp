@@ -16,6 +16,7 @@
 #include <QDir>
 #include <QFile>
 #include <QSemaphore>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QPointingDevice>
@@ -2441,6 +2442,30 @@ private slots:
         return {colour, ink};
     }
 
+    void editLargerThanTheUndoBudgetIsReported()
+    {
+        // A multi-layer transform can exceed the whole undo budget on a large canvas; it is
+        // applied, but the artist is told that it cannot be undone.
+        const auto [colour, ink] = twoLayerCharacter();
+        m_canvas->setLayerSelected(colour, true);
+        m_canvas->setHistoryBudgetForTesting(8 * 1024); // less than one 64 x 64 tile
+        const auto restore = qScopeGuard([&] { m_canvas->setHistoryBudgetForTesting(UndoHistory::DefaultBudgetBytes); });
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("rotation", 30);
+        m_canvas->applyTransform();
+        QVERIFY(!m_canvas->isTransforming());
+        QVERIFY(!notices.isEmpty());
+        QVERIFY2(notices.last().at(0).toString().contains("cannot be undone"), qPrintable(notices.last().at(0).toString()));
+        QVERIFY(!m_canvas->history().canUndo());
+        // Small edits say nothing.
+        notices.clear();
+        m_canvas->setHistoryBudgetForTesting(UndoHistory::DefaultBudgetBytes);
+        m_canvas->setBrushSize(10);
+        mouseStroke({{100, 100}, {200, 120}});
+        QVERIFY(notices.isEmpty());
+    }
+
     void multiLayerTransformIsOneStepAndSurvivesSaving()
     {
         const auto [colour, ink] = twoLayerCharacter();
@@ -2449,12 +2474,27 @@ private slots:
         const QImage colour0 = layerImage(layerIndex(colour)).copy(), ink0 = layerImage(layerIndex(ink)).copy();
         const int steps = m_canvas->history().undoCount();
         QCOMPARE(m_canvas->beginTransform(), QString());
-        QCOMPARE(m_canvas->transformSession().partCount(), 2);
+        // Two layers, plus the merged copy the preview of adjacent layers is drawn from.
+        QCOMPARE(m_canvas->transformSession().partCount(), 3);
         m_canvas->setTransformValue("width", m_canvas->transformWidth() * 1.5);
         m_canvas->setTransformValue("rotation", 20);
         QCOMPARE(layerImage(layerIndex(colour)), colour0); // preview only
         QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        const QImage preview = m_canvas->displayedComposite().copy();
         m_canvas->applyTransform();
+        // The merged preview matches the exact per-layer result except at a few overlapping
+        // anti-aliased edge pixels.
+        int differ = 0, worst = 0;
+        const QImage applied = m_canvas->displayedComposite();
+        for (int y = 0; y < applied.height(); y += 2)
+            for (int x = 0; x < applied.width(); x += 2) {
+                const QRgb a = applied.pixel(x, y), b = preview.pixel(x, y);
+                const int d = std::max({std::abs(qRed(a) - qRed(b)), std::abs(qGreen(a) - qGreen(b)),
+                                        std::abs(qBlue(a) - qBlue(b)), std::abs(qAlpha(a) - qAlpha(b))});
+                differ += d > 2;
+                worst = std::max(worst, d);
+            }
+        QVERIFY2(differ < applied.width() * applied.height() / 4 / 200, qPrintable(QString("%1 differ, worst %2").arg(differ).arg(worst)));
         QCOMPARE(m_canvas->history().undoCount(), steps + 1);
         QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
         const QImage colour1 = layerImage(layerIndex(colour)).copy(), ink1 = layerImage(layerIndex(ink)).copy();

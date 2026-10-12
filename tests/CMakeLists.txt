@@ -51,6 +51,13 @@ target_link_libraries(bench_canvas PRIVATE drawcore Qt6::Quick Qt6::Test)
 qt_add_executable(brush_sheet brush_sheet.cpp)
 target_link_libraries(brush_sheet PRIVATE drawcore)
 
+# Milestone 9 workloads, brush engines, long strokes and multi-layer transforms (not part of ctest).
+qt_add_executable(bench_m9 bench_m9.cpp)
+target_link_libraries(bench_m9 PRIVATE drawcore)
+if(WIN32)
+    target_link_libraries(bench_m9 PRIVATE psapi)
+endif()
+
 qt_add_executable(bench_core bench_core.cpp)
 target_link_libraries(bench_core PRIVATE drawcore)
 if(WIN32)
