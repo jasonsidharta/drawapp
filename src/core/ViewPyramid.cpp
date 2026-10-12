@@ -1,0 +1,215 @@
+#include "ViewPyramid.h"
+
+#include <algorithm>
+#include <climits>
+#include <cstring>
+
+ViewPyramid::ViewPyramid()
+{
+    m_evictor = MemoryBudget::addEvictor([this](qint64) { return m_busy ? 0 : clear() + dropBuffer(); });
+}
+
+ViewPyramid::~ViewPyramid()
+{
+    MemoryBudget::removeEvictor(m_evictor);
+    clear();
+    dropBuffer();
+}
+
+qint64 ViewPyramid::dropBuffer()
+{
+    const qint64 bytes = m_scratchBytes;
+    m_scratch = QImage();
+    if (bytes > 0)
+        MemoryBudget::release(bytes, MemoryBudget::Category::Cache);
+    m_scratchBytes = 0;
+    return bytes;
+}
+
+QSize ViewPyramid::levelSize(QSize size, int level)
+{
+    for (int k = 0; k < level; ++k)
+        size = QSize((size.width() + 1) / 2, (size.height() + 1) / 2);
+    return size;
+}
+
+int ViewPyramid::levelFor(double zoom, QSize imageSize)
+{
+    int k = 0;
+    while (k < MaxLevel && zoom * double(qint64(1) << (k + 1)) <= 1.0) {
+        const QSize current = levelSize(imageSize, k);
+        if (current.width() <= 1 && current.height() <= 1)
+            break; // one pixel: nothing smaller
+        ++k;
+    }
+    return k;
+}
+
+const TiledImage &ViewPyramid::imageAt(const TiledImage &image, int level) const
+{
+    return level == 0 ? image : m_levels[size_t(level - 1)].image;
+}
+
+const TiledImage *ViewPyramid::level(const TiledImage &image, int level, const QRect &area)
+{
+    if (image.isNull())
+        return nullptr;
+    if (image.size() != m_imageSize || (!m_levels.empty() && m_levels.front().image.tileSize() != image.tileSize())) {
+        clear();
+        m_imageSize = image.size();
+    }
+    level = std::clamp(level, 0, MaxLevel);
+    if (level == 0)
+        return &image;
+    while (int(m_levels.size()) < level) {
+        Level l;
+        l.image = TiledImage(levelSize(m_imageSize, int(m_levels.size()) + 1), image.tileSize(),
+                             MemoryBudget::Category::Cache);
+        const size_t tiles = size_t(l.image.columns()) * size_t(l.image.rows());
+        l.sources.assign(tiles, {});
+        l.built.assign(tiles, false);
+        m_levels.push_back(std::move(l));
+    }
+    const TiledImage &out = m_levels[size_t(level - 1)].image;
+    const QRect a = area & out.rect();
+    if (a.isEmpty())
+        return &out;
+    const bool wasBusy = m_busy;
+    m_busy = true; // tile allocations below must not let the evictor clear what is being built
+    bool ok = true;
+    for (int r = out.rowOf(a.top()); r <= out.rowOf(a.bottom()) && ok; ++r)
+        for (int c = out.columnOf(a.left()); c <= out.columnOf(a.right()) && ok; ++c)
+            ok = ensure(image, level, c, r);
+    m_busy = wasBusy;
+    return ok ? &out : nullptr;
+}
+
+bool ViewPyramid::ensure(const TiledImage &image, int level, int column, int row)
+{
+    if (level == 0)
+        return true;
+    Level &l = m_levels[size_t(level - 1)];
+    const TiledImage &below = imageAt(image, level - 1);
+    std::array<quint64, 4> stamps{};
+    for (int i = 0; i < 4; ++i) {
+        const int c = 2 * column + (i & 1), r = 2 * row + (i >> 1);
+        if (c >= below.columns() || r >= below.rows())
+            continue;
+        if (!ensure(image, level - 1, c, r))
+            return false;
+        stamps[size_t(i)] = below.tileStamp(c, r);
+    }
+    const size_t index = size_t(row) * size_t(l.image.columns()) + size_t(column);
+    if (l.built[index] && l.sources[index] == stamps)
+        return true;
+    bool ok = true;
+    build(below, l.image, column, row, &ok);
+    if (!ok)
+        return false;
+    l.sources[index] = stamps;
+    l.built[index] = true;
+    ++m_tilesBuilt;
+    return true;
+}
+
+void ViewPyramid::build(const TiledImage &below, TiledImage &out, int column, int row, bool *ok)
+{
+    const int ts = out.tileSize();
+    bool any = false;
+    for (int i = 0; i < 4 && !any; ++i) {
+        const int c = 2 * column + (i & 1), r = 2 * row + (i >> 1);
+        any = c < below.columns() && r < below.rows() && below.hasTile(c, r);
+    }
+    if (!any) {
+        out.releaseTile(column, row);
+        return;
+    }
+    uchar *dst = out.writableTileData(column, row);
+    if (!dst) {
+        *ok = false;
+        return;
+    }
+    const QRect t = out.tileRect(column, row);
+    const int bw = below.width(), bh = below.height();
+    for (int y = 0; y < t.height(); ++y) {
+        QRgb *line = reinterpret_cast<QRgb *>(dst + qsizetype(y) * out.tileStride());
+        const int sy = 2 * (t.top() + y);
+        const QRgb *rows[2] = {nullptr, nullptr}; // from segX to the end of its tile; nullptr = transparent
+        const bool inside[2] = {true, sy + 1 < bh};
+        int segX = 0;
+        for (int x = 0; x < t.width(); ++x) {
+            const int sx = 2 * (t.left() + x);
+            if (x == 0 || (sx & (ts - 1)) == 0) { // a new tile of `below` (sx is even: sx + 1 is in it too)
+                segX = sx;
+                for (int k = 0; k < 2; ++k)
+                    rows[k] = inside[k] ? below.constRow(sx, sy + k) : nullptr;
+            }
+            const bool right = sx + 1 < bw;
+            quint32 sum[4] = {0, 0, 0, 0};
+            int n = 0;
+            for (int k = 0; k < 2; ++k) {
+                if (!inside[k])
+                    continue;
+                const QRgb *src = rows[k]; // nullptr = transparent tile
+                for (int d = 0; d < (right ? 2 : 1); ++d) {
+                    ++n;
+                    if (!src)
+                        continue;
+                    const QRgb p = src[sx - segX + d];
+                    sum[0] += qAlpha(p);
+                    sum[1] += qRed(p);
+                    sum[2] += qGreen(p);
+                    sum[3] += qBlue(p);
+                }
+            }
+            const quint32 h = quint32(n) / 2;
+            line[x] = qRgba(int((sum[1] + h) / quint32(n)), int((sum[2] + h) / quint32(n)), int((sum[3] + h) / quint32(n)),
+                            int((sum[0] + h) / quint32(n)));
+        }
+    }
+}
+
+QImage ViewPyramid::pixels(const TiledImage &image, int level, const QRect &area)
+{
+    const QRect a = area & QRect(QPoint(0, 0), levelSize(image.size(), std::clamp(level, 0, MaxLevel)));
+    if (a.isEmpty())
+        return QImage();
+    // The buffer first (growing it may evict the levels, which are not in use yet), then the level.
+    const qint64 needed = qint64(a.width()) * a.height() * 4;
+    if (needed > m_scratchBytes) {
+        if (!MemoryBudget::tryReserve(needed - m_scratchBytes, MemoryBudget::Category::Cache))
+            return QImage();
+        m_scratch = QImage();
+        m_scratch = QImage(int(std::min<qint64>(needed / 4, INT_MAX)), 1, QImage::Format_ARGB32_Premultiplied);
+        if (m_scratch.isNull()) {
+            MemoryBudget::release(needed - m_scratchBytes, MemoryBudget::Category::Cache);
+            return QImage();
+        }
+        m_scratchBytes = needed;
+    }
+    const TiledImage *source = this->level(image, level, a);
+    if (!source)
+        return QImage();
+    const bool wasBusy = m_busy;
+    m_busy = true;
+    uchar *bits = m_scratch.bits();
+    const qsizetype bpl = qsizetype(a.width()) * 4;
+    source->readInto(a, bits, bpl);
+    m_busy = wasBusy;
+    return QImage(bits, a.width(), a.height(), bpl, QImage::Format_ARGB32_Premultiplied);
+}
+
+qint64 ViewPyramid::clear()
+{
+    const qint64 bytes = byteSize();
+    m_levels.clear();
+    return bytes;
+}
+
+qint64 ViewPyramid::byteSize() const
+{
+    qint64 bytes = 0;
+    for (const Level &l : m_levels)
+        bytes += l.image.allocatedBytes();
+    return bytes;
+}

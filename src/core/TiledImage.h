@@ -21,15 +21,21 @@ public:
     const uchar *data() const { return reinterpret_cast<const uchar *>(this) + HeaderSize; }
     int bytes() const { return m_bytes; }
     bool isShared() const { return m_owners.loadAcquire() != 1; }
+    // A number that changes whenever the block's pixels may change (new block, or handed out for
+    // writing), unique over the process lifetime: caches derived from a tile (the view pyramid)
+    // compare stamps instead of pixels. Writers are single-threaded per block (copy-on-write).
+    quint64 stamp() const { return m_stamp; }
+    void touch();
     void ref() { m_owners.ref(); }
     // Drops one owner; frees the block (and its budget) with the last one.
     void deref();
 
 private:
-    static constexpr int HeaderSize = 16;
+    static constexpr int HeaderSize = 32; // keeps the pixels 16-byte aligned
     TileBlock() = default;
     QAtomicInt m_owners;
     int m_bytes = 0;
+    quint64 m_stamp = 0;
     quint8 m_category = 0;
 };
 
@@ -125,6 +131,12 @@ public:
     void releaseTile(int column, int row);
     bool sharesTileWith(const TiledImage &other, int column, int row) const;
     const TileRef &tileRef(int column, int row) const;
+    // The tile's TileBlock::stamp(), 0 for a missing (transparent) tile.
+    quint64 tileStamp(int column, int row) const
+    {
+        const TileBlock *b = tileRef(column, row).get();
+        return b ? b->stamp() : 0;
+    }
     // Replaces a tile (null = transparent). The tile must have this image's tile size.
     void setTileRef(int column, int row, TileRef tile);
     int allocatedTileCount() const;
@@ -161,6 +173,8 @@ public:
     // the allocator refuses the buffer.
     QImage toImage() const;
     QImage copy(const QRect &rect) const;
+    // Copies rect (transparent where unallocated or outside) into dst, rows bpl bytes apart.
+    void readInto(const QRect &rect, uchar *dst, qsizetype bpl) const;
     // Writes src (converted to premultiplied ARGB32) at pos, clipped to the image. Transparent
     // source pixels over missing tiles allocate nothing. All tiles are prepared before any pixel
     // changes, so on failure (false) the image is unchanged.

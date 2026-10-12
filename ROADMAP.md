@@ -164,7 +164,7 @@ Plan and order in the milestone 10 specification; research in `research/m10-*.md
 (local commits): baseline reproduced; research; `MemoryBudget` and `TiledImage` (64-pixel
 copy-on-write tiles, chosen by measurement); layers, composite, brushes, undo records, selection
 edits, transforms, clipboard and recovery snapshots on tiled storage; project format 3 (sparse
-tiles; versions 1 and 2 still read). Remaining: incremental view rendering (pyramid), Apply on a
+tiles; versions 1 and 2 still read); a view pyramid for zoomed-out views. Remaining: Apply on a
 worker thread with cancellation, memory-aware undo and refusal messages, recovery and fuzzing,
 benchmarks of all workloads, Android validation, the artist workflows and the reports.
 

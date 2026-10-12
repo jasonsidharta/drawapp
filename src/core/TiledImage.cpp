@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <new>
 
 namespace {
@@ -37,6 +38,12 @@ int log2Of(int v)
 
 // --- TileBlock ---
 
+void TileBlock::touch()
+{
+    static std::atomic<quint64> next{1};
+    m_stamp = next.fetch_add(1, std::memory_order_relaxed);
+}
+
 TileBlock *TileBlock::create(int bytes, MemoryBudget::Category category, const TileBlock *source)
 {
     if (!MemoryBudget::tryReserve(bytes, category))
@@ -51,6 +58,7 @@ TileBlock *TileBlock::create(int bytes, MemoryBudget::Category category, const T
     block->m_owners.storeRelaxed(1);
     block->m_bytes = bytes;
     block->m_category = quint8(category);
+    block->touch();
     if (source)
         std::memcpy(block->data(), source->data(), size_t(bytes));
     else
@@ -129,6 +137,8 @@ bool TiledImage::prepareTile(int column, int row)
         if (!b)
             return false;
         *slot = TileRef(b);
+    } else {
+        slot->get()->touch(); // unique already: about to be written in place
     }
     return true;
 }
@@ -277,6 +287,33 @@ QRgb *TiledImage::writableRow(int x, int y)
         return nullptr;
     const int mask = m_tileSize - 1;
     return reinterpret_cast<QRgb *>(d + (y & mask) * tileStride()) + (x & mask);
+}
+
+void TiledImage::readInto(const QRect &requested, uchar *dst, qsizetype bpl) const
+{
+    const QRect r = requested.normalized();
+    for (int y = r.top(); y <= r.bottom(); ++y) {
+        QRgb *line = reinterpret_cast<QRgb *>(dst + qsizetype(y - r.top()) * bpl);
+        if (y < 0 || y >= height()) {
+            std::memset(line, 0, size_t(r.width()) * 4);
+            continue;
+        }
+        for (int x = r.left(); x <= r.right();) {
+            if (x < 0 || x >= width()) {
+                const int end = x < 0 ? std::min(r.right() + 1, 0) : r.right() + 1;
+                std::memset(line + (x - r.left()), 0, size_t(end - x) * 4);
+                x = end;
+                continue;
+            }
+            const int end = std::min({r.right() + 1, width(), (columnOf(x) + 1) * m_tileSize});
+            const QRgb *src = constRow(x, y);
+            if (src)
+                std::memcpy(line + (x - r.left()), src, size_t(end - x) * 4);
+            else
+                std::memset(line + (x - r.left()), 0, size_t(end - x) * 4);
+            x = end;
+        }
+    }
 }
 
 QImage TiledImage::copy(const QRect &requested) const

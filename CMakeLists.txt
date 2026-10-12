@@ -40,6 +40,7 @@ add_library(drawcore STATIC
     src/core/TileSnapshot.cpp src/core/TileSnapshot.h
     src/core/TransformSession.cpp src/core/TransformSession.h
     src/core/UndoHistory.cpp src/core/UndoHistory.h
+    src/core/ViewPyramid.cpp src/core/ViewPyramid.h
     src/core/ViewRenderer.cpp src/core/ViewRenderer.h
     src/core/ViewTransform.cpp src/core/ViewTransform.h
 )

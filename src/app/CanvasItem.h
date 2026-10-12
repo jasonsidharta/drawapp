@@ -12,6 +12,7 @@
 #include "TileSnapshot.h"
 #include "TransformSession.h"
 #include "UndoHistory.h"
+#include "ViewPyramid.h"
 #include "ViewTransform.h"
 
 #include <QColor>
@@ -557,6 +558,7 @@ private:
     // (sharing their tiles) in which only the transformed area's tiles are rewritten.
     std::vector<TiledImage> m_previewLayers;
     TiledImage m_previewComposite; // the document with the preview layers, what the view shows
+    ViewPyramid m_viewPyramid;     // reduced levels of what the view shows, for zooming out
     QRect m_previewRect;       // area the preview last differed from the document in
     TransformSession::Handle m_dragHandle = TransformSession::Handle::None;
     QPointF m_dragLastDoc;

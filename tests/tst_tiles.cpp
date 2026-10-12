@@ -3,6 +3,8 @@
 
 #include "MemoryBudget.h"
 #include "TiledImage.h"
+#include "ViewPyramid.h"
+#include "ViewRenderer.h"
 
 #include <QPainter>
 #include <QRandomGenerator>
@@ -44,6 +46,53 @@ struct BudgetGuard
         MemoryBudget::failReservationsForTesting(-1, 0);
     }
 };
+
+// The pyramid's definition, computed densely: each pixel the rounded average of the 2 x 2
+// pixels below it that lie inside the image.
+QImage reduce(const QImage &src)
+{
+    QImage out((src.width() + 1) / 2, (src.height() + 1) / 2, QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < out.height(); ++y)
+        for (int x = 0; x < out.width(); ++x) {
+            quint32 s[4] = {0, 0, 0, 0};
+            quint32 n = 0;
+            for (int dy = 0; dy < 2; ++dy)
+                for (int dx = 0; dx < 2; ++dx) {
+                    const int sx = 2 * x + dx, sy = 2 * y + dy;
+                    if (sx >= src.width() || sy >= src.height())
+                        continue;
+                    const QRgb p = src.pixel(sx, sy);
+                    s[0] += qRed(p);
+                    s[1] += qGreen(p);
+                    s[2] += qBlue(p);
+                    s[3] += qAlpha(p);
+                    ++n;
+                }
+            out.setPixel(x, y, qRgba(int((s[0] + n / 2) / n), int((s[1] + n / 2) / n), int((s[2] + n / 2) / n),
+                                     int((s[3] + n / 2) / n)));
+        }
+    return out;
+}
+
+ViewTransform viewAt(qreal zoom, QPointF pan)
+{
+    ViewTransform v;
+    v.setZoomAt(zoom, QPointF(0, 0));
+    v.setPan(pan);
+    return v;
+}
+
+int maxDifference(const QImage &a, const QImage &b)
+{
+    int worst = 0;
+    for (int y = 0; y < a.height(); ++y)
+        for (int x = 0; x < a.width(); ++x) {
+            const QRgb p = a.pixel(x, y), q = b.pixel(x, y);
+            worst = std::max({worst, std::abs(qRed(p) - qRed(q)), std::abs(qGreen(p) - qGreen(q)),
+                              std::abs(qBlue(p) - qBlue(q)), std::abs(qAlpha(p) - qAlpha(q))});
+        }
+    return worst;
+}
 
 } // namespace
 
@@ -362,6 +411,170 @@ private slots:
         QVERIFY(img == ref);
         for (const auto &[snap, dense] : snapshots)
             QVERIFY(snap == dense);
+    }
+
+    // --- view pyramid (milestone 10 stage 6) ---
+
+    void pyramidLevelChoice()
+    {
+        const QSize big(16384, 16384);
+        QCOMPARE(ViewPyramid::levelFor(4.0, big), 0);
+        QCOMPARE(ViewPyramid::levelFor(1.0, big), 0);
+        QCOMPARE(ViewPyramid::levelFor(0.75, big), 0);
+        QCOMPARE(ViewPyramid::levelFor(0.5, big), 1);  // exactly half: level 1 drawn 1:1
+        QCOMPARE(ViewPyramid::levelFor(0.3, big), 1);
+        QCOMPARE(ViewPyramid::levelFor(0.25, big), 2);
+        QCOMPARE(ViewPyramid::levelFor(0.05, big), 4);  // the smallest zoom
+        QCOMPARE(ViewPyramid::levelFor(0.001, QSize(8, 8)), 3); // never below one pixel
+        QCOMPARE(ViewPyramid::levelSize(QSize(101, 7), 1), QSize(51, 4));
+        QCOMPARE(ViewPyramid::levelSize(QSize(101, 7), 3), QSize(13, 1));
+    }
+
+    void pyramidLevelsAreExactAverages()
+    {
+        // Odd sizes: edge pixels average only the pixels inside.
+        const QImage dense = pattern(QSize(301, 197), 11);
+        const TiledImage image = TiledImage::fromImage(dense);
+        ViewPyramid pyramid;
+        QImage expected = dense;
+        for (int k = 1; k <= 4; ++k) {
+            expected = reduce(expected);
+            const TiledImage *level = pyramid.level(image, k, QRect(QPoint(0, 0), ViewPyramid::levelSize(image.size(), k)));
+            QVERIFY(level);
+            QCOMPARE(level->size(), expected.size());
+            QVERIFY2(*level == expected, qPrintable(QString::number(k)));
+        }
+    }
+
+    void pyramidRebuildsOnlyWhatChanged()
+    {
+        TiledImage image(QSize(1024, 1024));
+        QVERIFY(image.fillRect(QRect(100, 100, 600, 500), qRgba(10, 20, 30, 255)));
+        ViewPyramid pyramid;
+        const QRect all3(QPoint(0, 0), ViewPyramid::levelSize(image.size(), 3));
+        QVERIFY(pyramid.level(image, 3, all3));
+        const qint64 first = pyramid.tilesBuilt();
+        QVERIFY(first > 0);
+        QVERIFY(pyramid.level(image, 3, all3));
+        QCOMPARE(pyramid.tilesBuilt(), first); // nothing changed: nothing rebuilt
+        // One dab-sized change: one tile per level is rebuilt (levels 1, 2 and 3).
+        QVERIFY(image.setPixel(700, 650, qRgba(200, 0, 0, 255)));
+        const TiledImage *level = pyramid.level(image, 3, all3);
+        QVERIFY(level);
+        QCOMPARE(pyramid.tilesBuilt(), first + 3);
+        QVERIFY(*level == reduce(reduce(reduce(image.toImage()))));
+        // A copy that shares the image's tiles (as the transform preview does) reuses the levels.
+        TiledImage copy = image;
+        QVERIFY(pyramid.level(copy, 3, all3));
+        QCOMPARE(pyramid.tilesBuilt(), first + 3);
+        // Undo-style tile exchange is seen too.
+        TiledImage other = image;
+        QVERIFY(other.fillRect(QRect(0, 0, 64, 64), qRgba(0, 0, 255, 255)));
+        image.setTileRef(0, 0, other.tileRef(0, 0));
+        QVERIFY(*pyramid.level(image, 3, all3) == reduce(reduce(reduce(image.toImage()))));
+    }
+
+    void pyramidOfAnEmptyImageAllocatesNothing()
+    {
+        const TiledImage image(QSize(16384, 16384));
+        ViewPyramid pyramid;
+        const QSize s4 = ViewPyramid::levelSize(image.size(), 4);
+        QVERIFY(pyramid.level(image, 4, QRect(QPoint(0, 0), s4)));
+        QCOMPARE(pyramid.byteSize(), 0);
+    }
+
+    void pyramidIsEvictedAndRefusedCleanly()
+    {
+        BudgetGuard guard;
+        const TiledImage image = TiledImage::fromImage(pattern(QSize(512, 512), 3));
+        ViewPyramid pyramid;
+        const QRect all1(QPoint(0, 0), ViewPyramid::levelSize(image.size(), 1));
+        QVERIFY(pyramid.level(image, 1, all1));
+        QVERIFY(pyramid.byteSize() > 0);
+        const qint64 cache = MemoryBudget::used(MemoryBudget::Category::Cache);
+        QVERIFY(MemoryBudget::evict(qint64(1) << 40) >= pyramid.byteSize());
+        QCOMPARE(pyramid.byteSize(), 0);
+        QVERIFY(MemoryBudget::used(MemoryBudget::Category::Cache) < cache);
+        // Refused: no level, no crash; then it rebuilds the same pixels.
+        MemoryBudget::failReservationsForTesting(0, 1000);
+        QVERIFY(!pyramid.level(image, 1, all1));
+        QVERIFY(pyramid.pixels(image, 1, all1).isNull());
+        MemoryBudget::failReservationsForTesting(-1, 0);
+        const TiledImage *level = pyramid.level(image, 1, all1);
+        QVERIFY(level && *level == reduce(image.toImage()));
+    }
+
+    void viewMatchesTheDenseRendererAboveHalfZoom()
+    {
+        // The canvas's view (tiled, with the pyramid) draws exactly the pixels of the milestone 9
+        // renderer from 50 % zoom up, at fractional zooms and pans (no seams at tile edges).
+        const QImage dense = pattern(QSize(700, 500), 5);
+        const TiledImage tiled = TiledImage::fromImage(dense);
+        ViewPyramid pyramid;
+        for (const qreal zoom : {0.51, 0.77, 1.0, 1.7, 3.3, 8.0}) {
+            for (const QPointF pan : {QPointF(0, 0), QPointF(13.37, -21.6), QPointF(-200.25, 7.5)}) {
+                const ViewTransform view = viewAt(zoom, pan);
+                QImage a(640, 480, QImage::Format_ARGB32_Premultiplied), b = a;
+                {
+                    QPainter p(&a);
+                    ViewRenderer::render(p, dense, view, a.rect());
+                }
+                {
+                    QPainter p(&b);
+                    ViewRenderer::render(p, tiled, pyramid, view, b.rect());
+                }
+                QVERIFY2(a == b, qPrintable(QString("zoom %1 pan %2,%3").arg(zoom).arg(pan.x()).arg(pan.y())));
+            }
+        }
+    }
+
+    void zoomedOutViewDrawsThePyramidLevel()
+    {
+        // Below 50 %: the level image drawn with the same geometry (sizes divisible by 2^k so the
+        // level covers the document exactly). Equal to drawing the dense level as a document at
+        // zoom × 2^k, up to rounding in the transform.
+        const QImage dense = pattern(QSize(1024, 768), 9);
+        const TiledImage tiled = TiledImage::fromImage(dense);
+        ViewPyramid pyramid;
+        for (const qreal zoom : {0.4, 0.26, 0.12, 0.05}) {
+            const int k = ViewPyramid::levelFor(zoom, tiled.size());
+            QVERIFY(k > 0);
+            QImage level = dense;
+            for (int i = 0; i < k; ++i)
+                level = reduce(level);
+            const QPointF pan(17.25, 9.5);
+            QImage a(400, 300, QImage::Format_ARGB32_Premultiplied), b = a;
+            {
+                QPainter p(&a);
+                ViewRenderer::render(p, level, viewAt(zoom * (1 << k), pan), a.rect());
+            }
+            {
+                QPainter p(&b);
+                ViewRenderer::render(p, tiled, pyramid, viewAt(zoom, pan), b.rect());
+            }
+            const int worst = maxDifference(a, b);
+            QVERIFY2(worst <= 2, qPrintable(QString("zoom %1: %2").arg(zoom).arg(worst)));
+        }
+    }
+
+    void zoomedOutViewOfAHugeSparseCanvasIsCheap()
+    {
+        // 16384 x 16384 with a few marks, seen whole at the smallest zoom: the levels and the
+        // drawing buffer stay small (the dense milestone 9 path would need 1 GiB).
+        TiledImage image(QSize(16384, 16384));
+        for (int i = 0; i < 20; ++i)
+            QVERIFY(image.fillRect(QRect(800 * i, 700 * i, 40, 40), qRgba(0, 0, 0, 255)));
+        ViewPyramid pyramid;
+        const ViewTransform view = viewAt(0.05, QPointF(10, 10));
+        QImage out(840, 840, QImage::Format_ARGB32_Premultiplied);
+        {
+            QPainter p(&out);
+            ViewRenderer::render(p, image, pyramid, view, out.rect());
+        }
+        QVERIFY(pyramid.byteSize() < 8 * 1024 * 1024);
+        // The marks are visible (darker than the checkerboard).
+        const QPointF mark = view.docToView(QPointF(800 * 10 + 20, 700 * 10 + 20));
+        QVERIFY(qGray(out.pixel(mark.toPoint())) < 150);
     }
 };
 

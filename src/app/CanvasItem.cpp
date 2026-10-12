@@ -957,7 +957,7 @@ void CanvasItem::paint(QPainter *painter)
 
     const QRect exposed = painter->hasClipping() ? painter->clipBoundingRect().toAlignedRect()
                                                  : boundingRect().toAlignedRect();
-    ViewRenderer::render(*painter, displayedComposite(), m_view, exposed);
+    ViewRenderer::render(*painter, displayedComposite(), m_viewPyramid, m_view, exposed);
     drawOverlays(painter);
 
     if (m_statsEnabled) {

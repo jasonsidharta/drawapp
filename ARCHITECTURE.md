@@ -66,7 +66,9 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
   ProjectIo        one worker thread for save, open and PNG export
   RecoveryFile     .drawrecovery v2 (metadata + embedded layered project), v1 reader
   RecoveryManager  session lock, orphan discovery, one-at-a-time worker writes with stale checks
-  ViewTransform, Pressure.h, ViewRenderer   (view and input policy; unchanged)
+  ViewPyramid      reduced-resolution levels of the shown image for zoomed-out views (cache)
+  ViewTransform, Pressure.h, ViewRenderer   (view and input policy; ViewRenderer draws tiled
+                   images and pyramid levels)
 src/app/    (static QML module "drawapp_ui", URI DrawApp, used by the app and tst_ui)
   CanvasItem       QQuickPaintedItem; input, strokes, layer commands, history, files, recovery;
                    selections, transforms and the clipboard in CanvasItemSelection.cpp
@@ -100,6 +102,14 @@ tests/             tst_core, tst_brush, tst_brushengine, tst_tiles, tst_selectio
   composite: for each tile, the visible layers' tiles are drawn bottom to top with
   `QPainter::setOpacity` (as before, so pixels are unchanged); where no visible layer has a tile
   the composite tile is released. `LayeredDocument` keeps the composite as a tiled image too.
+- **View** (milestone 10): from 50 % zoom up the view draws the composite exactly as before.
+  Zoomed out it draws from `ViewPyramid`, reduced copies of the shown image at 1/2, 1/4, ... (each
+  pixel the premultiplied average of the 2 x 2 below), choosing the smallest level still at
+  least as detailed as the screen. Levels are built lazily for the visible area and rebuilt only
+  where the image changed (each level tile remembers the stamps of its source tiles), so they
+  follow the composite and a transform preview without notifications. They are a cache
+  (`MemoryBudget` category Cache) dropped under memory pressure. So zooming out on a large canvas
+  costs work and memory proportional to the view, not the document.
   Brush/eraser events refresh only the dabs' rect;
   visibility, opacity, order, add/delete/duplicate refresh the whole canvas. The view draws the
   cache exactly as before (renderer unchanged), so the checkerboard appears behind the whole
@@ -685,9 +695,9 @@ on tiled storage (`docs/m10-performance.md`) and this list is updated with those
   2048 x 1536 layer is still 12 MiB), plus up to 128 MiB of history, all within the
   `MemoryBudget` limit. The selection mask is still one dense byte per canvas pixel (256 MiB at
   16384 x 16384).
-- The view still assembles the visible part of the composite into one dense image per repaint;
-  zoomed far out on a very large canvas that image can be refused by the memory budget (the view
-  then shows the checkerboard). A reduced-resolution view pyramid is milestone 10 stage 6.
+- The view copies the visible part of the drawn level into one buffer per repaint (kept between
+  repaints); a full repaint costs about the view's pixel count, up to 4x just above 50 % zoom.
+  There is no GPU path.
 - Normal blending only; no groups, clipping, masks, vector layers or other blend modes.
 - Layer drag-and-drop reordering is not implemented (Up/Down buttons only).
 - Not a final painting engine: no GPU brush; input-to-display latency unmeasured.

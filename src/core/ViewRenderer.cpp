@@ -58,6 +58,32 @@ void ViewRenderer::render(QPainter &painter, const QImage &document, const ViewT
                [&](const QRect &source) { painter.drawImage(QRectF(source), document, source); });
 }
 
+void ViewRenderer::render(QPainter &painter, const TiledImage &document, ViewPyramid &pyramid, const ViewTransform &view,
+                          const QRect &exposed)
+{
+    renderWith(painter, document.rect(), view, exposed, [&](const QRect &source) {
+        for (int level = ViewPyramid::levelFor(view.zoom(), document.size()); level <= ViewPyramid::MaxLevel; ++level) {
+            // The level's pixels covering source (which has a margin for filtering already; a
+            // reduced level gets one of its own). Level 0: exactly the overload above.
+            const int m = level ? 1 : 0;
+            const QRect area = QRect(QPoint(source.left() >> level, source.top() >> level),
+                                     QPoint(source.right() >> level, source.bottom() >> level))
+                                   .adjusted(-m, -m, m, m);
+            const QImage pixels = pyramid.pixels(document, level, area);
+            if (pixels.isNull())
+                continue; // memory refused: a smaller level
+            const QRect inside = area & QRect(QPoint(0, 0), ViewPyramid::levelSize(document.size(), level));
+            const double scale = double(qint64(1) << level);
+            // A level pixel covers scale x scale document pixels.
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, view.zoom() * scale < 1.0);
+            painter.drawImage(QRectF(inside.left() * scale, inside.top() * scale, inside.width() * scale,
+                                     inside.height() * scale),
+                              pixels, pixels.rect());
+            return;
+        }
+    });
+}
+
 void ViewRenderer::render(QPainter &painter, const TiledImage &document, const ViewTransform &view, const QRect &exposed)
 {
     renderWith(painter, document.rect(), view, exposed, [&](const QRect &source) {
