@@ -24,6 +24,7 @@ add_library(drawcore STATIC
     src/core/DocumentData.cpp src/core/DocumentData.h
     src/core/DocumentProvider.cpp src/core/DocumentProvider.h
     src/core/LayeredDocument.cpp src/core/LayeredDocument.h
+    src/core/MemoryBudget.cpp src/core/MemoryBudget.h
     src/core/Pressure.h
     src/core/ProjectFile.cpp src/core/ProjectFile.h
     src/core/ProjectIo.cpp src/core/ProjectIo.h
@@ -35,6 +36,7 @@ add_library(drawcore STATIC
     src/core/StrokeEngine.cpp src/core/StrokeEngine.h
     src/core/StrokeSmoother.cpp src/core/StrokeSmoother.h
     src/core/StrokeSpacer.cpp src/core/StrokeSpacer.h
+    src/core/TiledImage.cpp src/core/TiledImage.h
     src/core/TileSnapshot.cpp src/core/TileSnapshot.h
     src/core/TransformSession.cpp src/core/TransformSession.h
     src/core/UndoHistory.cpp src/core/UndoHistory.h
