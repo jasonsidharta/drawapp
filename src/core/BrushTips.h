@@ -39,8 +39,10 @@ const Tip *tip(const QString &id);
 // A tip from an image (imported tips): converted to Grayscale8, mip chain and pass length built.
 Tip makeTip(const QImage &image);
 const Texture *texture(const QString &id);
+// Ids (sorted) and labels; these never generate images.
 QStringList tipIds();
 QStringList textureIds();
+QString label(const QString &id);
 
 // Deterministic hash in [0, 1) of three integers (also used for per-stroke jitter and dither).
 double hash01(qint64 a, qint64 b, quint64 salt);

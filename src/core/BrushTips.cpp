@@ -181,10 +181,11 @@ const Library &library()
     static const Library lib = [] {
         Library l;
         const QImage bristle = bristleTip();
-        l.tips[QStringLiteral("bristle")] = {QStringLiteral("bristle"), QStringLiteral("Flat bristle"), mipChain(bristle),
-                                             passLength(bristle)};
-        l.textures[QStringLiteral("paper")] = {QStringLiteral("paper"), QStringLiteral("Paper tooth"), paperTexture()};
-        l.textures[QStringLiteral("canvas")] = {QStringLiteral("canvas"), QStringLiteral("Canvas weave"), canvasTexture()};
+        l.tips[QStringLiteral("bristle")] = {QStringLiteral("bristle"), BrushTips::label(QStringLiteral("bristle")),
+                                             mipChain(bristle), passLength(bristle)};
+        l.textures[QStringLiteral("paper")] = {QStringLiteral("paper"), BrushTips::label(QStringLiteral("paper")), paperTexture()};
+        l.textures[QStringLiteral("canvas")] = {QStringLiteral("canvas"), BrushTips::label(QStringLiteral("canvas")),
+                                                canvasTexture()};
         return l;
     }();
     return lib;
@@ -225,18 +226,25 @@ const BrushTips::Texture *BrushTips::texture(const QString &id)
     return it == textures.end() ? nullptr : &it->second;
 }
 
+// Ids and labels without generating any image (the brush property registry needs them at
+// start-up; generating the textures there cost about 40 ms before the first frame).
 QStringList BrushTips::tipIds()
 {
-    QStringList ids;
-    for (const auto &[id, tip] : library().tips)
-        ids << id;
-    return ids;
+    return {QStringLiteral("bristle")};
 }
 
 QStringList BrushTips::textureIds()
 {
-    QStringList ids;
-    for (const auto &[id, texture] : library().textures)
-        ids << id;
-    return ids;
+    return {QStringLiteral("canvas"), QStringLiteral("paper")};
+}
+
+QString BrushTips::label(const QString &id)
+{
+    if (id == QLatin1String("bristle"))
+        return QStringLiteral("Flat bristle");
+    if (id == QLatin1String("paper"))
+        return QStringLiteral("Paper tooth");
+    if (id == QLatin1String("canvas"))
+        return QStringLiteral("Canvas weave");
+    return QString();
 }

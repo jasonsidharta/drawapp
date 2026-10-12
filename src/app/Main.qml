@@ -946,8 +946,10 @@ ApplicationWindow {
 
     function openStudio() {
         brushPopup.close()
-        if (canvas.brushes.studio.open())
+        if (canvas.brushes.studio.open()) {
+            studioLoader.active = true
             studioPopup.open()
+        }
     }
 
     // The Brush Studio, over the whole window. Closing it any other way than Done cancels.
@@ -967,11 +969,19 @@ ApplicationWindow {
                 canvas.brushes.studio.cancel()
             canvas.forceActiveFocus()
         }
-        BrushStudioPage {
-            objectName: "brushStudioPage"
+        // Created when first opened, not at start-up; kept afterwards (it closes itself from its
+        // own Done/Cancel handlers, so it must not be destroyed by closing).
+        Loader {
+            id: studioLoader
+            // Inside the component "canvas" would name the page's own property (a binding loop).
+            readonly property CanvasItem studioCanvas: canvas
             anchors.fill: parent
-            canvas: canvas
-            onCloseRequested: studioPopup.close()
+            active: false
+            sourceComponent: BrushStudioPage {
+                objectName: "brushStudioPage"
+                canvas: studioLoader.studioCanvas
+                onCloseRequested: studioPopup.close()
+            }
         }
     }
 

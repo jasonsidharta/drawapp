@@ -211,12 +211,12 @@ std::vector<BrushProperty> build()
     QStringList tipNames{QString()}, tipLabels{QStringLiteral("Round")};
     for (const QString &id : BrushTips::tipIds()) {
         tipNames << id;
-        tipLabels << BrushTips::tip(id)->label;
+        tipLabels << BrushTips::label(id);
     }
     QStringList textureNames{QString()}, textureLabels{QStringLiteral("None")};
     for (const QString &id : BrushTips::textureIds()) {
         textureNames << id;
-        textureLabels << BrushTips::texture(id)->label;
+        textureLabels << BrushTips::label(id);
     }
     const unsigned TipEngines = EngineAll & ~EngineSpray;
 
