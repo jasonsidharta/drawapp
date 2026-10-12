@@ -53,6 +53,18 @@ public:
     Selection combined(const QImage &shape, SelectionMode mode) const;
     // 255 − coverage. Inverting "none" gives "none" (there is nothing to invert).
     Selection inverted() const;
+    // Pixels similar to the seed pixel of image (premultiplied ARGB32, document size): every
+    // channel within tolerance (0..255; fully transparent pixels match each other whatever their
+    // stored colour). contiguous limits it to the 4-connected region around the seed. With
+    // antialias, neighbours of the region up to 16 levels beyond the tolerance get partial
+    // coverage. Returns a document-size mask (all zero if the seed is outside the image).
+    static QImage magicWand(const QImage &image, QPoint seed, int tolerance, bool contiguous, bool antialias = true);
+    // The selection enlarged or reduced by radius pixels (Euclidean distance from the 50 %
+    // boundary), with an anti-aliased edge. Radius 0 changes nothing; none stays none.
+    Selection grown(double radius) const;
+    Selection shrunk(double radius) const;
+    // Soft edges: the mask blurred (three box passes, close to a Gaussian of sigma = radius / 2).
+    Selection feathered(double radius) const;
     // The boundary between pixels with coverage >= 128 and the rest, as horizontal and vertical
     // runs along pixel edges, in document pixels. Empty for none and empty.
     QPainterPath outline() const;

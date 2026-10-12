@@ -41,7 +41,8 @@ public:
     // selection and a fully transparent layer.
     bool begin(const QImage &layer, const Selection &selection);
     // Several layers (all the document's size): one part each, in the given order. Returns false,
-    // leaving the session inactive, if there is nothing to transform or memory runs out.
+    // leaving the session inactive, if there is nothing to transform or memory runs out. With no
+    // layers it transforms the selection's outline only (it needs a non-empty selection).
     bool begin(const std::vector<QImage> &layers, const Selection &selection);
     int partCount() const { return int(m_parts.size()); }
     // Memory held by the session's caches.

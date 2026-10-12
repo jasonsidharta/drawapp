@@ -498,7 +498,7 @@ ApplicationWindow {
                 // As wide as the visible groups need, wrapping onto more lines on narrow screens.
                 readonly property real naturalWidth: {
                     let w = 0
-                    for (const g of [shapeRow, modeRow, selectionRow, clipboardRow, numbersRow, adjustRow, applyRow])
+                    for (const g of [shapeRow, wandRow, polygonRow, modeRow, selectionRow, modifyRow, clipboardRow, numbersRow, adjustRow, applyRow])
                         if (g.visible)
                             w += g.implicitWidth + contextFlow.spacing
                     return w
@@ -558,6 +558,41 @@ ApplicationWindow {
                             checked: canvas.selectShape === CanvasItem.EllipseShape; onClicked: canvas.selectShape = CanvasItem.EllipseShape }
                         BarButton { objectName: "shapeLasso"; text: "Lasso"; checkable: true; ButtonGroup.group: shapeGroup
                             checked: canvas.selectShape === CanvasItem.LassoShape; onClicked: canvas.selectShape = CanvasItem.LassoShape }
+                        BarButton { objectName: "shapePolygon"; text: "Polygon"; checkable: true; ButtonGroup.group: shapeGroup
+                            checked: canvas.selectShape === CanvasItem.PolygonShape; onClicked: canvas.selectShape = CanvasItem.PolygonShape
+                            ToolTip.visible: hovered; ToolTip.text: "Click or tap the corners; close on the first point, with a double click or Enter" }
+                        BarButton { objectName: "shapeWand"; text: "Wand"; checkable: true; ButtonGroup.group: shapeGroup
+                            checked: canvas.selectShape === CanvasItem.WandShape; onClicked: canvas.selectShape = CanvasItem.WandShape
+                            ToolTip.visible: hovered; ToolTip.text: "Magic wand: select similar colours by clicking" }
+                    }
+                    Row {
+                        id: wandRow
+                        visible: !canvas.transforming && canvas.selectShape === CanvasItem.WandShape
+                        spacing: 4
+                        Label { text: "Tolerance"; anchors.verticalCenter: parent.verticalCenter }
+                        Slider {
+                            objectName: "wandToleranceSlider"
+                            width: 110
+                            height: 40
+                            from: 0
+                            to: 255
+                            stepSize: 1
+                            value: canvas.wandTolerance
+                            onMoved: canvas.wandTolerance = Math.round(value)
+                        }
+                        Label { text: canvas.wandTolerance; width: 28; anchors.verticalCenter: parent.verticalCenter }
+                        BarButton { objectName: "wandContiguousButton"; text: "Contiguous"; checkable: true; checked: canvas.wandContiguous
+                            onToggled: canvas.wandContiguous = checked }
+                        BarButton { objectName: "wandSampleAllButton"; text: "All layers"; checkable: true; checked: canvas.wandSampleAll
+                            onToggled: canvas.wandSampleAll = checked
+                            ToolTip.visible: hovered; ToolTip.text: "Look at all visible layers, not only the active one" }
+                    }
+                    Row {
+                        id: polygonRow
+                        visible: !canvas.transforming && canvas.polygonOpen
+                        spacing: 2
+                        BarButton { objectName: "closePolygonButton"; text: "Close shape"; highlighted: true; onClicked: canvas.closePolygon() }
+                        BarButton { objectName: "cancelPolygonButton"; text: "Cancel shape"; onClicked: canvas.cancelPolygon() }
                     }
                     Row {
                         id: modeRow
@@ -584,6 +619,29 @@ ApplicationWindow {
                         BarButton { objectName: "deselectButton"; text: "None"; enabled: canvas.hasSelection; onClicked: canvas.deselect() }
                         BarButton { objectName: "invertButton"; text: "Invert"; enabled: canvas.hasSelection; onClicked: canvas.invertSelection() }
                         BarButton { objectName: "reselectButton"; text: "Reselect"; enabled: canvas.canReselect; onClicked: canvas.reselect() }
+                    }
+                    Row {
+                        id: modifyRow
+                        visible: !canvas.transforming
+                        spacing: 2
+                        SpinBox {
+                            id: modifyRadius
+                            objectName: "modifyRadius"
+                            from: 1
+                            to: 500
+                            value: 8
+                            editable: true
+                            height: 40
+                            width: 96
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Radius in pixels for Grow, Shrink and Feather"
+                        }
+                        BarButton { objectName: "growButton"; text: "Grow"; enabled: canvas.hasSelection; onClicked: canvas.growSelection(modifyRadius.value) }
+                        BarButton { objectName: "shrinkButton"; text: "Shrink"; enabled: canvas.hasSelection; onClicked: canvas.shrinkSelection(modifyRadius.value) }
+                        BarButton { objectName: "featherButton"; text: "Feather"; enabled: canvas.hasSelection; onClicked: canvas.featherSelection(modifyRadius.value) }
+                        BarButton { objectName: "transformOutlineButton"; text: "Move outline"; enabled: canvas.hasSelection && !canvas.selectionEmpty
+                            onClicked: window.runEdit(canvas.beginSelectionTransform())
+                            ToolTip.visible: hovered; ToolTip.text: "Move, scale or rotate the selection itself, not the pixels" }
                     }
                     Row {
                         id: clipboardRow

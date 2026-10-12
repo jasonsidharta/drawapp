@@ -49,6 +49,15 @@ class CanvasItem : public QQuickPaintedItem
     // Selection tool options and state (see Selection; selections are not saved in files).
     Q_PROPERTY(SelectShape selectShape READ selectShape WRITE setSelectShape NOTIFY selectToolChanged)
     Q_PROPERTY(SelectOp selectMode READ selectMode WRITE setSelectMode NOTIFY selectToolChanged)
+    // Magic wand: tolerance 0..255 per channel, contiguous region or every similar pixel, and
+    // whether it looks at all visible layers (the composite) or only the active layer.
+    Q_PROPERTY(int wandTolerance READ wandTolerance WRITE setWandTolerance NOTIFY selectToolChanged)
+    Q_PROPERTY(bool wandContiguous READ wandContiguous WRITE setWandContiguous NOTIFY selectToolChanged)
+    Q_PROPERTY(bool wandSampleAll READ wandSampleAll WRITE setWandSampleAll NOTIFY selectToolChanged)
+    // A polygon lasso is being drawn (points placed, not yet closed).
+    Q_PROPERTY(bool polygonOpen READ polygonOpen NOTIFY selectToolChanged)
+    // The open transform moves only the selection's outline, not pixels.
+    Q_PROPERTY(bool transformingSelection READ transformingSelection NOTIFY transformChanged)
     Q_PROPERTY(bool hasSelection READ hasSelection NOTIFY selectionChanged)
     Q_PROPERTY(bool selectionEmpty READ selectionEmpty NOTIFY selectionChanged)
     Q_PROPERTY(bool canReselect READ canReselect NOTIFY selectionChanged)
@@ -94,7 +103,7 @@ class CanvasItem : public QQuickPaintedItem
 public:
     enum Tool { Brush, Eraser, Select, Transform };
     Q_ENUM(Tool)
-    enum SelectShape { RectangleShape, EllipseShape, LassoShape };
+    enum SelectShape { RectangleShape, EllipseShape, LassoShape, PolygonShape, WandShape };
     Q_ENUM(SelectShape)
     enum SelectOp { Replace, Add, Subtract, Intersect };
     Q_ENUM(SelectOp)
@@ -149,6 +158,25 @@ public:
     Q_INVOKABLE void deselect();
     Q_INVOKABLE void invertSelection();
     Q_INVOKABLE void reselect();
+    // Modify the selection by radius pixels (one undo step each).
+    Q_INVOKABLE void growSelection(qreal radius);
+    Q_INVOKABLE void shrinkSelection(qreal radius);
+    Q_INVOKABLE void featherSelection(qreal radius);
+    // Magic wand at a document position, combined with mode (as the tool does on a click).
+    void wandAt(const QPointF &docPos, SelectionMode mode);
+    // Polygon lasso: closes the open polygon (as Enter or a double click does), or drops it.
+    Q_INVOKABLE void closePolygon();
+    Q_INVOKABLE void cancelPolygon();
+    // Transforms only the selection's outline (move, scale, rotate, flip the mask).
+    Q_INVOKABLE QString beginSelectionTransform();
+    int wandTolerance() const { return m_wandTolerance; }
+    void setWandTolerance(int tolerance);
+    bool wandContiguous() const { return m_wandContiguous; }
+    void setWandContiguous(bool contiguous);
+    bool wandSampleAll() const { return m_wandSampleAll; }
+    void setWandSampleAll(bool all);
+    bool polygonOpen() const { return !m_polygon.empty(); }
+    bool transformingSelection() const { return m_transform.isActive() && m_transformLayerIds.empty(); }
     // Clears the selected pixels of the active layer (the whole layer without a selection).
     Q_INVOKABLE void clearSelected();
     // Copy and Cut take the selected pixels of the active layer (soft edges as partial alpha), or
@@ -327,6 +355,8 @@ protected:
     void touchUngrabEvent() override;
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
+    void hoverMoveEvent(QHoverEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
 
 private:
     enum class Gesture { None, Stroke, Pan, Pinch };
@@ -497,6 +527,14 @@ private:
     SelectionMode m_gestureMode = SelectionMode::Replace;
     QPointF m_selectStartView;
     std::vector<QPointF> m_selectPoints; // document coordinates (start and current, or the lasso)
+    std::vector<QPointF> m_polygon;      // polygon lasso vertices placed so far (document)
+    SelectionMode m_polygonMode = SelectionMode::Replace;
+    QPointF m_hoverDoc;                  // pointer position for the polygon's rubber band
+    bool m_hoverKnown = false;
+    int m_wandTolerance = 32;
+    bool m_wandContiguous = true;
+    bool m_wandSampleAll = false;
+    QPainterPath m_transformedOutline;   // Transform Selection: the outline as it will be
     Selection m_reselect;                // brought back by Reselect
     QPainterPath m_selectionOutline;     // document coordinates, cached per selection change
 

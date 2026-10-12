@@ -495,6 +495,93 @@ private slots:
         QCOMPARE(rendered(t), artwork());
     }
 
+    // --- wand, grow, shrink, feather ---
+    void magicWandContiguousAndGlobal()
+    {
+        QImage img(DocSize, QImage::Format_ARGB32_Premultiplied);
+        img.fill(Qt::transparent);
+        QPainter p(&img);
+        p.fillRect(QRect(20, 20, 40, 40), QColor(200, 0, 0));
+        p.fillRect(QRect(100, 20, 40, 40), QColor(205, 5, 0)); // close in colour, not connected
+        p.fillRect(QRect(200, 20, 40, 40), QColor(0, 0, 200));
+        p.end();
+        const QImage contiguous = Selection::magicWand(img, QPoint(30, 30), 10, true, false);
+        QCOMPARE(countAbove(contiguous, 0), 40 * 40);
+        const QImage global = Selection::magicWand(img, QPoint(30, 30), 10, false, false);
+        QCOMPARE(countAbove(global, 0), 2 * 40 * 40);
+        const QImage strict = Selection::magicWand(img, QPoint(30, 30), 2, false, false);
+        QCOMPARE(countAbove(strict, 0), 40 * 40);
+        // Clicking transparency selects the transparent region (around the squares).
+        const QImage empty = Selection::magicWand(img, QPoint(5, 5), 0, true, false);
+        QCOMPARE(countAbove(empty, 0), DocSize.width() * DocSize.height() - 3 * 40 * 40);
+        // Anti-aliasing: a ring of partial coverage only where colours are close.
+        const QImage soft = Selection::magicWand(img, QPoint(30, 30), 10, true, true);
+        QCOMPARE(countAbove(soft, 254), 40 * 40);
+        QVERIFY(Selection::magicWand(img, QPoint(-5, 5), 10, true).constScanLine(0)[0] == 0);
+    }
+
+    void growAndShrinkByDistance()
+    {
+        const Selection square = Selection().combined(shape(rectPath(QRectF(100, 100, 100, 100))), SelectionMode::Replace);
+        const Selection grown = square.grown(10);
+        QCOMPARE(grown.bounds(), QRect(90, 90, 120, 120));
+        QCOMPARE(grown.coverageAt(95, 150), 255);              // 5 px out: inside the grown edge
+        QVERIFY(grown.coverageAt(94, 94) > 128);               // distance 7.8 from the corner
+        QVERIFY(grown.coverageAt(91, 91) < 128);               // the corner is rounded (distance 12)
+        const Selection shrunk = square.shrunk(10);
+        QVERIFY(QRect(108, 108, 84, 84).contains(shrunk.bounds())); // plus a faint anti-aliased ring
+        QVERIFY(shrunk.coverageAt(109, 150) < 128 && shrunk.coverageAt(110, 150) >= 128);
+        QVERIFY(shrunk.coverageAt(189, 150) >= 128 && shrunk.coverageAt(190, 150) < 128);
+        QCOMPARE(shrunk.coverageAt(150, 150), 255);
+        QCOMPARE(shrunk.coverageAt(105, 150), 0);
+        const Selection gone = square.shrunk(60);
+        QVERIFY(gone.isActive() && gone.isEmpty()); // empty, never "none"
+        QVERIFY(!Selection().grown(5).isActive());
+        QVERIFY(square.grown(0) == square);
+    }
+
+    void featherSoftensWithoutLosingCoverage()
+    {
+        const Selection square = Selection().combined(shape(rectPath(QRectF(100, 100, 100, 100))), SelectionMode::Replace);
+        const Selection soft = square.feathered(12);
+        QCOMPARE(soft.coverageAt(150, 150), 255);
+        QVERIFY(std::abs(soft.coverageAt(100, 150) - 128) < 20); // the old edge is about half
+        QVERIFY(soft.coverageAt(92, 150) > 0 && soft.coverageAt(92, 150) < 80);
+        QVERIFY(std::abs(coverageSum(soft.mask()) - 100.0 * 100.0) < 100.0 * 100.0 * 0.02);
+        QVERIFY(soft.bounds().contains(QRect(95, 95, 110, 110)));
+    }
+
+    void featheredSelectionIsAppliedOnceByBrushes()
+    {
+        const Selection soft = Selection().combined(shape(rectPath(QRectF(100, 50, 200, 200))), SelectionMode::Replace).feathered(20);
+        BrushSettings solid = BrushPresets::builtIn("builtin.solid-round")->settings;
+        solid.size = 60;
+        QImage layer(DocSize, QImage::Format_ARGB32_Premultiplied);
+        layer.fill(Qt::transparent);
+        TileSnapshot before;
+        StrokeEngine engine(solid, Qt::black, 1);
+        engine.setClipMask(soft.mask());
+        engine.begin(layer, at(20, 150), before);
+        for (int i = 1; i <= 20; ++i)
+            engine.moveTo(layer, at(i % 2 ? 380 : 20, 150), before);
+        engine.finish(layer, before);
+        // Along the stroke's centre the paint equals the feathered coverage (±1), never squared.
+        for (int x = 80; x < 330; x += 3)
+            QVERIFY2(std::abs(qAlpha(layer.pixel(x, 150)) - soft.coverageAt(x, 150)) <= 1,
+                     qPrintable(QString("x %1: %2 vs %3").arg(x).arg(qAlpha(layer.pixel(x, 150))).arg(soft.coverageAt(x, 150))));
+    }
+
+    void outlineOnlyTransformMovesTheMask()
+    {
+        const Selection square = Selection().combined(shape(rectPath(QRectF(100, 100, 50, 40))), SelectionMode::Replace);
+        TransformSession t;
+        QVERIFY(t.begin(std::vector<QImage>{}, square));
+        QCOMPARE(t.partCount(), 0);
+        t.moveBy(QPointF(30, -20));
+        QCOMPARE(t.transformedSelection().bounds(), QRect(130, 80, 50, 40));
+        QVERIFY(!t.begin(std::vector<QImage>{}, Selection()));
+    }
+
     // --- multi-layer transforms ---
     void multiLayerTransformKeepsLayersAligned()
     {

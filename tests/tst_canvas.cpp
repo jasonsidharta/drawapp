@@ -2312,6 +2312,118 @@ private slots:
         QCOMPARE(qAlpha(doc().pixel(300, 300)), 0);
     }
 
+    // --- advanced selection tools ---
+
+    void polygonLassoByClicks()
+    {
+        m_canvas->setTool(CanvasItem::Select);
+        m_canvas->setSelectShape(CanvasItem::PolygonShape);
+        const QList<QPoint> corners{{200, 150}, {500, 160}, {450, 420}, {220, 380}};
+        for (const QPoint &c : corners)
+            QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::NoModifier, c);
+        QVERIFY(m_canvas->polygonOpen());
+        QVERIFY(!m_canvas->hasSelection()); // nothing until it is closed
+        QTest::keyClick(m_window.get(), Qt::Key_Return);
+        QVERIFY(!m_canvas->polygonOpen());
+        QVERIFY(m_canvas->hasSelection());
+        const QPointF inside = toDoc(QPointF(350, 280)), outside = toDoc(QPointF(600, 280));
+        QCOMPARE(m_canvas->selection().coverageAt(int(inside.x()), int(inside.y())), 255);
+        QCOMPARE(m_canvas->selection().coverageAt(int(outside.x()), int(outside.y())), 0);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Select"));
+        // Clicking the first point closes too; Shift at the first click adds.
+        QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::ShiftModifier, QPoint(600, 150));
+        QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(700, 150));
+        QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(650, 300));
+        QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(602, 152));
+        QVERIFY(!m_canvas->polygonOpen());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Add to selection"));
+        QCOMPARE(m_canvas->selection().coverageAt(int(inside.x()), int(inside.y())), 255);
+        // Backspace removes a corner, Escape drops the shape.
+        QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(100, 500));
+        QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(150, 520));
+        QTest::keyClick(m_window.get(), Qt::Key_Backspace);
+        QTest::keyClick(m_window.get(), Qt::Key_Escape);
+        QVERIFY(!m_canvas->polygonOpen());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Add to selection"));
+    }
+
+    void magicWandAndModifyCommands()
+    {
+        m_canvas->setBrushSize(120);
+        mouseStroke({{200, 300}, {500, 300}});
+        m_canvas->setTool(CanvasItem::Select);
+        m_canvas->setSelectShape(CanvasItem::WandShape);
+        const QImage pixels = doc().copy();
+        QTest::mouseClick(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(350, 300));
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Magic wand"));
+        const QRect stroke = m_canvas->selection().bounds();
+        QVERIFY(stroke.width() > 100 && stroke.height() > 50);
+        QCOMPARE(doc(), pixels);
+        m_canvas->growSelection(10);
+        QVERIFY(m_canvas->selection().bounds().width() >= stroke.width() + 18);
+        m_canvas->shrinkSelection(10);
+        m_canvas->featherSelection(6);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Feather selection"));
+        m_canvas->undo();
+        m_canvas->undo();
+        m_canvas->undo();
+        QCOMPARE(m_canvas->selection().bounds(), stroke);
+        // Global wand on the transparent area selects everything but the stroke.
+        m_canvas->setWandContiguous(false);
+        m_canvas->wandAt(toDoc(QPointF(700, 100)), SelectionMode::Replace);
+        QCOMPARE(m_canvas->selection().coverageAt(int(toDoc(QPointF(350, 300)).x()), int(toDoc(QPointF(350, 300)).y())), 0);
+    }
+
+    void smudgeInsideAFeatheredSelectionDoesNotBleed()
+    {
+        // Two colours side by side; a feathered selection over the middle.
+        m_canvas->setBrushSize(200);
+        m_canvas->setBrushColor(QColor(220, 40, 40));
+        mouseStroke({{150, 320}, {350, 320}});
+        m_canvas->setBrushColor(QColor(40, 80, 220));
+        mouseStroke({{360, 320}, {600, 320}});
+        QPainterPath r;
+        r.addRect(QRectF(toDoc(QPointF(280, 260)), toDoc(QPointF(440, 380))));
+        m_canvas->selectPath(r, SelectionMode::Replace);
+        m_canvas->featherSelection(10);
+        const Selection soft = m_canvas->selection();
+        const QImage before = doc().copy();
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.blend-smudge")));
+        m_canvas->setBrushSize(60);
+        mouseStroke({{200, 320}, {520, 320}, {200, 330}});
+        int changedOutside = 0, changedInside = 0;
+        for (int y = 0; y < doc().height(); y += 3)
+            for (int x = 0; x < doc().width(); x += 3) {
+                if (doc().pixel(x, y) == before.pixel(x, y))
+                    continue;
+                if (soft.coverageAt(x, y) == 0)
+                    ++changedOutside;
+                else
+                    ++changedInside;
+            }
+        QCOMPARE(changedOutside, 0);
+        QVERIFY(changedInside > 50);
+    }
+
+    void transformSelectionOutlineOnly()
+    {
+        m_canvas->setBrushSize(40);
+        mouseStroke({{200, 300}, {400, 300}});
+        const QImage pixels = doc().copy();
+        QPainterPath r;
+        r.addRect(QRectF(100, 100, 200, 100));
+        m_canvas->selectPath(r, SelectionMode::Replace);
+        QCOMPARE(m_canvas->beginSelectionTransform(), QString());
+        QVERIFY(m_canvas->transformingSelection());
+        m_canvas->setTransformValue("x", m_canvas->transformX() + 300);
+        m_canvas->applyTransform();
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform selection"));
+        QCOMPARE(m_canvas->selection().bounds(), QRect(400, 100, 200, 100));
+        QCOMPARE(doc(), pixels); // no pixels moved
+        m_canvas->undo();
+        QCOMPARE(m_canvas->selection().bounds(), QRect(100, 100, 200, 100));
+    }
+
     // --- multi-layer editing ---
 
     // Two layers: colour (bottom) and ink (top), both with content around (300, 250) doc px.

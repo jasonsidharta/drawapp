@@ -203,8 +203,17 @@ bool TransformSession::begin(const QImage &layer, const Selection &selection)
 bool TransformSession::begin(const std::vector<QImage> &layers, const Selection &selection)
 {
     end();
-    if (layers.empty())
-        return false;
+    // No layers: the selection's outline alone (Transform Selection).
+    if (layers.empty()) {
+        if (!selection.isActive() || selection.isEmpty())
+            return false;
+        m_sourceMask = selection.mask().copy(selection.bounds());
+        m_selection = selection;
+        m_docSize = selection.mask().size();
+        m_sourceRect = selection.bounds();
+        reset();
+        return true;
+    }
     const QSize size = layers.front().size();
     for (const QImage &layer : layers)
         if (layer.isNull() || layer.size() != size || layer.format() != QImage::Format_ARGB32_Premultiplied)

@@ -63,6 +63,7 @@ void CanvasItem::setSelectShape(SelectShape shape)
 {
     if (shape == m_selectShape)
         return;
+    cancelPolygon();
     m_selectShape = shape;
     emit selectToolChanged();
 }
@@ -72,6 +73,31 @@ void CanvasItem::setSelectMode(SelectOp mode)
     if (mode == m_selectMode)
         return;
     m_selectMode = mode;
+    emit selectToolChanged();
+}
+
+void CanvasItem::setWandTolerance(int tolerance)
+{
+    tolerance = std::clamp(tolerance, 0, 255);
+    if (tolerance == m_wandTolerance)
+        return;
+    m_wandTolerance = tolerance;
+    emit selectToolChanged();
+}
+
+void CanvasItem::setWandContiguous(bool contiguous)
+{
+    if (contiguous == m_wandContiguous)
+        return;
+    m_wandContiguous = contiguous;
+    emit selectToolChanged();
+}
+
+void CanvasItem::setWandSampleAll(bool all)
+{
+    if (all == m_wandSampleAll)
+        return;
+    m_wandSampleAll = all;
     emit selectToolChanged();
 }
 
@@ -145,6 +171,120 @@ void CanvasItem::invertSelection()
         return;
     }
     setSelectionWithUndo(m_document.selection().inverted(), QStringLiteral("Invert selection"));
+}
+
+void CanvasItem::growSelection(qreal radius)
+{
+    finishPendingEdits();
+    if (!m_document.selection().isActive()) {
+        emit notice(QStringLiteral("There is no selection to grow."));
+        return;
+    }
+    setSelectionWithUndo(m_document.selection().grown(radius), QStringLiteral("Grow selection"));
+}
+
+void CanvasItem::shrinkSelection(qreal radius)
+{
+    finishPendingEdits();
+    if (!m_document.selection().isActive()) {
+        emit notice(QStringLiteral("There is no selection to shrink."));
+        return;
+    }
+    setSelectionWithUndo(m_document.selection().shrunk(radius), QStringLiteral("Shrink selection"));
+    if (m_document.selection().isEmpty())
+        emit notice(QStringLiteral("The selection is now empty: nothing can be painted until you select something or deselect."));
+}
+
+void CanvasItem::featherSelection(qreal radius)
+{
+    finishPendingEdits();
+    if (!m_document.selection().isActive()) {
+        emit notice(QStringLiteral("There is no selection to feather."));
+        return;
+    }
+    setSelectionWithUndo(m_document.selection().feathered(radius), QStringLiteral("Feather selection"));
+}
+
+void CanvasItem::wandAt(const QPointF &docPos, SelectionMode mode)
+{
+    const QPoint seed(int(std::floor(docPos.x())), int(std::floor(docPos.y())));
+    if (!QRect(QPoint(0, 0), m_document.size()).contains(seed))
+        return;
+    const int index = m_document.activeIndex();
+    const QImage &source = m_wandSampleAll || index < 0 ? m_document.composite() : m_document.layer(index).image;
+    const QImage mask = Selection::magicWand(source, seed, m_wandTolerance, m_wandContiguous, true);
+    setSelectionWithUndo(m_document.selection().combined(mask, mode), QStringLiteral("Magic wand"));
+    if (m_document.selection().isEmpty())
+        emit notice(QStringLiteral("The selection is now empty: nothing can be painted until you select something or deselect."));
+}
+
+void CanvasItem::closePolygon()
+{
+    if (m_polygon.size() < 3) {
+        cancelPolygon();
+        return;
+    }
+    QPainterPath path;
+    path.addPolygon(QPolygonF(QList<QPointF>(m_polygon.begin(), m_polygon.end())));
+    path.closeSubpath();
+    const SelectionMode mode = m_polygonMode;
+    m_polygon.clear();
+    emit selectToolChanged();
+    const QImage shape = Selection::rasterize(m_document.size(), path, true);
+    setSelectionWithUndo(m_document.selection().combined(shape, mode), modeLabel(mode));
+    updateAll();
+}
+
+void CanvasItem::cancelPolygon()
+{
+    if (m_polygon.empty())
+        return;
+    m_polygon.clear();
+    emit selectToolChanged();
+    updateAll();
+}
+
+void CanvasItem::hoverMoveEvent(QHoverEvent *event)
+{
+    m_hoverDoc = m_view.viewToDoc(event->position());
+    m_hoverKnown = true;
+    if (!m_polygon.empty())
+        updateAll(); // the rubber band follows the pointer
+    QQuickPaintedItem::hoverMoveEvent(event);
+}
+
+void CanvasItem::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    if (m_tool == Select && m_selectShape == PolygonShape && !m_polygon.empty()) {
+        closePolygon();
+        event->accept();
+        return;
+    }
+    QQuickPaintedItem::mouseDoubleClickEvent(event);
+}
+
+QString CanvasItem::beginSelectionTransform()
+{
+    if (m_transform.isActive())
+        return {};
+    finishPendingEdits();
+    const Selection &selected = m_document.selection();
+    if (!selected.isActive())
+        return QStringLiteral("There is no selection to transform.");
+    if (selected.isEmpty())
+        return QStringLiteral("Nothing is selected, so there is nothing to transform.");
+    if (!m_transform.begin(std::vector<QImage>{}, selected))
+        return QStringLiteral("The selection could not be transformed.");
+    m_transformLayerIds.clear(); // outline only
+    m_toolBeforeTransform = m_tool == Transform ? Brush : m_tool;
+    m_tool = Transform;
+    m_previewLayers.clear();
+    m_previewComposite = m_document.composite();
+    m_previewRect = QRect();
+    updateTransformPreview(TransformSession::Quality::Final);
+    emit toolChanged();
+    emit transformChanged();
+    return {};
 }
 
 void CanvasItem::reselect()
@@ -224,6 +364,36 @@ void CanvasItem::clearSelected()
 
 void CanvasItem::beginSelectGesture(const QPointF &viewPos)
 {
+    const QPointF docPoint = m_view.viewToDoc(viewPos);
+    if (m_selectShape == WandShape || m_selectShape == PolygonShape) {
+        // A click, not a drag: the gesture ends at once.
+        const Qt::KeyboardModifiers mods = m_pointerModifiers;
+        const bool shift = mods.testFlag(Qt::ShiftModifier), alt = mods.testFlag(Qt::AltModifier);
+        const SelectionMode mode = shift && alt ? SelectionMode::Intersect
+                                 : shift        ? SelectionMode::Add
+                                 : alt          ? SelectionMode::Subtract
+                                                : toMode(m_selectMode);
+        if (m_selectShape == WandShape) {
+            wandAt(docPoint, mode);
+            return;
+        }
+        if (m_polygon.empty()) {
+            m_polygonMode = mode;
+            m_polygon.push_back(docPoint);
+            emit selectToolChanged();
+        } else {
+            // Clicking the first point (within the handle radius) closes the polygon.
+            const QPointF first = m_view.docToView(m_polygon.front());
+            if (m_polygon.size() >= 3 && std::hypot(first.x() - viewPos.x(), first.y() - viewPos.y()) <= HandleHitRadius * 0.6) {
+                closePolygon();
+                return;
+            }
+            m_polygon.push_back(docPoint);
+        }
+        m_hoverDoc = docPoint;
+        updateAll();
+        return;
+    }
     m_gesture = Gesture::Stroke;
     m_pointerTask = PointerTask::Select;
     // Shift adds, Alt subtracts, both intersect (when the gesture starts); otherwise the mode
@@ -342,6 +512,13 @@ void CanvasItem::updateTransformPreview(TransformSession::Quality quality)
 {
     if (!m_transform.isActive())
         return;
+    if (m_transformLayerIds.empty()) {
+        // Outline only: show where the selection will be.
+        m_transformedOutline = m_transform.transformedSelection().outline();
+        updateAll();
+        emit transformChanged();
+        return;
+    }
     const QRect now = m_transform.changedRect();
     const QRect area = (now | m_previewRect) & QRect(QPoint(0, 0), m_document.size());
     std::vector<LayerData> layers = m_document.layers(); // shallow: images are shared
@@ -362,6 +539,7 @@ void CanvasItem::updateTransformPreview(TransformSession::Quality quality)
 void CanvasItem::endTransformSession()
 {
     m_transform.end();
+    m_transformedOutline = QPainterPath();
     m_transformLayerIds.clear();
     m_previewLayers.clear();
     m_previewComposite = QImage();
@@ -383,6 +561,16 @@ void CanvasItem::applyTransform()
         return;
     if (m_transform.isIdentity()) {
         endTransformSession(); // nothing moved: nothing to record
+        updateAll();
+        return;
+    }
+    if (m_transformLayerIds.empty()) {
+        // Outline only: one selection step.
+        const Selection moved = m_transform.transformedSelection();
+        endTransformSession();
+        setSelectionWithUndo(moved, QStringLiteral("Transform selection"));
+        if (m_document.selection().isEmpty())
+            emit notice(QStringLiteral("The selection was moved off the canvas and is now empty."));
         updateAll();
         return;
     }
@@ -784,6 +972,23 @@ void CanvasItem::drawOverlays(QPainter *painter)
     } else if (!m_selectionOutline.isEmpty()) {
         strokeTwoTone(painter, toView.map(m_selectionOutline));
     }
+    if (!m_polygon.empty()) {
+        // The polygon so far, a rubber band to the pointer and a ring on the first point.
+        QPainterPath poly;
+        poly.moveTo(m_polygon.front());
+        for (const QPointF &p : m_polygon)
+            poly.lineTo(p);
+        if (m_hoverKnown)
+            poly.lineTo(m_hoverDoc);
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        strokeTwoTone(painter, toView.map(poly));
+        const QPointF first = toView.map(m_polygon.front());
+        painter->setPen(QPen(QColor(30, 110, 230), 2));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawEllipse(first, HandleHitRadius * 0.6, HandleHitRadius * 0.6);
+    }
+    if (m_transform.isActive() && m_transformLayerIds.empty() && !m_transformedOutline.isEmpty())
+        strokeTwoTone(painter, toView.map(m_transformedOutline));
     if (m_pointerTask == PointerTask::Select && m_selectPoints.size() >= 2) {
         // The shape being drawn.
         QPainterPath shape;

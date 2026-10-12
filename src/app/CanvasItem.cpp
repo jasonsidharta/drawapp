@@ -66,6 +66,7 @@ CanvasItem::CanvasItem(QQuickItem *parent)
 {
     setAcceptedMouseButtons(Qt::LeftButton | Qt::MiddleButton);
     setAcceptTouchEvents(true);
+    setAcceptHoverEvents(true); // the polygon lasso's rubber band
     setFlag(ItemIsFocusScope, false);
     setFlag(ItemAcceptsInputMethod, false);
     setActiveFocusOnTab(true);
@@ -189,6 +190,7 @@ void CanvasItem::setTool(Tool tool)
     }
     if (m_transform.isActive())
         applyTransform(); // switching tools keeps the transform, as most editors do
+    cancelPolygon();
     if (m_gesture == Gesture::Stroke)
         endStroke();
     m_tool = tool;
@@ -1198,6 +1200,26 @@ void CanvasItem::keyPressEvent(QKeyEvent *event)
         cancelStroke();
         event->accept();
         return;
+    }
+    if (!m_polygon.empty()) {
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            closePolygon();
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Escape) {
+            cancelPolygon();
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Backspace) {
+            m_polygon.pop_back();
+            if (m_polygon.empty())
+                emit selectToolChanged();
+            updateAll();
+            event->accept();
+            return;
+        }
     }
     if (m_transform.isActive() && (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Return
                                    || event->key() == Qt::Key_Enter)) {
