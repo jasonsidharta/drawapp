@@ -23,7 +23,7 @@ Result on 2026-10-12, Windows 11, MinGW release build: **all fifteen tasks passe
 | 8 | Check memory | File > Memory usage… | dialog shown, closed with its button |
 | 9 | Save the 20-layer 16384² project and open it again | Save As, Open | file under 32 MiB; 20 layers; pixels equal |
 | 10 | Open a project saved by milestone 9, paint, save | Open, mouse stroke, Save | file is format 3 afterwards |
-| 11 | Transform six 4096² layers together | select all layers, Transform, rotate and scale, Enter | Apply runs in the background with progress shown (held at a test gate so the state can be captured) |
+| 11 | Transform six 4096² layers together | select all layers, Transform, rotate and scale, Apply button | Apply runs in the background with progress shown (held at a test gate so the state can be captured) |
 | 12 | Try to paint while it applies; stop; apply again | mouse stroke, Stop button, Enter | refusal notice; zoom works; Stop leaves the drawing unchanged; Apply finishes as one undo step; undo restores |
 | 13 | Magic wand on the large canvas | Select tool, wand, click | a selection exists |
 | 14 | Copy all layers and paste them | Select all, copy, paste | layer count doubles |
@@ -42,9 +42,12 @@ Result on 2026-10-12, Windows 11, MinGW release build: **all fifteen tasks passe
 
 - The app could only create 2048 × 1536 canvases (New had no size). Added **File > New canvas…**
   with presets up to 16384 × 16384.
-- In this test a mouse click on Apply in the transform bar did not apply the transform, while
-  Enter did. The milestone 9 workflows click the same button successfully, so this is under
-  investigation (see `docs/m10-known-limitations.md` for the outcome); the task uses Enter.
+- A mouse click on Apply right after starting the transform from code missed the button: the
+  transform bar becomes visible with the transform and its buttons are placed at the next layout
+  pass, and the test computed the click position before that pass (diagnosed by printing the
+  button's position before and after: 244,646 vs 808,818). A test timing issue, not an app
+  defect (a person cannot click before the bar is drawn); the task now waits for the layout and
+  clicks Apply, and applies the second time with Enter.
 - A milestone 9 file whose active layer is hidden refuses painting until another layer is chosen
   (expected behaviour, made explicit in task 10).
 - The "cannot be undone" notice said "0 MiB" for small budgets; sizes under 1 MiB now read in KiB.

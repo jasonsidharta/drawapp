@@ -43,8 +43,6 @@ What milestone 10 does not do, does only partly, or did not verify. Measured num
   input.
 - **Comparison with Krita and other applications** (`docs/m10-comparison-checklist.md`): not run.
 - **An on-screen session** on Windows with a real display (all window tests run offscreen).
-- **A mouse click on the transform bar's Apply** did not apply a large transform in the
-  milestone 10 workflow test, while Enter did; see `docs/m10-artist-workflows.md`.
 
 ## Behaviour that changed
 

@@ -1451,8 +1451,12 @@ private slots:
         m_canvas->setTransformValue("width", m_canvas->transformWidth() * 0.8);
         TransformApply &job = m_canvas->transformApplyForTesting();
         job.holdForTesting(true);
+        // The transform bar appears with the transform; its buttons are placed at the next layout
+        // pass, so wait for that before clicking (a click computed earlier lands where the button
+        // is not yet).
+        QTest::qWait(100);
         snap("m10w_11_before_apply");
-        QTest::keyClick(m_window, Qt::Key_Return); // Enter applies
+        click("applyTransformButton");
         QTRY_VERIFY2(m_canvas->isApplying(),
                      qPrintable(QString("transforming %1, question \"%2\", area %3 x %4")
                                     .arg(m_canvas->isTransforming())
