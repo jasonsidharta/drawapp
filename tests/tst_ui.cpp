@@ -872,6 +872,377 @@ private slots:
         QVERIFY(!m_canvas->hasSelection()); // selections are not saved
     }
 
+    // Milestone 9, section 11: twelve artist tasks through the real interface (synthetic mouse
+    // and keyboard input, offscreen). Pen pressure is simulated with StrokeSample values; this
+    // is automated interaction, not hands-on artist validation.
+    void artistWorkflowsMilestone9()
+    {
+        drawCharacter(); // "Colour" (bottom) and "Ink" (top, active)
+        BrushLibrary *lib = m_canvas->brushes();
+        BrushStudio *studio = lib->studio();
+        QTemporaryDir storeDir;
+        const QString storePath = storeDir.filePath("brushes.json");
+        lib->setStorePath(storePath); // presets persist, so task 12 can reload them
+        const auto restore = qScopeGuard([&] {
+            if (m_canvas->isTransforming())
+                m_canvas->cancelTransform();
+            if (studio->active())
+                studio->cancel();
+            m_canvas->deselect();
+            m_canvas->setTool(CanvasItem::Brush);
+            m_canvas->setSelectMode(CanvasItem::Replace);
+            m_canvas->setSelectShape(CanvasItem::RectangleShape);
+            lib->setStorePath(QString());
+            lib->select(BrushPresets::defaultPaintId());
+        });
+        const LayeredDocument &doc = m_canvas->document();
+        const quint64 colourId = doc.layer(0).id, inkId = doc.layer(1).id;
+        auto layerImage = [&](quint64 id) { return doc.layer(doc.indexOf(id)).image; };
+        auto layerRow = [&](const QString &name) { return waitFor("layerRow_" + name); };
+        auto ctrlClickRow = [&](const QString &name) {
+            QQuickItem *row = layerRow(name);
+            QVERIFY2(row, qPrintable(name));
+            QTest::mouseClick(m_window, Qt::LeftButton, Qt::ControlModifier, centerOf(row, 0.4, 0.5));
+            QTest::qWait(40);
+        };
+        auto lasso = [&](const std::vector<StrokeSample> &pts) {
+            QTest::mousePress(m_window, Qt::LeftButton, Qt::NoModifier, docToScene(pts.front().pos));
+            for (const StrokeSample &s : pts)
+                QTest::mouseMove(m_window, docToScene(s.pos));
+            QTest::mouseRelease(m_window, Qt::LeftButton, Qt::NoModifier, docToScene(pts.back().pos));
+        };
+        auto line = [](QPointF a, QPointF b, std::function<double(double)> pressure, int n = 60) {
+            std::vector<StrokeSample> v;
+            for (int i = 0; i <= n; ++i) {
+                StrokeSample s;
+                s.pos = a + (b - a) * (double(i) / n);
+                s.pressure = pressure(double(i) / n); // simulated pen pressure
+                s.timeMs = i * 6.0;
+                v.push_back(s);
+            }
+            return v;
+        };
+        auto columnHeight = [](const QImage &img, int x, int y0, int y1) {
+            int n = 0;
+            for (int y = y0; y < y1; ++y)
+                n += qAlpha(img.pixel(x, y)) > 127;
+            return n;
+        };
+        snap("m9_0_illustration");
+
+        // 1. Enlarge the whole head across the ink and colour layers.
+        ctrlClickRow("Colour");
+        QCOMPARE(int(m_canvas->selectedLayerIds().size()), 2);
+        const QImage colour0 = layerImage(colourId).copy(), ink0 = layerImage(inkId).copy();
+        int steps = m_canvas->history().undoCount();
+        click("selectToolButton");
+        click("shapeLasso");
+        lasso(ring({700, 500}, 215, 205, 0, 2 * M_PI, 40));
+        click("selectTransformButton");
+        QVERIFY(m_canvas->isTransforming());
+        const qreal w0 = m_canvas->transformWidth();
+        const QPointF pivot = m_canvas->transformSession().pivot();
+        dragScene(handleScene(TransformSession::Handle::BottomRight),
+                  handleScene(TransformSession::Handle::BottomRight) + QPoint(30, 28), 8, Qt::AltModifier);
+        QVERIFY(m_canvas->transformWidth() > w0 * 1.15);
+        snap("m9_1_head_preview");
+        click("applyTransformButton");
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(m_canvas->history().undoCount(), steps + 2); // the lasso selection + one transform
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
+        QVERIFY(layerImage(colourId) != colour0 && layerImage(inkId) != ink0); // both layers grew
+        // Alignment: through the pivot, both layers' right edges moved by the same scale factor.
+        {
+            auto rightEdge = [](const QImage &img, int y, bool skin) {
+                int edge = 0;
+                for (int x = 700; x < 1100; ++x) {
+                    const QRgb p = img.pixel(x, y);
+                    if (qAlpha(p) > 200 && (!skin || qRed(p) > 200))
+                        edge = x;
+                }
+                return edge;
+            };
+            const int y = int(pivot.y());
+            const double skinScale = (rightEdge(layerImage(colourId), y, true) - pivot.x()) / (rightEdge(colour0, y, true) - pivot.x());
+            const double inkScale = (rightEdge(layerImage(inkId), y, false) - pivot.x()) / (rightEdge(ink0, y, false) - pivot.x());
+            QVERIFY2(std::abs(skinScale - inkScale) < 0.03 && skinScale > 1.1, qPrintable(QString("%1 %2").arg(skinScale).arg(inkScale)));
+        }
+
+        // 2. Rotate the arm and hand across both layers.
+        click("shapeRect");
+        dragScene(docToScene({830, 720}), docToScene({1300, 950}));
+        const QImage colour1 = layerImage(colourId).copy(), ink1 = layerImage(inkId).copy();
+        click("selectTransformButton");
+        typeInto("transformRotationField", "20");
+        QCOMPARE(m_canvas->transformRotation(), 20.0);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QVERIFY(!m_canvas->isTransforming());
+        QVERIFY(layerImage(colourId) != colour1 && layerImage(inkId) != ink1);
+        snap("m9_2_arm_rotated");
+
+        // 3. Select the clothing with the magic wand (colour layer) and recolour inside it.
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(layerRow("Colour"), 0.4, 0.5));
+        QTRY_COMPARE(quint64(m_canvas->activeLayerId()), colourId);
+        QCOMPARE(int(m_canvas->selectedLayerIds().size()), 1);
+        click("shapeWand");
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, docToScene({700, 820}));
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Magic wand"));
+        const Selection clothing = m_canvas->selection();
+        QCOMPARE(clothing.coverageAt(700, 820), 255);
+        QCOMPARE(clothing.coverageAt(700, 520), 0); // the face is not clothing
+        const QImage beforeRecolour = layerImage(colourId).copy();
+        QVERIFY(lib->select(QStringLiteral("builtin.solid-round")));
+        m_canvas->setBrushSize(260);
+        m_canvas->setBrushColor(QColor(40, 150, 90));
+        click("brushToolButton");
+        draw({{560, 800}, {880, 830}, {560, 860}});
+        {
+            const QImage after = layerImage(colourId);
+            QCOMPARE(QColor(after.pixel(700, 820)).rgb(), QColor(40, 150, 90).rgb());
+            for (int y = 600; y < 1000; y += 5)
+                for (int x = 450; x < 1000; x += 5)
+                    if (clothing.coverageAt(x, y) == 0)
+                        QVERIFY2(after.pixel(x, y) == beforeRecolour.pixel(x, y), qPrintable(QString("%1,%2").arg(x).arg(y)));
+        }
+        m_canvas->deselect();
+        snap("m9_3_recoloured");
+
+        // 4. Shade with a textured, pressure-sensitive brush (simulated pressure).
+        QVERIFY(lib->select(QStringLiteral("builtin.sketch-pencil")));
+        m_canvas->setBrushSize(14);
+        m_canvas->setBrushColor(QColor(120, 70, 60));
+        const QImage beforeShade = layerImage(colourId).copy();
+        for (int i = 0; i < 6; ++i)
+            QVERIFY(m_canvas->drawStroke(line({610.0 + i * 10, 560}, {700.0 + i * 10, 470}, [](double t) { return 0.15 + 0.85 * t; })));
+        {
+            const QImage after = layerImage(colourId);
+            int light = 0, heavy = 0, changedLight = 0, changedHeavy = 0;
+            QSet<int> heavyLevels;
+            for (int i = 0; i < 6; ++i)
+                for (int s = 0; s <= 10; ++s) {
+                    const QPointF pLight = QPointF(610.0 + i * 10, 560) + QPointF(90, -90) * (0.05 + s * 0.01);
+                    const QPointF pHeavy = QPointF(610.0 + i * 10, 560) + QPointF(90, -90) * (0.85 + s * 0.01);
+                    const QRgb bl = beforeShade.pixel(pLight.toPoint()), al = after.pixel(pLight.toPoint());
+                    const QRgb bh = beforeShade.pixel(pHeavy.toPoint()), ah = after.pixel(pHeavy.toPoint());
+                    light += std::abs(qRed(al) - qRed(bl));
+                    heavy += std::abs(qRed(ah) - qRed(bh));
+                    changedLight += al != bl;
+                    changedHeavy += ah != bh;
+                    heavyLevels.insert(qRed(ah));
+                }
+            QVERIFY2(heavy > light, qPrintable(QString("%1 %2").arg(heavy).arg(light))); // pressure darkens
+            QVERIFY(heavyLevels.size() > 3); // the paper grain breaks the shading up
+        }
+        snap("m9_4_shaded");
+
+        // 5. Smudge two colours without bleeding outside a feathered selection.
+        click("selectToolButton");
+        click("shapeRect");
+        dragScene(docToScene({600, 640}), docToScene({800, 790}));
+        QQuickItem *radius = waitFor("modifyRadius");
+        QVERIFY(radius);
+        radius->setProperty("value", 12);
+        click("featherButton");
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Feather selection"));
+        const Selection soft = m_canvas->selection();
+        QVERIFY(soft.coverageAt(700, 715) == 255 && soft.coverageAt(600, 715) > 0 && soft.coverageAt(600, 715) < 255);
+        const QImage beforeSmudge = layerImage(colourId).copy();
+        QVERIFY(lib->select(QStringLiteral("builtin.blend-smudge")));
+        click("brushToolButton");
+        for (int x = 560; x <= 840; x += 40)
+            draw({{qreal(x), 600}, {qreal(x + 10), 760}, {qreal(x), 830}});
+        {
+            const QImage after = layerImage(colourId);
+            int inside = 0;
+            for (int y = 560; y < 900; y += 2)
+                for (int x = 520; x < 900; x += 2) {
+                    if (soft.coverageAt(x, y) == 0)
+                        QVERIFY2(after.pixel(x, y) == beforeSmudge.pixel(x, y), qPrintable(QString("bleed at %1,%2").arg(x).arg(y)));
+                    else
+                        inside += after.pixel(x, y) != beforeSmudge.pixel(x, y);
+                }
+            QVERIFY(inside > 200);
+        }
+        m_canvas->deselect();
+        snap("m9_5_smudged");
+
+        // 6. A custom pencil for line art, made in the Brush Studio.
+        QVERIFY(lib->select(QStringLiteral("builtin.sketch-pencil")));
+        click("brushSettingsButton");
+        click("openStudioButton");
+        QVERIFY(waitFor("brushStudioPage"));
+        QVERIFY(studio->active());
+        studio->setValue("size", 3.0);
+        studio->setValue("hardness", 0.6);
+        studio->setValue("textureStrength", 0.6);
+        QVERIFY(studio->duplicate(QStringLiteral("Line pencil")).isEmpty());
+        click("studioDone");
+        QTRY_VERIFY(!find("brushStudioPage"));
+        QCOMPARE(lib->currentName(), QStringLiteral("Line pencil"));
+        const QString pencilId = lib->currentId();
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(layerRow("Ink"), 0.4, 0.5));
+        QTRY_COMPARE(quint64(m_canvas->activeLayerId()), inkId);
+        m_canvas->setBrushColor(QColor(30, 30, 40));
+        const QImage beforeLines = layerImage(inkId).copy();
+        draw({{420, 1000}, {600, 1060}, {800, 1010}});
+        QVERIFY(layerImage(inkId) != beforeLines);
+
+        // 7. A textured ink preset: export, re-import, and reload from the brush file.
+        QVERIFY(lib->select(QStringLiteral("builtin.clean-ink")));
+        QVERIFY(studio->open());
+        studio->setValue("texture", "paper");
+        studio->setValue("textureStrength", 0.5);
+        studio->setValue("textureMode", "subtract");
+        QVERIFY(studio->duplicate(QStringLiteral("Textured ink")).isEmpty());
+        const QUrl inkFile = QUrl::fromLocalFile(storeDir.filePath("textured-ink.drawbrush"));
+        QVERIFY(studio->exportTo(inkFile).isEmpty());
+        QVERIFY(studio->done().isEmpty());
+        const QString texturedInkId = lib->currentId();
+        const BrushSettings texturedInk = lib->savedSettings(texturedInkId);
+        QCOMPARE(texturedInk.texture, QStringLiteral("paper"));
+        QVERIFY(studio->importFrom(inkFile).isEmpty());
+        QVERIFY(studio->settings() == texturedInk);
+        studio->cancel(); // the imported copy stays as a preset; nothing else changes
+        lib->flush();
+        lib->setStorePath(storePath); // reload from disk, as after a restart
+        QVERIFY(lib->hasPreset(texturedInkId) && lib->hasPreset(pencilId));
+        QVERIFY(lib->savedSettings(texturedInkId) == texturedInk);
+
+        // 8. Change a pressure curve and check its effect (simulated pressure).
+        QVERIFY(lib->select(QStringLiteral("builtin.solid-round")));
+        click("addLayerButton");
+        renameActive("Curve test");
+        const quint64 curveLayer = m_canvas->activeLayerId();
+        m_canvas->setBrushSize(40);
+        auto ramp = [](double t) { return t; };
+        QVERIFY(m_canvas->drawStroke(line({300, 1200}, {1100, 1200}, ramp, 80)));
+        const QImage linear = layerImage(curveLayer).copy();
+        QVERIFY(studio->open());
+        studio->setValue("pressureSize.enabled", false);
+        studio->setDynamicsField("dynamics.size", "enabled", true); // pressure, linear
+        studio->setDynamicsField("dynamics.size", "minimum", 0.1);
+        studio->setSensorCurve("dynamics.size", 0, studio->curvePreset("inverted"));
+        QVERIFY(studio->done().isEmpty());
+        m_canvas->setBrushSize(40);
+        QVERIFY(m_canvas->drawStroke(line({300, 1320}, {1100, 1320}, ramp, 80)));
+        const QImage inverted = layerImage(curveLayer);
+        // Linear: thin where the pen is light (left), full at the right. Inverted: the opposite.
+        QVERIFY(columnHeight(linear, 400, 1150, 1260) < columnHeight(linear, 1000, 1150, 1260));
+        QVERIFY(columnHeight(inverted, 400, 1270, 1380) > columnHeight(inverted, 1000, 1270, 1380));
+        snap("m9_8_pressure_curves");
+
+        // 9. Copy an eye, flip it, and paste it onto a new layer.
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(layerRow("Ink"), 0.4, 0.5));
+        QTRY_COMPARE(quint64(m_canvas->activeLayerId()), inkId);
+        click("selectToolButton");
+        click("shapeEllipse");
+        dragScene(docToScene({560, 430}), docToScene({700, 570}));
+        const int layersBeforePaste = m_canvas->layerCount();
+        click("copyButton");
+        click("pasteButton");
+        QCOMPARE(m_canvas->layerCount(), layersBeforePaste + 1);
+        click("selectTransformButton");
+        click("flipHButton");
+        QVERIFY(m_canvas->transformSession().scaleX() < 0);
+        const QPoint eyeCentre = docToScene(m_canvas->transformSession().center());
+        dragScene(eyeCentre, eyeCentre + docToScene(QPointF(1500, 0)) - docToScene(QPointF(1300, 0)));
+        click("applyTransformButton");
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(m_canvas->layerCount(), layersBeforePaste + 1);
+        QVERIFY(!doc.layer(doc.activeIndex()).image.isNull());
+        snap("m9_9_eye_flipped");
+        m_canvas->deselect();
+
+        // 10. Cancel a large multi-layer transform: every layer is exactly as before.
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(layerRow("Colour"), 0.4, 0.5));
+        ctrlClickRow("Ink");
+        ctrlClickRow("Curve test");
+        QCOMPARE(int(m_canvas->selectedLayerIds().size()), 3);
+        std::vector<QImage> beforeCancel;
+        for (int i = 0; i < doc.count(); ++i)
+            beforeCancel.push_back(doc.layer(i).image.copy());
+        steps = m_canvas->history().undoCount();
+        click("selectTransformButton");
+        QVERIFY(m_canvas->isTransforming());
+        typeInto("transformRotationField", "30");
+        dragScene(handleScene(TransformSession::Handle::TopLeft), handleScene(TransformSession::Handle::TopLeft) - QPoint(40, 40));
+        QVERIFY(m_canvas->displayedComposite() != doc.composite());
+        click("cancelTransformButton");
+        QVERIFY(!m_canvas->isTransforming());
+        for (int i = 0; i < doc.count(); ++i)
+            QCOMPARE(doc.layer(i).image, beforeCancel[size_t(i)]);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+
+        // 11. Undo and redo a mixed sequence of transforms and strokes.
+        std::vector<QImage> states{doc.composite().copy()};
+        auto record = [&] { states.push_back(doc.composite().copy()); };
+        click("selectTransformButton"); // the three layers, whole
+        QVERIFY(m_canvas->isTransforming());
+        typeInto("transformRotationField", "-8");
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QVERIFY(!m_canvas->isTransforming());
+        record();
+        QVERIFY(lib->select(QStringLiteral("builtin.solid-round")));
+        m_canvas->setBrushSize(30);
+        click("brushToolButton");
+        draw({{300, 300}, {500, 340}});
+        record();
+        QVERIFY(lib->select(texturedInkId));
+        draw({{300, 380}, {700, 420}});
+        record();
+        click("selectToolButton");
+        click("shapeRect");
+        dragScene(docToScene({250, 250}), docToScene({760, 460}));
+        click("selectTransformButton");
+        QVERIFY(m_canvas->isTransforming());
+        dragScene(docToScene({330, 300}), docToScene({390, 330})); // inside the box, away from the pivot
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QVERIFY2(!m_canvas->isTransforming(), "Enter did not apply the transform");
+        record();
+        m_canvas->deselect();
+        const int sequence = int(states.size()) - 1;
+        for (int s = 1; s <= sequence; ++s)
+            QVERIFY2(states[size_t(s)] != states[size_t(s - 1)], qPrintable(QString("step %1 changed nothing").arg(s)));
+        for (int i = sequence; i > 0; --i) {
+            // Selection steps undo too; step back until the artwork changes.
+            while (doc.composite() == states[size_t(i)] && m_canvas->history().canUndo())
+                click("undoButton");
+            QCOMPARE(doc.composite(), states[size_t(i - 1)]);
+        }
+        for (int i = 1; i <= sequence; ++i) {
+            while (doc.composite() == states[size_t(i - 1)] && m_canvas->history().canRedo())
+                click("redoButton");
+            QCOMPARE(doc.composite(), states[size_t(i)]);
+        }
+        snap("m9_11_after_redo");
+
+        // 12. Save, close, reopen; every layer and every preset is as it was.
+        QTemporaryDir dir;
+        const QString path = dir.filePath("character-m9.drawapp");
+        QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(path)); }, true), QString());
+        std::vector<std::pair<QString, QImage>> layers;
+        for (int i = 0; i < doc.count(); ++i)
+            layers.emplace_back(doc.layer(i).name, doc.layer(i).image.copy());
+        const BrushSettings solidSaved = lib->savedSettings(QStringLiteral("builtin.solid-round"));
+        m_canvas->newDocument();
+        QCOMPARE(waitFor([&] { return m_canvas->openFile(QUrl::fromLocalFile(path)); }, false), QString());
+        QCOMPARE(doc.count(), int(layers.size()));
+        for (int i = 0; i < doc.count(); ++i) {
+            QCOMPARE(doc.layer(i).name, layers[size_t(i)].first);
+            QCOMPARE(doc.layer(i).image, layers[size_t(i)].second);
+        }
+        lib->flush();
+        lib->setStorePath(storePath);
+        QVERIFY(lib->savedSettings(texturedInkId) == texturedInk);
+        QCOMPARE(lib->savedSettings(pencilId).size, 3.0);
+        QVERIFY(lib->savedSettings(QStringLiteral("builtin.solid-round")) == solidSaved);
+        QVERIFY(solidSaved.dynamicsFor(DynamicTarget::Size).enabled);
+        snap("m9_12_reopened");
+        // The built-in keeps no lasting change outside this test.
+        lib->select(QStringLiteral("builtin.solid-round"));
+        lib->resetCurrent();
+    }
+
     void overwriteOfAProviderDocumentIsConfirmed()
     {
         FakeProvider provider;
