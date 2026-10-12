@@ -10,6 +10,7 @@
 #include "BrushSettings.h"
 #include "StrokeEngine.h"
 #include "TileSnapshot.h"
+#include "TransformApply.h"
 #include "TransformSession.h"
 #include "UndoHistory.h"
 #include "ViewPyramid.h"
@@ -65,6 +66,9 @@ class CanvasItem : public QQuickPaintedItem
     Q_PROPERTY(bool canPaste READ canPaste NOTIFY clipboardChanged)
     // A transform preview is open (see TransformSession); the numbers describe its box.
     Q_PROPERTY(bool transforming READ isTransforming NOTIFY transformChanged)
+    // A transform is being applied on a worker thread (milestone 10); edits wait for it.
+    Q_PROPERTY(bool applying READ isApplying NOTIFY applyChanged)
+    Q_PROPERTY(qreal applyProgress READ applyProgress NOTIFY applyProgressChanged)
     Q_PROPERTY(qreal transformX READ transformX NOTIFY transformChanged)
     Q_PROPERTY(qreal transformY READ transformY NOTIFY transformChanged)
     Q_PROPERTY(qreal transformWidth READ transformWidth NOTIFY transformChanged)
@@ -195,7 +199,15 @@ public:
     // Starts a transform of the selected pixels (or the active layer); Apply is one undo step,
     // Cancel restores the original exactly. Returns an empty string or the reason it cannot start.
     Q_INVOKABLE QString beginTransform();
+    // Large transforms are applied on a worker thread (see `applying`); small ones at once.
     Q_INVOKABLE void applyTransform();
+    // Stops a transform being applied; the preview stays open and the document is unchanged.
+    Q_INVOKABLE void cancelApply();
+    bool isApplying() const { return m_apply.isRunning(); }
+    qreal applyProgress() const { return m_apply.progress(); }
+    // Tests: the work (changed pixels x layers) from which Apply runs on the worker thread.
+    void setBackgroundApplyThresholdForTesting(qint64 pixels) { m_backgroundApplyPixels = pixels; }
+    TransformApply &transformApplyForTesting() { return m_apply; }
     Q_INVOKABLE void cancelTransform();
     // key: "x", "y" (box centre), "width", "height" (pixels), "rotation" (degrees).
     Q_INVOKABLE void setTransformValue(const QString &key, qreal value);
@@ -324,6 +336,8 @@ signals:
     void selectToolChanged();
     void selectionChanged();
     void transformChanged();
+    void applyChanged();
+    void applyProgressChanged();
     void clipboardChanged();
     void viewChanged();
     void inputStatusChanged();
@@ -381,6 +395,12 @@ private:
     // Undoes the stroke in progress completely (Escape); nothing enters the history.
     // After an engine call: if a tile could not be allocated, takes the stroke back. True then.
     bool strokeOutOfMemory();
+    // Apply: in the background (the user's Apply) or at once (implicit applies before another action).
+    void applyTransformWith(bool background);
+    void commitApply(const TransformApply::Result &result);
+    // True (after a notice) while a transform is being applied: edits wait for it.
+    bool applyBlocks();
+    QString applyBusyText() const;
     void cancelStroke();
     // Selection and transform gestures (CanvasItemSelection.cpp).
     void beginSelectGesture(const QPointF &viewPos);
@@ -549,6 +569,9 @@ private:
 
     // --- transform ---
     TransformSession m_transform;
+    TransformApply m_apply; // after m_transform: destroyed (cancelled and joined) first
+    QTimer m_applyProgressTimer;
+    qint64 m_backgroundApplyPixels = 4 * 1024 * 1024;
     std::vector<quint64> m_transformLayerIds;
     // The session's last part is a merged copy of the (adjacent) layers, used for the preview.
     bool m_previewMerged = false; // bottom to top

@@ -417,10 +417,22 @@ so it reads on light and dark artwork at any zoom. It is not animated.
   - Flip H/V around the pivot, and Reset.
 - *Limits:* scale is clamped to at most 32× and at least 1 px; non-finite input is ignored.
   Rendering covers only (source ∪ target) ∩ canvas, so no buffer depends on the scale.
-- *Apply* (Enter or the button): renders the result once more from the source into the layer,
-  inside a tile snapshot. It is one undo step: the pixels together with the selection, which
-  **follows the transformed pixels** (the source's mask, transformed bilinearly), so shading the
-  moved part works at once. An unchanged box records nothing.
+- *Apply* (Enter or the button): renders the result once more from the source, bicubic, into a
+  copy of each layer that shares its tiles; committing exchanges tile references. It is one undo
+  step: the pixels together with the selection, which **follows the transformed pixels** (the
+  source's mask, transformed bilinearly), so shading the moved part works at once. An unchanged
+  box records nothing.
+- *Background Apply* (milestone 10, `TransformApply`): when the work (changed pixels × layers)
+  is 4 Mpx or more, Apply runs on a worker thread from copies made on the UI thread (the session's
+  worker copy and the layers, all sharing pixels), shows progress in the toolbar, and commits on
+  the UI thread through a queued call, by generation and only if every layer's version is
+  unchanged. While it runs, edits (painting, selections, layer actions, undo, files, tools) are
+  refused with a message; viewing works. Stop (Esc or the button) cancels it between row bands
+  and keeps the preview open; a cancelled, superseded or stale result is never committed.
+  Implicit applies (switching tools, or an action that applies the transform first) run at once
+  and wait for a running job. Destroying the canvas cancels the job and waits for its thread.
+  Rules: `research/m10-concurrency-design.md`; tests: `tst_canvas` (cancellation at every
+  stage, blocked edits, stale results, destruction, a 150-round stress test).
 - *Cancel* (Esc, the button, or Undo while transforming) drops the preview. The document was
   never changed, so it is exactly as before.
 - *Pixels beyond the canvas:* while the preview is open, the source is kept whole, so you can
@@ -435,9 +447,10 @@ so it reads on light and dark artwork at any zoom. It is not animated.
   - autosave and recovery write the document as it was before the transform (the preview is
     never in it), and include the result after Apply;
   - closing the window discards the preview, and the unsaved-changes prompt is as before.
-- *Memory while transforming:* a copy of the layer and of the composite (24 MiB at
-  2048 × 1536), the base (12 MiB, only with a selection) and the source with its reductions
-  (about 1.33 × the source).
+- *Memory while transforming:* the preview layers and composite share tiles with the document
+  except where the preview differs; the base (only with a selection) and the source with its
+  reductions are dense over the source rectangle (about 2.33 × it per layer) and reserved against
+  `MemoryBudget` when the transform starts, which refuses it with a message if it does not fit.
 
 **Copy, Cut and Paste.**
 - *Copy:* takes the active layer's pixels × selection (soft edges become partial alpha), trimmed
@@ -678,7 +691,8 @@ on tiled storage (`docs/m10-performance.md`) and this list is updated with those
 - Selections: no colour range or border. The outline is static, not animated. Selections are
   not saved in files.
 - Transforms: no perspective, skew, warp or mesh. Pixels moved off the canvas are cut off on
-  Apply. Apply of many large layers runs on the UI thread (2.3–3.2 s for 7 × 4096², measured).
+  Apply. Large Applies run on a worker thread (edits wait, viewing works, Stop cancels);
+  implicit applies (switching tools with a transform open) still run on the UI thread.
 - During a transform drag on the whole 2048 × 1536 layer, a preview frame costs up to about 20 ms
   plus the composite (12 ms at 10 layers). Nine adjacent layers take 25–33 ms (merged preview);
   7 × 4096² take 152–262 ms. Measured on a desktop CPU; phones are unmeasured.

@@ -640,7 +640,8 @@ void TransformSession::readOriginal(const TiledImage &image, int y, int x0, int 
     }
 }
 
-bool TransformSession::render(int partIndex, TiledImage &out, const QRect &requested, Quality quality) const
+bool TransformSession::render(int partIndex, TiledImage &out, const QRect &requested, Quality quality,
+                              const std::atomic<bool> *cancel, std::atomic<qint64> *rowsDone) const
 {
     if (!isActive() || partIndex < 0 || partIndex >= int(m_parts.size()) || out.size() != m_docSize)
         return false;
@@ -649,23 +650,28 @@ bool TransformSession::render(int partIndex, TiledImage &out, const QRect &reque
     const QRect area = requested & out.rect();
     if (area.isEmpty())
         return true;
-    // One band of tile rows at a time: rendered in parallel into a dense band, then written.
-    const int band = out.tileSize();
+    // A band of tile rows at a time (four: enough rows for the row pool to share): rendered in
+    // parallel into a dense band, then written. Cancellation is checked between bands.
+    const int band = out.tileSize() * 4;
     QImage buffer(area.width(), band, QImage::Format_ARGB32_Premultiplied);
     if (buffer.isNull())
         return false;
-    bool ok = true;
+    uchar *bits = buffer.bits(); // detached here, on this thread; rows are written through bits
+    const qsizetype bpl = buffer.bytesPerLine();
     for (int top = area.top(); top <= area.bottom();) {
-        const int bottom = std::min(area.bottom(), (out.rowOf(top) + 1) * band - 1);
+        if (cancel && cancel->load(std::memory_order_relaxed))
+            return false;
+        const int bottom = std::min(area.bottom(), (top / band + 1) * band - 1);
         const QRect strip(area.left(), top, area.width(), bottom - top + 1);
-        uchar *bits = buffer.bits();
-        const qsizetype bpl = buffer.bytesPerLine();
         renderRows(m_parts[size_t(partIndex)], strip, quality,
                    [&](int y) { return reinterpret_cast<QRgb *>(bits + (y - top) * bpl); });
-        ok = out.write(strip.topLeft(), buffer.copy(0, 0, strip.width(), strip.height())) && ok;
+        if (!out.write(strip.topLeft(), QImage(bits, strip.width(), strip.height(), bpl, QImage::Format_ARGB32_Premultiplied)))
+            return false;
+        if (rowsDone)
+            rowsDone->fetch_add(strip.height(), std::memory_order_relaxed);
         top = bottom + 1;
     }
-    return ok;
+    return true;
 }
 
 void TransformSession::sampleRow(const Part &part, int y, int x0, int x1, QRgb *out, Quality quality) const

@@ -64,6 +64,13 @@ void ensureSuffix(QString &path, QUrl &url, const QString &suffix)
 CanvasItem::CanvasItem(QQuickItem *parent)
     : QQuickPaintedItem(parent)
 {
+    connect(&m_apply, &TransformApply::finished, this, [this](const TransformApply::Result &result) {
+        m_applyProgressTimer.stop();
+        emit applyChanged();
+        commitApply(result);
+    });
+    m_applyProgressTimer.setInterval(100);
+    connect(&m_applyProgressTimer, &QTimer::timeout, this, &CanvasItem::applyProgressChanged);
     setAcceptedMouseButtons(Qt::LeftButton | Qt::MiddleButton);
     setAcceptTouchEvents(true);
     setAcceptHoverEvents(true); // the polygon lasso's rubber band
@@ -179,6 +186,10 @@ void CanvasItem::setTool(Tool tool)
 {
     if (tool == m_tool)
         return;
+    if (applyBlocks()) {
+        emit toolChanged(); // the buttons go back to the current tool
+        return;
+    }
     if (tool == Transform) {
         // Choosing the tool starts a transform; it ends with Apply or Cancel.
         const QString why = beginTransform();
@@ -189,7 +200,7 @@ void CanvasItem::setTool(Tool tool)
         return;
     }
     if (m_transform.isActive())
-        applyTransform(); // switching tools keeps the transform, as most editors do
+        applyTransformWith(false); // switching tools keeps the transform, as most editors do
     cancelPolygon();
     if (m_gesture == Gesture::Stroke)
         endStroke();
@@ -209,6 +220,8 @@ QString CanvasItem::documentTitle() const
 
 void CanvasItem::undo()
 {
+    if (applyBlocks())
+        return;
     // Undo during a transform cancels it: the preview was never part of the document.
     if (m_transform.isActive()) {
         cancelTransform();
@@ -224,6 +237,8 @@ void CanvasItem::undo()
 
 void CanvasItem::redo()
 {
+    if (applyBlocks())
+        return;
     if (m_transform.isActive())
         return;
     if (m_gesture == Gesture::Stroke)
@@ -377,6 +392,8 @@ QString CanvasItem::activeLayerBlockReason() const
 
 void CanvasItem::addLayer()
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     if (m_document.count() >= maxLayers()) {
         emit notice(QStringLiteral("This canvas can have at most %1 layers.").arg(maxLayers()));
@@ -398,6 +415,8 @@ void CanvasItem::addLayer()
 
 void CanvasItem::duplicateLayer(int id)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     const int source = m_document.indexOf(quint64(id));
     if (source < 0)
@@ -422,6 +441,8 @@ void CanvasItem::duplicateLayer(int id)
 
 void CanvasItem::deleteLayer(int id)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
@@ -441,6 +462,8 @@ void CanvasItem::deleteLayer(int id)
 
 void CanvasItem::moveLayerUp(int id)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0 || index >= m_document.count() - 1)
@@ -455,6 +478,8 @@ void CanvasItem::moveLayerUp(int id)
 
 void CanvasItem::moveLayerDown(int id)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index <= 0)
@@ -494,6 +519,8 @@ void CanvasItem::setLayerProperties(int id, const LayerProperties &props, const 
 
 void CanvasItem::renameLayer(int id, const QString &name)
 {
+    if (applyBlocks())
+        return;
     const int index = m_document.indexOf(quint64(id));
     const QString trimmed = name.trimmed().left(DocumentLimits::MaxNameLength);
     if (index < 0 || trimmed.isEmpty())
@@ -504,6 +531,8 @@ void CanvasItem::renameLayer(int id, const QString &name)
 
 void CanvasItem::setLayerVisible(int id, bool visible)
 {
+    if (applyBlocks())
+        return;
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
         return;
@@ -514,6 +543,8 @@ void CanvasItem::setLayerVisible(int id, bool visible)
 
 void CanvasItem::setLayerLocked(int id, bool locked)
 {
+    if (applyBlocks())
+        return;
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
         return;
@@ -524,6 +555,8 @@ void CanvasItem::setLayerLocked(int id, bool locked)
 
 void CanvasItem::previewLayerOpacity(int id, qreal opacity)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
@@ -547,6 +580,8 @@ void CanvasItem::previewLayerOpacity(int id, qreal opacity)
 
 void CanvasItem::commitLayerOpacity(int id, qreal opacity)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     const int index = m_document.indexOf(quint64(id));
     if (index < 0)
@@ -570,6 +605,8 @@ void CanvasItem::commitLayerOpacity(int id, qreal opacity)
 
 void CanvasItem::clearActiveLayer()
 {
+    if (applyBlocks())
+        return;
     clearSelected(); // the selected part, or the whole layer without a selection
 }
 
@@ -606,6 +643,8 @@ void CanvasItem::replaceDocument(const LayeredDocument &document)
 
 void CanvasItem::newDocument()
 {
+    if (applyBlocks())
+        return;
     replaceDocument(LayeredDocument());
     setFile({}, {});
     emit fileChanged();
@@ -634,6 +673,8 @@ QString CanvasItem::fileBusyText() const
 
 QString CanvasItem::openFile(const QUrl &url)
 {
+    if (m_apply.isRunning())
+        return applyBusyText();
     if (m_transform.isActive())
         return QStringLiteral("Apply or cancel the transform first (Enter applies, Esc cancels).");
     if (fileBusy())
@@ -705,6 +746,8 @@ void CanvasItem::applyOpened(const DocumentData &document, const QString &path, 
 
 QString CanvasItem::saveFile()
 {
+    if (m_apply.isRunning())
+        return applyBusyText();
     if (m_transform.isActive())
         return QStringLiteral("Apply or cancel the transform first (Enter applies, Esc cancels).");
     if (m_filePath.isEmpty())
@@ -714,6 +757,8 @@ QString CanvasItem::saveFile()
 
 QString CanvasItem::saveFileAs(const QUrl &url)
 {
+    if (m_apply.isRunning())
+        return applyBusyText();
     if (m_transform.isActive())
         return QStringLiteral("Apply or cancel the transform first (Enter applies, Esc cancels).");
     QString path = pathFromUrl(url);
@@ -887,6 +932,8 @@ void CanvasItem::onSaveFinished(quint64 id, const QString &path, const SafeSave:
 
 QString CanvasItem::exportPng(const QUrl &url)
 {
+    if (m_apply.isRunning())
+        return applyBusyText();
     if (m_transform.isActive())
         return QStringLiteral("Apply or cancel the transform first (Enter applies, Esc cancels).");
     if (fileBusy() || m_pendingOverwrite)
@@ -1239,7 +1286,7 @@ void CanvasItem::keyPressEvent(QKeyEvent *event)
     if (m_transform.isActive() && (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Return
                                    || event->key() == Qt::Key_Enter)) {
         if (event->key() == Qt::Key_Escape)
-            cancelTransform();
+            cancelTransform(); // while applying: stops the apply, the preview stays
         else
             applyTransform();
         event->accept();
@@ -1314,6 +1361,8 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
 
 bool CanvasItem::startStroke(const StrokeSample &sample, PointerKind kind, bool erase)
 {
+    if (applyBlocks())
+        return false;
     const QString blocked = activeLayerBlockReason();
     if (!blocked.isEmpty()) {
         emit notice(blocked); // the gesture stays None, so the rest of this press does nothing
@@ -1631,6 +1680,8 @@ QString CanvasItem::recoveryDescription() const
 
 void CanvasItem::restoreRecovery()
 {
+    if (applyBlocks())
+        return;
     if (m_orphans.isEmpty() || !m_recovery)
         return;
     const RecoveryManager::Orphan orphan = m_orphans.takeFirst();

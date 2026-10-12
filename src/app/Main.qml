@@ -687,10 +687,18 @@ ApplicationWindow {
                         id: applyRow
                         visible: canvas.transforming
                         spacing: 2
-                        BarButton { objectName: "applyTransformButton"; text: "Apply"; highlighted: true; onClicked: canvas.applyTransform()
+                        BarButton { objectName: "applyTransformButton"; text: "Apply"; highlighted: true; visible: !canvas.applying
+                            onClicked: canvas.applyTransform()
                             ToolTip.visible: hovered; ToolTip.text: "Apply (Enter). One undo step. Pixels moved off the canvas are cut off." }
-                        BarButton { objectName: "cancelTransformButton"; text: "Cancel"; onClicked: canvas.cancelTransform()
-                            ToolTip.visible: hovered; ToolTip.text: "Cancel (Esc): the drawing stays exactly as it was" }
+                        // A large transform is applied in the background: progress, and Cancel stops it.
+                        Label { objectName: "applyProgressLabel"; visible: canvas.applying; anchors.verticalCenter: parent.verticalCenter
+                            text: "Applying… " + Math.round(canvas.applyProgress * 100) + " %" }
+                        ProgressBar { objectName: "applyProgressBar"; visible: canvas.applying; width: 90
+                            anchors.verticalCenter: parent.verticalCenter; from: 0; to: 1; value: canvas.applyProgress }
+                        BarButton { objectName: "cancelTransformButton"; text: canvas.applying ? "Stop" : "Cancel"; onClicked: canvas.cancelTransform()
+                            ToolTip.visible: hovered
+                            ToolTip.text: canvas.applying ? "Stop applying (Esc): the drawing stays as it was and the preview stays open"
+                                                          : "Cancel (Esc): the drawing stays exactly as it was" }
                     }
                 }
             }

@@ -139,7 +139,7 @@ void CanvasItem::finishPendingEdits()
     if (m_gesture == Gesture::Stroke)
         endStroke();
     if (m_transform.isActive())
-        applyTransform();
+        applyTransformWith(false);
 }
 
 // --- selection commands ---
@@ -153,18 +153,24 @@ void CanvasItem::selectPath(const QPainterPath &docPath, SelectionMode mode)
 
 void CanvasItem::selectAll()
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     setSelectionWithUndo(Selection::all(m_document.size()), QStringLiteral("Select all"));
 }
 
 void CanvasItem::deselect()
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     setSelectionWithUndo(Selection(), QStringLiteral("Deselect"));
 }
 
 void CanvasItem::invertSelection()
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     if (!m_document.selection().isActive()) {
         emit notice(QStringLiteral("There is no selection to invert."));
@@ -175,6 +181,8 @@ void CanvasItem::invertSelection()
 
 void CanvasItem::growSelection(qreal radius)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     if (!m_document.selection().isActive()) {
         emit notice(QStringLiteral("There is no selection to grow."));
@@ -185,6 +193,8 @@ void CanvasItem::growSelection(qreal radius)
 
 void CanvasItem::shrinkSelection(qreal radius)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     if (!m_document.selection().isActive()) {
         emit notice(QStringLiteral("There is no selection to shrink."));
@@ -197,6 +207,8 @@ void CanvasItem::shrinkSelection(qreal radius)
 
 void CanvasItem::featherSelection(qreal radius)
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     if (!m_document.selection().isActive()) {
         emit notice(QStringLiteral("There is no selection to feather."));
@@ -220,6 +232,8 @@ void CanvasItem::wandAt(const QPointF &docPos, SelectionMode mode)
 
 void CanvasItem::closePolygon()
 {
+    if (applyBlocks())
+        return;
     if (m_polygon.size() < 3) {
         cancelPolygon();
         return;
@@ -265,6 +279,8 @@ void CanvasItem::mouseDoubleClickEvent(QMouseEvent *event)
 
 QString CanvasItem::beginSelectionTransform()
 {
+    if (m_apply.isRunning())
+        return applyBusyText();
     if (m_transform.isActive())
         return {};
     finishPendingEdits();
@@ -289,6 +305,8 @@ QString CanvasItem::beginSelectionTransform()
 
 void CanvasItem::reselect()
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     if (!canReselect())
         return;
@@ -311,6 +329,8 @@ QString CanvasItem::selectedLayersBlockReason(const QString &action) const
 
 void CanvasItem::clearSelected()
 {
+    if (applyBlocks())
+        return;
     finishPendingEdits();
     const QString reason = selectedLayersBlockReason(QStringLiteral("clear"));
     if (!reason.isEmpty()) {
@@ -381,6 +401,8 @@ void CanvasItem::clearSelected()
 
 void CanvasItem::beginSelectGesture(const QPointF &viewPos)
 {
+    if (applyBlocks())
+        return;
     const QPointF docPoint = m_view.viewToDoc(viewPos);
     if (m_selectShape == WandShape || m_selectShape == PolygonShape) {
         // A click, not a drag: the gesture ends at once.
@@ -491,6 +513,8 @@ void CanvasItem::abortPointerGesture()
 
 QString CanvasItem::beginTransform()
 {
+    if (m_apply.isRunning())
+        return applyBusyText();
     if (m_transform.isActive())
         return {};
     if (fileBusy())
@@ -596,6 +620,11 @@ void CanvasItem::updateTransformPreview(TransformSession::Quality quality)
 
 void CanvasItem::endTransformSession()
 {
+    if (m_apply.isRunning()) {
+        m_apply.cancel(); // before the session's caches go
+        m_applyProgressTimer.stop();
+        emit applyChanged();
+    }
     m_transform.end();
     m_transformedOutline = QPainterPath();
     m_transformLayerIds.clear();
@@ -616,8 +645,31 @@ void CanvasItem::endTransformSession()
 
 void CanvasItem::applyTransform()
 {
+    applyTransformWith(true);
+}
+
+QString CanvasItem::applyBusyText() const
+{
+    return QStringLiteral("The transform is still being applied. Wait for it to finish, or cancel it (Esc).");
+}
+
+bool CanvasItem::applyBlocks()
+{
+    if (!m_apply.isRunning())
+        return false;
+    emit notice(applyBusyText());
+    return true;
+}
+
+void CanvasItem::applyTransformWith(bool background)
+{
     if (!m_transform.isActive())
         return;
+    if (m_apply.isRunning()) {
+        if (!background)
+            m_apply.finishNow(); // an implicit apply needs the result before the caller continues
+        return;
+    }
     if (m_transform.isIdentity()) {
         endTransformSession(); // nothing moved: nothing to record
         updateAll();
@@ -633,40 +685,65 @@ void CanvasItem::applyTransform()
         updateAll();
         return;
     }
-    // Transaction: first prepare everything that can fail (each layer's result, the undo tiles,
-    // the new selection), then change the document. A failure before that point leaves the
-    // document exactly as it was. Pixels moved beyond the canvas are cut off (layers are
-    // canvas-sized).
-    const QRect changed = m_transform.changedRect();
-    // Each result is a copy of the layer (sharing its tiles) with the changed area's tiles
-    // rewritten; committing it exchanges tile references only.
-    struct Prepared
-    {
-        quint64 id;
-        TiledImage result;
-        TileSnapshot before;
-    };
-    std::vector<Prepared> prepared;
+    // Transaction: each layer's result is prepared first (in the background for large work) as a
+    // copy of the layer sharing its tiles, with the changed area's tiles rewritten. Only then is
+    // the document changed, by exchanging tile references, which cannot fail. Pixels moved beyond
+    // the canvas are cut off (layers are canvas-sized).
+    TransformApply::Input input;
+    input.session = m_transform.workerCopy();
+    input.area = m_transform.changedRect();
+    for (const quint64 id : m_transformLayerIds) {
+        const int index = m_document.indexOf(id);
+        if (index < 0) {
+            emit notice(QStringLiteral("A transformed layer no longer exists. Nothing was changed."));
+            return;
+        }
+        input.layerIds.push_back(id);
+        input.layers.push_back(m_document.layer(index).image);
+        input.versions.push_back(m_document.layer(index).image.version());
+    }
+    // Room for the new tiles is made here: the worker cannot run evictors (they belong to this
+    // thread).
+    const qint64 tiles = qint64(input.area.width() / TiledImage::DefaultTileSize + 2)
+                         * (input.area.height() / TiledImage::DefaultTileSize + 2);
+    MemoryBudget::evict(tiles * TiledImage::DefaultTileSize * TiledImage::DefaultTileSize * 4 * qint64(input.layers.size()));
+    const qint64 work = qint64(input.area.width()) * input.area.height() * qint64(input.layers.size());
+    if (!background || work < m_backgroundApplyPixels) {
+        commitApply(TransformApply::run(std::move(input)));
+        return;
+    }
+    m_apply.start(std::move(input));
+    m_applyProgressTimer.start();
+    emit applyChanged();
+    emit applyProgressChanged();
+}
+
+void CanvasItem::commitApply(const TransformApply::Result &result)
+{
+    if (!m_transform.isActive())
+        return;
+    if (!result.ok) {
+        emit notice(result.outOfMemory
+                        ? QStringLiteral("Not enough memory to apply the transform. Nothing was changed; the preview is still open.")
+                        : QStringLiteral("The transform was not applied. Nothing was changed; the preview is still open."));
+        updateAll();
+        return;
+    }
+    // The job's inputs must still be the document's layers (edits wait for Apply, so this only
+    // guards against mistakes).
+    for (size_t i = 0; i < result.layerIds.size(); ++i) {
+        const int index = m_document.indexOf(result.layerIds[i]);
+        if (index < 0 || m_document.layer(index).image.version() != result.versions[i]) {
+            emit notice(QStringLiteral("The layers changed while the transform was being applied, so it was not applied. "
+                                       "The preview is still open."));
+            return;
+        }
+    }
+    const QRect changed = result.area;
     Selection newSelection;
     bool ok = true;
     try {
-        for (size_t i = 0; i < m_transformLayerIds.size() && ok; ++i) {
-            const quint64 id = m_transformLayerIds[i];
-            const int index = m_document.indexOf(id);
-            if (index < 0) {
-                ok = false;
-                break;
-            }
-            Prepared p{id, m_document.layer(index).image, TileSnapshot()};
-            if (!m_transform.render(int(i), p.result, changed, TransformSession::Quality::Final)) {
-                ok = false;
-                break;
-            }
-            p.result.pruneTransparent(changed);
-            p.before.capture(m_document.layer(index).image, changed);
-            prepared.push_back(std::move(p));
-        }
-        if (ok && m_transform.hasSelection())
+        if (m_transform.hasSelection())
             newSelection = m_transform.transformedSelection();
     } catch (const std::bad_alloc &) {
         ok = false;
@@ -677,12 +754,15 @@ void CanvasItem::applyTransform()
     }
     // Commit: tile references only, which cannot fail.
     std::vector<UndoCommand> children;
-    for (Prepared &p : prepared) {
-        TiledImage &layer = m_document.pixels(m_document.indexOf(p.id));
-        layer = std::move(p.result);
-        p.before.dropUnchanged(layer);
-        if (!p.before.isEmpty())
-            children.push_back(UndoCommand::pixels(p.id, std::move(p.before), QStringLiteral("Transform")));
+    for (size_t i = 0; i < result.layerIds.size(); ++i) {
+        const quint64 id = result.layerIds[i];
+        TiledImage &layer = m_document.pixels(m_document.indexOf(id));
+        TileSnapshot before;
+        before.capture(layer, changed);
+        layer = result.layers[i];
+        before.dropUnchanged(layer);
+        if (!before.isEmpty())
+            children.push_back(UndoCommand::pixels(id, std::move(before), QStringLiteral("Transform")));
     }
     const Selection oldSelection = m_document.selection();
     if (m_transform.hasSelection())
@@ -700,10 +780,25 @@ void CanvasItem::applyTransform()
     updateAll();
 }
 
+void CanvasItem::cancelApply()
+{
+    if (!m_apply.isRunning())
+        return;
+    m_apply.cancel();
+    m_applyProgressTimer.stop();
+    emit applyChanged();
+    emit notice(QStringLiteral("Apply cancelled. Nothing was changed; the preview is still open."));
+    updateAll();
+}
+
 void CanvasItem::cancelTransform()
 {
     if (!m_transform.isActive())
         return;
+    if (m_apply.isRunning()) {
+        cancelApply(); // the first Cancel stops the apply; the next one closes the preview
+        return;
+    }
     // The document was never touched: dropping the preview restores it exactly.
     const QRect shown = m_previewRect;
     endTransformSession();
@@ -713,6 +808,8 @@ void CanvasItem::cancelTransform()
 
 void CanvasItem::setTransformValue(const QString &key, qreal value)
 {
+    if (applyBlocks())
+        return;
     if (!m_transform.isActive() || !std::isfinite(value))
         return;
     if (key == QLatin1String("x")) {
@@ -745,6 +842,8 @@ void CanvasItem::setTransformValue(const QString &key, qreal value)
 
 void CanvasItem::flipTransformHorizontal()
 {
+    if (applyBlocks())
+        return;
     if (!m_transform.isActive())
         return;
     m_transform.flipHorizontal();
@@ -753,6 +852,8 @@ void CanvasItem::flipTransformHorizontal()
 
 void CanvasItem::flipTransformVertical()
 {
+    if (applyBlocks())
+        return;
     if (!m_transform.isActive())
         return;
     m_transform.flipVertical();
@@ -761,6 +862,8 @@ void CanvasItem::flipTransformVertical()
 
 void CanvasItem::resetTransform()
 {
+    if (applyBlocks())
+        return;
     if (!m_transform.isActive())
         return;
     m_transform.reset();
@@ -769,6 +872,8 @@ void CanvasItem::resetTransform()
 
 void CanvasItem::beginTransformDrag(const QPointF &viewPos)
 {
+    if (applyBlocks())
+        return;
     if (!m_transform.isActive())
         return;
     const qreal zoom = m_view.zoom();
@@ -914,6 +1019,8 @@ QString CanvasItem::copySelection()
 
 QString CanvasItem::cutSelection()
 {
+    if (m_apply.isRunning())
+        return applyBusyText();
     finishPendingEdits();
     const QString blocked = selectedLayersBlockReason(QStringLiteral("cut"));
     if (!blocked.isEmpty())
@@ -933,6 +1040,8 @@ QString CanvasItem::cutSelection()
 
 QString CanvasItem::paste()
 {
+    if (m_apply.isRunning())
+        return applyBusyText();
     finishPendingEdits();
     std::vector<ClipItem> items = m_clipboard;
     const QRect canvas(QPoint(0, 0), m_document.size());

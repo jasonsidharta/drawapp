@@ -3,6 +3,8 @@
 #include "Selection.h"
 #include "TiledImage.h"
 
+#include <atomic>
+
 #include <QImage>
 #include <QPointF>
 #include <QPolygonF>
@@ -108,8 +110,20 @@ public:
     void render(QImage &out, const QRect &area, Quality quality) const; // part 0
     void render(int part, QImage &out, const QRect &area, Quality quality) const;
     // Into a tiled image of the document's size, band by band (only the area's tiles change).
-    // False if the memory budget refused a tile (out then partly updated: previews only).
-    bool render(int part, TiledImage &out, const QRect &area, Quality quality) const;
+    // False if the memory budget refused a tile or `cancel` was set (out then partly updated:
+    // previews, or a result that is thrown away). rowsDone, if given, counts finished rows.
+    // Safe on a worker thread for a session no one modifies meanwhile (see workerCopy()).
+    bool render(int part, TiledImage &out, const QRect &area, Quality quality, const std::atomic<bool> *cancel = nullptr,
+                std::atomic<qint64> *rowsDone = nullptr) const;
+    // A copy for a worker thread: shares every cache (nothing is copied), but does not own the
+    // memory reservation, so only this session releases it. Keep this session active until the
+    // worker is done with the copy.
+    TransformSession workerCopy() const
+    {
+        TransformSession s = *this;
+        s.m_reserved = 0;
+        return s;
+    }
     // The transformed layer within area, as a new image of area's size (null if out of memory).
     QImage renderRegion(int part, const QRect &area, Quality quality) const;
     // Tests: renderRegion and the tiled render for this part behave as if memory ran out (-1 = off).

@@ -23,6 +23,7 @@
 #include <QQuickWindow>
 #include <QTabletEvent>
 #include <QtTest>
+#include <optional>
 #include <memory>
 
 class TestCanvas : public QObject
@@ -2727,6 +2728,303 @@ private slots:
         m_canvas->discardForClose();
         m_canvas->shutdownRecovery();
         QVERIFY(QDir(dir).entryList(QDir::Files).isEmpty());
+    }
+
+    // --- background Apply (milestone 10 stage 7) ---
+
+    // Two painted layers, both selected, moved and rotated: the transform of the next tests.
+    std::pair<int, int> transformedPair()
+    {
+        const auto [colour, ink] = twoLayerCharacter();
+        m_canvas->setLayerSelected(colour, true);
+        if (m_canvas->beginTransform() != QString())
+            return {0, 0};
+        m_canvas->setTransformValue("x", 640);
+        m_canvas->setTransformValue("rotation", 25);
+        return {colour, ink};
+    }
+
+    bool waitForApply() { return QTest::qWaitFor([&] { return !m_canvas->isApplying(); }, 20000); }
+
+    void backgroundApplyEqualsImmediateApply()
+    {
+        // The same transform applied at once and on the worker thread gives the same layers and
+        // one undo step that restores them.
+        m_canvas->setBackgroundApplyThresholdForTesting(qint64(1) << 40); // at once
+        auto [colour, ink] = transformedPair();
+        QVERIFY(colour && ink);
+        const QImage colour0 = layerImage(layerIndex(colour)), ink0 = layerImage(layerIndex(ink));
+        m_canvas->applyTransform();
+        QVERIFY(!m_canvas->isTransforming());
+        const QImage colourNow = layerImage(layerIndex(colour)), inkNow = layerImage(layerIndex(ink));
+        QVERIFY(colourNow != colour0);
+
+        cleanup();
+        init();
+        m_canvas->setBackgroundApplyThresholdForTesting(0); // always on the worker
+        std::tie(colour, ink) = transformedPair();
+        const int steps = m_canvas->history().undoCount();
+        QSignalSpy applying(m_canvas, &CanvasItem::applyChanged);
+        m_canvas->applyTransform();
+        QVERIFY(m_canvas->isApplying());
+        QVERIFY(m_canvas->isTransforming()); // the preview stays until the result is committed
+        QVERIFY(waitForApply());
+        QVERIFY(!m_canvas->isTransforming());
+        QVERIFY(applying.count() >= 2);
+        QCOMPARE(layerImage(layerIndex(colour)), colourNow);
+        QCOMPARE(layerImage(layerIndex(ink)), inkNow);
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        m_canvas->undo();
+        QCOMPARE(layerImage(layerIndex(colour)), colour0);
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+    }
+
+    void editsWaitWhileApplying()
+    {
+        // While the worker holds, every edit is refused with a message; viewing still works; the
+        // document and history are untouched.
+        m_canvas->setBackgroundApplyThresholdForTesting(0);
+        const auto [colour, ink] = transformedPair();
+        QVERIFY(colour && ink);
+        const QImage composite = doc();
+        const int steps = m_canvas->history().undoCount(), layers = m_canvas->layerCount();
+        TransformApply &job = m_canvas->transformApplyForTesting();
+        job.holdForTesting(true);
+        m_canvas->applyTransform();
+        QVERIFY(QTest::qWaitFor([&] { return job.waitingForTesting(); }, 5000));
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        QVERIFY(!m_canvas->drawStroke(docCurve({100, 100}, {600, 300}, 0)));
+        m_canvas->undo();
+        m_canvas->addLayer();
+        m_canvas->deleteLayer(colour);
+        m_canvas->selectAll();
+        m_canvas->setTransformValue("x", 100);
+        m_canvas->setTool(CanvasItem::Brush);
+        QCOMPARE(m_canvas->saveFile(), QStringLiteral("The transform is still being applied. Wait for it to finish, or cancel it (Esc)."));
+        QCOMPARE(m_canvas->beginTransform(), m_canvas->saveFile());
+        QVERIFY(notices.count() >= 6);
+        for (const QList<QVariant> &n : notices)
+            QVERIFY2(n.at(0).toString().contains("still being applied"), qPrintable(n.at(0).toString()));
+        QCOMPARE(m_canvas->tool(), CanvasItem::Transform);
+        // Viewing is allowed.
+        const qreal zoom = m_canvas->zoom();
+        m_canvas->zoomIn();
+        QVERIFY(m_canvas->zoom() > zoom);
+        QCOMPARE(doc(), composite);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        QCOMPARE(m_canvas->layerCount(), layers);
+        QVERIFY(m_canvas->applyProgress() >= 0.0 && m_canvas->applyProgress() <= 1.0);
+        job.holdForTesting(false);
+        job.releaseOneStepForTesting();
+        job.releaseOneStepForTesting();
+        QVERIFY(waitForApply());
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+    }
+
+    void cancelApplyAtEveryStage_data()
+    {
+        QTest::addColumn<int>("stage");
+        QTest::newRow("before the first layer") << 0;
+        QTest::newRow("between the layers") << 1;
+        QTest::newRow("finished, not yet delivered") << 2;
+        QTest::newRow("with Esc") << 3;
+    }
+
+    void cancelApplyAtEveryStage()
+    {
+        // Cancel at any point leaves the document, the history and the selection exactly as they
+        // were, keeps the preview open, and a later Apply works.
+        QFETCH(int, stage);
+        m_canvas->setBackgroundApplyThresholdForTesting(0);
+        const auto [colour, ink] = transformedPair();
+        QVERIFY(colour && ink);
+        const QImage colour0 = layerImage(layerIndex(colour)), ink0 = layerImage(layerIndex(ink)), composite = doc();
+        const int steps = m_canvas->history().undoCount();
+        TransformApply &job = m_canvas->transformApplyForTesting();
+        job.holdForTesting(stage != 2);
+        m_canvas->applyTransform();
+        if (stage == 1) {
+            QVERIFY(QTest::qWaitFor([&] { return job.waitingForTesting(); }, 5000));
+            job.releaseOneStepForTesting(); // the first layer renders
+            QVERIFY(QTest::qWaitFor([&] { return job.waitingForTesting(); }, 5000)); // held before the second
+        } else if (stage == 2) {
+            // Let the worker finish without processing the queued delivery.
+            QThread::msleep(50);
+            for (int i = 0; i < 200 && job.progress() < 1.0; ++i)
+                QThread::msleep(10);
+        } else {
+            QVERIFY(QTest::qWaitFor([&] { return job.waitingForTesting(); }, 5000));
+        }
+        if (stage == 3) {
+            m_canvas->forceActiveFocus();
+            QTest::keyClick(m_window.get(), Qt::Key_Escape);
+        }
+        else
+            m_canvas->cancelTransform(); // while applying: stops the apply only
+        job.holdForTesting(false);
+        QVERIFY(!m_canvas->isApplying());
+        QVERIFY(m_canvas->isTransforming());
+        QTest::qWait(50); // a stale delivery, if any, would arrive now
+        QVERIFY(m_canvas->isTransforming());
+        QCOMPARE(layerImage(layerIndex(colour)), colour0);
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        QCOMPARE(doc(), composite);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        m_canvas->applyTransform();
+        QVERIFY(waitForApply());
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        QVERIFY(layerImage(layerIndex(colour)) != colour0);
+    }
+
+    void failedBackgroundApplyChangesNothing()
+    {
+        m_canvas->setBackgroundApplyThresholdForTesting(0);
+        const auto [colour, ink] = transformedPair();
+        QVERIFY(colour && ink);
+        const QImage colour0 = layerImage(layerIndex(colour)), ink0 = layerImage(layerIndex(ink));
+        const int steps = m_canvas->history().undoCount();
+        m_canvas->transformSessionForTesting().failRenderRegionForTesting(1);
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        m_canvas->applyTransform();
+        QVERIFY(waitForApply());
+        QVERIFY(m_canvas->isTransforming());
+        QVERIFY(!notices.isEmpty() && notices.last().at(0).toString().contains("Not enough memory"));
+        QCOMPARE(layerImage(layerIndex(colour)), colour0);
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+    }
+
+    void implicitApplyWaitsForTheResult()
+    {
+        // Switching tools with a transform open applies it, as before milestone 10: at once, even
+        // when Apply would run in the background, so the next tool sees the transformed pixels.
+        m_canvas->setBackgroundApplyThresholdForTesting(0);
+        const auto [colour, ink] = transformedPair();
+        QVERIFY(colour && ink);
+        const QImage colour0 = layerImage(layerIndex(colour));
+        const int steps = m_canvas->history().undoCount();
+        m_canvas->setTool(CanvasItem::Brush);
+        QVERIFY(!m_canvas->isTransforming());
+        QVERIFY(!m_canvas->isApplying());
+        QCOMPARE(m_canvas->tool(), CanvasItem::Brush);
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        QVERIFY(layerImage(layerIndex(colour)) != colour0);
+    }
+
+    void destroyingTheCanvasDuringApplyIsSafe()
+    {
+        // The worker owns copies of its inputs; destroying the canvas cancels and waits for it.
+        m_canvas->setBackgroundApplyThresholdForTesting(0);
+        const auto [colour, ink] = transformedPair();
+        QVERIFY(colour && ink);
+        TransformApply &job = m_canvas->transformApplyForTesting();
+        job.holdForTesting(true);
+        m_canvas->applyTransform();
+        QVERIFY(QTest::qWaitFor([&] { return job.waitingForTesting(); }, 5000));
+        cleanup(); // destroys the window and the canvas with the job held
+        QTest::qWait(20);
+        init(); // the next test's fixture again
+    }
+
+    void staleResultsAreDiscarded()
+    {
+        // Direct use of the job: a result that arrives after its generation was superseded is
+        // dropped; only the current job's result is delivered.
+        LayeredDocument d(QSize(512, 512));
+        d.pixels(0).fillRect(QRect(100, 100, 200, 200), 0xff2050a0);
+        TransformSession session;
+        QVERIFY(session.begin(std::vector<TiledImage>{d.layer(0).image}, Selection()));
+        session.setRotation(30);
+        auto input = [&] {
+            TransformApply::Input in;
+            in.session = session.workerCopy();
+            in.layerIds = {d.layer(0).id};
+            in.layers = {d.layer(0).image};
+            in.versions = {d.layer(0).image.version()};
+            in.area = session.changedRect();
+            return in;
+        };
+        TransformApply job;
+        QList<quint64> delivered;
+        connect(&job, &TransformApply::finished, this, [&](const TransformApply::Result &r) { delivered << r.generation; });
+        const quint64 first = job.start(input());
+        const quint64 second = job.start(input()); // cancels and replaces the first
+        QVERIFY(second > first);
+        QVERIFY(QTest::qWaitFor([&] { return !job.isRunning(); }, 10000));
+        QTest::qWait(20);
+        QCOMPARE(delivered, QList<quint64>{second});
+        // The worker never wrote the live layer: it is unchanged and still shares nothing new.
+        QCOMPARE(d.layer(0).image.pixel(150, 150), 0xff2050a0u);
+        // A synchronous run gives the same pixels as the worker.
+        const TransformApply::Result sync = TransformApply::run(input());
+        QVERIFY(sync.ok);
+        TransformApply job2;
+        std::optional<TransformApply::Result> async;
+        connect(&job2, &TransformApply::finished, this, [&](const TransformApply::Result &r) { async = r; });
+        job2.start(input());
+        QVERIFY(QTest::qWaitFor([&] { return async.has_value(); }, 10000));
+        QVERIFY(async->ok);
+        QVERIFY(async->layers.front() == sync.layers.front());
+        session.end();
+    }
+
+    void applyJobStress()
+    {
+        // Many jobs started, cancelled at random moments, superseded or finished at once, while the
+        // UI thread keeps reading the live layer: the live layer never changes, every delivered
+        // result equals the synchronous one, and nothing leaks into the memory budget.
+        LayeredDocument d(QSize(700, 500));
+        d.pixels(0).fillRect(QRect(50, 60, 400, 300), 0xff802040);
+        d.pixels(0).fillRect(QRect(300, 200, 200, 200), 0x80004080);
+        const QImage live = d.layer(0).image.toImage();
+        const qint64 documentBytes = MemoryBudget::used(MemoryBudget::Category::Document);
+        TransformSession session;
+        QVERIFY(session.begin(std::vector<TiledImage>{d.layer(0).image}, Selection()));
+        session.setRotation(17);
+        session.setSize(session.sourceRect().width() * 1.3, session.sourceRect().height() * 0.8);
+        auto input = [&] {
+            TransformApply::Input in;
+            in.session = session.workerCopy();
+            in.layerIds = {d.layer(0).id};
+            in.layers = {d.layer(0).image};
+            in.versions = {d.layer(0).image.version()};
+            in.area = session.changedRect();
+            return in;
+        };
+        TransformApply::Result reference = TransformApply::run(input());
+        QVERIFY(reference.ok);
+        QRandomGenerator rng(42);
+        int delivered = 0;
+        for (int round = 0; round < 150; ++round) {
+            TransformApply job;
+            std::optional<TransformApply::Result> result;
+            connect(&job, &TransformApply::finished, this, [&](const TransformApply::Result &r) { result = r; });
+            job.start(input());
+            const int action = int(rng.bounded(4));
+            if (action == 0) {
+                job.cancel();
+            } else if (action == 1) {
+                QThread::usleep(rng.bounded(3000));
+                job.cancel();
+            } else if (action == 2) {
+                job.start(input()); // supersedes
+                job.finishNow();
+            } else {
+                job.finishNow();
+            }
+            QCoreApplication::processEvents();
+            QVERIFY(d.layer(0).image == live);
+            if (result) {
+                ++delivered;
+                QVERIFY(result->ok);
+                QVERIFY(result->layers.front() == reference.layers.front());
+            }
+        }
+        QVERIFY(delivered > 0);
+        reference = TransformApply::Result(); // its tiles are the only new ones
+        session.end();
+        QCOMPARE(MemoryBudget::used(MemoryBudget::Category::Document), documentBytes);
     }
 };
 
