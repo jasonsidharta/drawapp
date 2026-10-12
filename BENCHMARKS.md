@@ -399,6 +399,29 @@ Apply on the UI thread takes up to 61 ms (whole layer, scaled).
 **Android emulator:** the selection and transform tools were exercised by touch (BUILD.md); no
 timings were taken.
 
+## Milestone 9: workloads, brush engines and multi-layer transforms, 2026-10-12, same machine (Intel Core Ultra 7 155H, 15.4 GB RAM, Windows 11 25H2)
+
+Full tables, method and the reproducible commands: `docs/milestone9-performance.md`. Raw output:
+`docs/benchmarks/m9-baseline-bench_core.md` (before), `m9-final-bench_core.md` and
+`m9-bench_m9.md` (after). CPU processing times; not latency.
+
+| Measurement | Before milestone 9 | After |
+|---|---|---|
+| Start-up, first frame (offscreen, 5 runs) | 150–168 ms | 156–178 ms |
+| Idle working set / private | 87.4 / ≈ 74 MiB | 89.6–89.9 / 75.3–75.7 MiB |
+| Solid Round 12 px, one input event (median / p95, 1 layer) | 0.013 / 0.056 ms | 0.013–0.014 / 0.055–0.058 ms |
+| Textured Paint 200 px (median / p95) | 0.762 / 1.941 ms | 0.747–0.752 / 1.85–1.90 ms |
+| Sketch Pencil 200 px (p95) | 1.080 ms | 0.89–0.93 ms |
+| Peak private memory while opening a 0.1 MiB project | 1055 MiB | 29 MiB (bounded read) |
+| Preview frame, 9 layers × 2048 × 1536, whole layers (scale + rotate) | 198–215 ms (per layer) | 25–33 ms (merged copy) |
+| Preview frame, 7 layers × 4096² | 812–1098 ms | 152–262 ms |
+
+Workloads (`bench_m9`): 512² × 3, 2048 × 1536 × 10, 4096² × 8 (20 is refused by the 512 MiB
+document limit), 8192² × 2. New engines per input event at 2048 × 1536 × 10, median: wet paint
+40 px 0.062 ms, spray 0.0003 ms (p95 0.10 ms), hatching 0.032 ms, colour dynamics 0.024 ms,
+4-sensor dynamics 0.023 ms. No brush exceeded 2 ms for any event. Not measured: Android, latency
+to the screen, and Krita/PhotoCraft (not installed; procedure in `docs/milestone9-performance.md`).
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera). The

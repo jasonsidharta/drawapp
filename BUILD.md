@@ -216,6 +216,20 @@ Not checked on the emulator: pressure and tilt (it has no pen), and performance.
 | Copy, Paste | "Pasted" layer added above, at the original position |
 | Not checked | Pen input (the emulator has none), performance, the system clipboard |
 
+**Milestone 9 emulator results, 2026-10-12** (same AVD, `-no-window`; touch from
+`adb shell input`; x86_64 debug APK of the milestone 9 code):
+
+| Check | Result |
+|---|---|
+| Brush library from the milestone 8 build (format 1) | Read by the new build (format 2); presets and the selected brush kept |
+| Brush panel → "Brush Studio…" | Studio opens full-window in portrait (wide layout at 800 dp) |
+| Categories, switches | Category list and "Follow sensors" respond to taps; the curve editor appears |
+| Curve editor by touch | Dragging the end point changed the curve and the preview stroke |
+| Try-out pad by touch | Draws with the edited copy; full size (touch has no pressure, so the pressure curve does not apply, as intended) |
+| Cancel | Preset unchanged (no unsaved marker, Save disabled) |
+| Fixed during testing | "↺" and "✕" were missing glyphs in Android's font (now "Reset", "Remove"); the Studio's top row was under the status bar (now inside the safe area); "% of size" was cut off |
+| Not checked | Pen pressure and tilt, `.drawbrush` pickers, the twelve artist workflows (Windows only), performance |
+
 Not reachable on the emulator: the provider's own free-space check (private and shared storage
 share one partition, so the local copy fails first, which is also safe); a write that stops part
 way (covered by `tst_canvas` with a fault-injecting provider); revoking a URI grant without
@@ -312,8 +326,8 @@ Resolve the Qt LGPL/static linking question (ARCHITECTURE.md) before shipping.
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 7/7 suites (tst_core 34, tst_brush 37, tst_selection 24, tst_document 62, tst_recovery 28, tst_canvas 91, tst_ui 11 test functions; counts include init/cleanup). Milestones 0–2 were driven on the desktop with real input. Milestones 3–8 (layers, async files, brush presets and panel, selections and transforms, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots and the brush test sheet inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
-| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall; milestone 6 brush panel, presets, scratchpad and airbrush by touch; milestone 8 selection, transform, copy and paste by touch |
-| Android arm64 | **Built; not run on a physical device** | Debug APK (development key) rebuilt for milestone 8. Same source as the emulator build. Pen pressure and tilt, brush feel, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 8/8 suites, milestone 9 (tst_core 34, tst_brush 37, tst_brushengine 28, tst_selection 34, tst_document 63, tst_recovery 28, tst_canvas 100, tst_ui 13; QtTest totals including init/cleanup and data rows). Milestones 0–2 were driven on the desktop with real input. Milestones 3–8 (layers, async files, brush presets and panel, selections and transforms, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots and the brush test sheet inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
+| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall; milestone 6 brush panel, presets, scratchpad and airbrush by touch; milestone 8 selection, transform, copy and paste by touch; milestone 9 Brush Studio by touch |
+| Android arm64 | **Built; not run on a physical device** | Debug APK (development key) rebuilt for milestone 9. Same source as the emulator build. Pen pressure and tilt, brush feel, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
 | Linux | **Blocked** | Needs the owner to run one `sudo apt install` command (above); everything after it is prepared |
 | iOS / iPadOS | **Blocked** | Needs a Mac with Xcode 16+ (above) |

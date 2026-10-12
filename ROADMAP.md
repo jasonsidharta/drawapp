@@ -129,6 +129,35 @@ on the offscreen platform), Android at runtime.
 | Windows suites; Android rebuilt and selection/transform exercised on the emulator | Done (emulator) | ctest 7/7; BUILD.md milestone 8 emulator results |
 | Physical device | **Not done** | No device; milestone 7 |
 
+## Milestone 9: professional painting engine, Brush Studio and multi-layer editing (done with stated gaps; pen hardware and Krita comparison not run)
+
+| Criterion (milestone 9 section 15) | Status | How verified |
+|---|---|---|
+| Research: Krita, PhotoCraft, Procreate (documented), decisions, feature parity | Done (source study and documentation; none of the apps run) | `research/milestone9-*.md` |
+| Multi-layer workflow: select several layers; transform, copy, cut, paste, clear them together; aligned; one undo step; atomic Apply; locked/hidden refused | Done | `tst_canvas` / `tst_selection` multi-layer tests; workflows 1, 2, 9–12 |
+| Existing selections and transforms not regressed | Done | milestone 8 suites and `artistTasksWithSelectionsAndTransforms` pass |
+| Polygon lasso, magic wand, feather, grow/shrink, outline transform | Done | `tst_selection`, `tst_canvas` (`polygonLassoByClicks`, `magicWandAndModifyCommands`, …) |
+| Modular brush architecture (one engine, stamps, blends, dynamics, registry) | Done | `docs/brush-engine-architecture.md`; `tst_brushengine` |
+| Advanced properties change rendering | Done for 94 of the 120 designed properties; 26 planned | `everyImplementedPropertyChangesRendering` |
+| Settings documented individually | Done (generated, checked current) | `docs/brush-settings-specification.md`, `specificationIsCurrent` |
+| Sensor framework: pressure, tilt X/Y/amount/direction, direction, speed, acceleration, distance, fade, time, random; curves; combination | Done (simulated input) | `dynamics*` tests |
+| Wet paint | Prototype only | `wetPaintLoadsDepositsAndDrags`; limits in `docs/milestone9-known-limitations.md` |
+| Spray and hatching | Subset | `sprayAndHatching`, golden images |
+| Bristle, clone, sketch engines | **Not done** | feature parity document |
+| Brush Studio usable with actual input | Done on Windows (synthetic mouse/keyboard) and the Android emulator (touch) | `tst_ui::brushStudio`, workflows 6–8; `docs/milestone9-testing.md` |
+| Presets survive save/load and version checks; v1 migration; unknown keys kept; malformed files refused | Done | `presetFileGolden`, `libraryVersion1Migrates`, `malformedPresetFuzz` |
+| Krita `.kpp` / Procreate import | **Not done** (investigated; no compatibility claimed) | `docs/brush-preset-format.md` |
+| Benchmarks run and reported | Done (Windows CPU times) | `docs/milestone9-performance.md`, BENCHMARKS.md |
+| 4096 × 4096 × 20 workload | **Refused by design** (512 MiB limit); measured at 8 layers | same |
+| 60 fps transform previews on large multi-layer documents | **Not reached** at 4096² (4–7 fps); 30–40 fps at 2048 × 1536 × 9 | same |
+| Windows automated tests | Done: 8 suites, 337 test cases, 0 failures | `docs/milestone9-testing.md` |
+| Android builds and interaction | Done (emulator, x86_64; arm64 APK built, not run) | BUILD.md |
+| Artist workflow tests | Done (automated, synthetic input, simulated pressure) | `docs/milestone9-artist-workflows.md` |
+| Sanitizers | **Not run** (not available with MinGW) | `docs/milestone9-testing.md` |
+| Unresolved data-loss or critical painting bug | None known. Two found and fixed: preview thread race, 1 GiB read reservation | commits; tests |
+| Physical pen, palm rejection, tablet performance | **Not done** (no hardware) | milestone 7 |
+| Krita and PhotoCraft comparison | **Not run** (not installed / no Rust toolchain); manual procedure written | `docs/milestone9-performance.md` |
+
 ## Milestone 7: hardware validation (outstanding: no pen hardware yet)
 
 - Run the short Windows on-screen checklist with real mouse input (and a pen if available).
@@ -146,7 +175,9 @@ on the offscreen platform), Android at runtime.
 ## Later (unordered)
 
 Folder-based saving with sibling-and-rename on providers that allow it; incremental recovery
-writes (only changed layers); brush colour dynamics, scatter and more tips; preset import/export;
-more blend modes, groups, clipping, masks; drag-and-drop layer reordering; canvas rotation and
-mirroring; selection (the brush clip mask is ready) and transform; iOS build (needs macOS and a
-licensing decision); Play Store AAB with an upload key and release pipeline.
+writes (only changed layers); the 26 planned brush properties (`docs/brush-settings-specification.md`);
+bristle, clone and sketch engines; a real wet-media model; tiled or sparse layers (would lift the
+512 MiB document limit and speed up large transforms); transform Apply off the UI thread;
+more layer blend modes, groups, clipping, masks; drag-and-drop layer reordering; canvas rotation
+and mirroring; perspective/warp transforms; iOS build (needs macOS and a licensing decision);
+Play Store AAB with an upload key and release pipeline.

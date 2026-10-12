@@ -1,6 +1,8 @@
 # Architecture
 
-State: milestone 8 (selections and basic transforms) on top of milestone 6 (artist brush system) and milestones 5 (Android save safety), 4 (background
+State: milestone 9 (modular brush engine with sensor dynamics, Brush Studio, multi-layer
+transforms and more selection tools) on top of milestone 8 (selections and basic transforms),
+milestone 6 (artist brush system) and milestones 5 (Android save safety), 4 (background
 file operations), 3 (raster layers), 2 (crash recovery), 1 (undo/redo, project save/open, PNG
 export) and the milestone 0 prototype. Everything described here exists in
 the code unless labelled *planned*.
@@ -26,19 +28,25 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
   LayeredDocument  the open document: ordered layers (index 0 = bottom), active layer, id
                    allocation, cached composite of the visible layers
   RasterDocument   raster operations on one image: stampDabs (test fixtures), clear
-  BrushSettings    brush and preset data (plain values, JSON with validation); PressureMapping
-  BrushTips        the generated tip (flat bristle) and textures (paper, canvas); see provenance
+  BrushSettings    brush and preset data (plain values); PressureMapping; settings version 2
+  BrushDynamics    sensors, response curves, ParameterDynamics, CompiledDynamics (milestone 9)
+  BrushProperties  the property registry: every brush property's metadata and accessors; drives
+                   JSON, validation, equality, the Brush Studio and the generated specification
+  BrushTips        the generated tip (flat bristle) and textures (paper, canvas); imported tips
   BrushPresets     the built-in presets
   BrushPresetStore the artist's brush library file (custom presets, saved changes, favourites)
+  BrushPresetFile  one preset as a .drawbrush file (import/export)
   StrokeSmoother   distance-based ("pull string") smoothing of input samples
   StrokeSpacer     StrokeSample (position, pressure, tilt, time); distance-spaced dabs with the
                    input interpolated; PressureResponse (firmness -> gamma)
-  StrokeEngine     the one brush renderer: smoothing, spacing, airbrush timing, dab parameters,
-                   coverage (paint, erase) or pixel smudging, texture, selection mask; undo tiles
+  StrokeEngine     the one brush renderer: input filters, smoothing, path sensors, taper,
+                   spacing, airbrush timing, dynamics, dab parameters, stamps (tip, spray,
+                   hatching), coverage with blend modes (paint, erase) or a carried patch (smudge,
+                   wet paint), texture, selection mask; undo tiles
   Selection        document-space selection coverage (none / active / empty), shapes, modes,
-                   invert, outline
-  TransformSession move/scale/rotate/flip of a layer's (selected) pixels: cached source and
-                   base, previews, handles, the selection after Apply
+                   invert, magic wand, grow/shrink/feather, outline
+  TransformSession move/scale/rotate/flip of one or several layers' (selected) pixels with one
+                   geometry: cached sources and bases, previews, handles, the selection after Apply
   TileSnapshot     copies of the 64x64 tiles an edit touched; swap = undo/redo
   UndoHistory      UndoCommand (pixels / layer presence / properties / move) + linear history
                    under one byte budget; state ids for "unsaved"
@@ -55,14 +63,17 @@ src/app/    (static QML module "drawapp_ui", URI DrawApp, used by the app and ts
   CanvasItem       QQuickPaintedItem; input, strokes, layer commands, history, files, recovery;
                    selections, transforms and the clipboard in CanvasItemSelection.cpp
   BrushLibrary     presets and the paint/eraser working brushes (canvas.brushes in QML)
+  BrushStudio      the Brush Studio model: one preset edited on a copy (canvas.brushes.studio)
   BrushThumbnails  image provider: preset thumbnails drawn by StrokeEngine
   BrushScratchpad  try-out surface on the same engine, settings and input handling
   Main.qml         window, toolbar (active brush, size, opacity), File menu, layer panel, dialogs
   BrushPanel.qml   preset list, scratchpad, basic and advanced brush settings
+  BrushStudioPage.qml, CurveEditor.qml   the Brush Studio (loaded when first opened)
   main.cpp         application setup (in the drawapp executable)
-tests/             tst_core, tst_brush, tst_selection, tst_document, tst_recovery (headless); tst_canvas, tst_ui
-                   (window, offscreen under ctest); FakeProvider.h; bench_core, bench_canvas;
-                   brush_sheet (renders the brush test sheet)
+tests/             tst_core, tst_brush, tst_brushengine, tst_selection, tst_document, tst_recovery
+                   (headless); tst_canvas, tst_ui (window, offscreen under ctest); FakeProvider.h;
+                   golden/ (reference strokes and preset files); bench_core, bench_canvas,
+                   bench_m9; brush_sheet (renders the brush test sheet)
 ```
 
 ## Layers
@@ -264,6 +275,38 @@ application's assets:
 
 The hash is splitmix64. The round tip is computed per dab.
 
+## Brush system: milestone 9 additions
+
+Full description: `docs/brush-engine-architecture.md`. Property reference (generated):
+`docs/brush-settings-specification.md`. Preset files: `docs/brush-preset-format.md`. Research
+and decisions: `research/milestone9-*.md`.
+
+- **Still one renderer.** Engines are combinations of `blend` and `stamp`:
+  - paint, erase, smudge and wet paint (a bounded prototype);
+  - tip, spray and hatching stamps for paint and erase.
+
+  Everything in the milestone 6 section above still holds. Milestone 6 presets render as before
+  (golden images).
+- **Sensor dynamics** (`BrushDynamics`). 12 parameters can follow 13 sensors through monotone
+  cubic curves, with five combination rules. A sensor the device does not report (pressure from
+  mouse or touch, tilt, speed without times) is left out; nothing is invented.
+  `StrokeSample::hasPressure` carries this from `CanvasItem` and the scratchpad.
+- **Property registry** (`BrushProperties`). It covers the 120-property design target: 94
+  implemented, each with a test that it changes rendering, and 26 planned with no controls.
+- **New per-dab features.** Scatter, count, size/opacity/flow/roundness/angle/colour jitters,
+  flips, density, imported tips, taper (the end is held back until pen-up), texture options
+  (rotation, contrast, brightness, invert, each dab, moving grain, random offset), blend modes
+  (multiply, screen, behind, inside), smudge dulling/colour rate/colour only, and stabiliser
+  options (pressure smoothing, jitter filter, finish at the pen).
+- **Brush Studio** (`BrushStudio`, `BrushStudioPage.qml`). Edits a copy of one preset; Done
+  stores it and Cancel drops it. Categories, search, numeric entry, curve editor, preview (with
+  simulated pressure, labelled) and a try-out pad. Reset per setting or for the whole brush,
+  Duplicate, Rename, and `.drawbrush` import/export.
+- **Library format 2.** Version 1 files read unchanged. Unknown keys are kept, and unknown
+  tip/texture ids are kept with a warning.
+- **Speed.** The milestone 6 rasteriser loop and a direct grain lookup are used when no new
+  per-pixel feature is active, so ordinary presets run at the milestone 6 speed (BENCHMARKS.md).
+
 ## Selections, transforms and the clipboard (milestone 8)
 
 Research notes: `research/selections-transforms.md` (Krita and PhotoCraft read for concepts only).
@@ -382,6 +425,34 @@ so it reads on light and dark artwork at any zoom. It is not animated.
   Interchange with other applications has not been tested (the tests run on the offscreen
   platform).
 - *Delete:* clears the selected pixels; Clear Layer does the same when there is a selection.
+
+**Milestone 9 additions** (research: `research/milestone9-*.md`, decisions D7 and D8).
+- *Several layers.*
+  - Ctrl/Shift+click, or a long press, adds a layer row to the layer selection. A plain click
+    selects one layer. Layer selection is view state, not history.
+  - Transform, Copy, Cut and Clear act on all selected layers:
+    - one `TransformSession` with one geometry and one part per layer, so the layers stay aligned;
+    - Apply prepares every layer's result first and then commits them as **one** group undo step;
+    - a locked or hidden selected layer refuses the action with a message naming it (Krita skips
+      such layers silently).
+  - Paste creates one layer per copied layer, above the topmost selected one, in one undo step.
+- *Preview of several adjacent layers without a selection.* It is drawn from one merged copy:
+  6–8× faster, measured. Apply still transforms each layer exactly. With a selection, or with
+  non-adjacent layers, each layer is previewed.
+- *Thread safety.* Transform rows render on a thread pool into a buffer detached on the calling
+  thread. Calling `scanLine()` from the workers on a shared preview copy was a data race, found by
+  a benchmark crash and fixed.
+- *New selection tools.*
+  - Polygon lasso: click corners; close with Enter, a double-click or the first point; Backspace
+    removes a corner, Esc cancels.
+  - Magic wand: tolerance, contiguous or global, active layer or all visible layers,
+    anti-aliased edge.
+  - Grow and shrink by a Euclidean distance; feather as three box blurs.
+  - Moving or transforming the selection outline only.
+  - Each is one selection undo step. Brushes still apply a feathered selection exactly once.
+- *Undo budget.* An edit larger than the whole 128 MiB budget is still not kept (milestone 1
+  rule). The canvas now shows a notice saying it cannot be undone; large multi-layer transforms
+  can reach this.
 
 ## Undo and redo
 
@@ -543,6 +614,11 @@ physical device. iOS is unverified.
 | Transform preview in separate images, rendered from the cached source | The document is never touched before Apply; Cancel is exact; no repeated resampling |
 | Catmull–Rom final filter, overshoot scaled with alpha, copies for whole-pixel moves | Interpolating (moves and flips stay exact) without fringes; full-layer moves cost a copy, not a resample (measured 50 → 1.6 ms) |
 | The selection follows the pixels on Apply | Continue shading the moved part (as in Krita) |
+| One engine with data-driven engines, sensors and a property registry (milestone 9) | Brushes stay data; every property is declared once and tested for a rendering effect (decisions D2–D4) |
+| Missing sensors are left out, never defaulted | Mouse, touch and pens without tilt behave as before whatever the curves say |
+| Milestone 6 pressure responses kept, multiplied with dynamics | Version 1 presets render unchanged; the quick panel stays simple |
+| Multi-layer transform: shared geometry, prepare-then-commit, refuse locked/hidden layers | Alignment, atomicity and no silent partial edits (decision D7) |
+| Merged-copy preview for adjacent layers without a selection | Measured 6–8× faster preview; Apply stays exact per layer |
 
 ## Limitations (known)
 
@@ -554,18 +630,17 @@ physical device. iOS is unverified.
   adds 0.1–0.22 s). During that time other file operations wait.
 - Saving to an Android `content://` document is not atomic: a write that fails part way can
   damage that file (see "Save guarantees"). The drawing and a local copy are kept.
-- Brushes: Normal blending only. One sampled tip and two textures. Smudge is colour pushing, not
-  wet paint. No colour dynamics, scatter, dual tips or stabiliser curves. Smoothing cuts corners by
-  design (by up to the string length) and is not a curve fitter.
-- Selections: rectangle, ellipse and freehand lasso only (no polygonal lasso, magic wand, colour
-  range, feather, grow/shrink or border). The outline is static, not animated. Selections are not
-  saved in files.
-- Transforms work on one layer at a time (the active layer). A character drawn on several layers
-  needs one transform per layer (found in the workflow test: enlarging a head moved the ink but
-  not the colour layer). There is no perspective, skew, warp or mesh. Pixels moved off the
-  canvas are cut off on Apply.
+- Brushes: see `docs/milestone9-known-limitations.md`. Wet paint is a prototype (no diffusion,
+  drying or pigment mixing); spray and hatching are subsets; no bristle, clone or sketch engines;
+  26 of the 120 designed properties are planned only. Smoothing cuts corners by design (by up to
+  the string length) and is not a curve fitter.
+- Selections: no colour range or border. The outline is static, not animated. Selections are
+  not saved in files.
+- Transforms: no perspective, skew, warp or mesh. Pixels moved off the canvas are cut off on
+  Apply. Apply of many large layers runs on the UI thread (2.3–3.2 s for 7 × 4096², measured).
 - During a transform drag on the whole 2048 × 1536 layer, a preview frame costs up to about 20 ms
-  plus the composite (12 ms at 10 layers), measured on a desktop CPU. Phones are unmeasured.
+  plus the composite (12 ms at 10 layers). Nine adjacent layers take 25–33 ms (merged preview);
+  7 × 4096² take 152–262 ms. Measured on a desktop CPU; phones are unmeasured.
 - Clipboard exchange with other applications is untested.
 - Drawing feel (pen pressure response, tilt, latency) is **unverified on hardware**: pressure and
   tilt were exercised only with synthetic tablet events and the emulator's touch input.

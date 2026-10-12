@@ -24,7 +24,7 @@ python tools\fetch_qt_windows.py          # once
 powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
 ```
 
-All tests must pass before handing off: `tst_core`, `tst_brush`, `tst_selection`, `tst_document`, `tst_recovery` (headless),
+All tests must pass before handing off: `tst_core`, `tst_brush`, `tst_brushengine`, `tst_selection`, `tst_document`, `tst_recovery` (headless),
 `tst_canvas` and `tst_ui` (windows; under ctest they render offscreen so they do not take over the
 user's desktop). They save screenshots to `build\windows-mingw-release\tests\tst_*.png`; look at
 them after rendering or QML changes. Do not drive the real desktop with synthetic OS input unless
@@ -109,6 +109,20 @@ push. Never commit build outputs, APKs/AABs, keystores or other credentials (see
   presets copied from other applications.
 - The temporary size never changes a saved preset; only an explicit Save does.
 - After changing the engine, tips or presets, render `brush_sheet` and look at it.
+- Every brush property is declared once in `BrushProperties` (registry). A property may be
+  marked implemented only with a scenario in `tst_brushengine::everyImplementedPropertyChangesRendering`
+  that shows a rendering change. Regenerate `docs/brush-settings-specification.md` with
+  `DRAWAPP_WRITE_SPEC=1 tst_brushengine` after registry changes.
+- Sensors without device data are left out of dynamics (`StrokeSample::hasPressure`, `hasTilt`);
+  never feed a default value into a curve. Simulated pressure in tests and previews is labelled.
+- Every random choice comes from `hash(seed, dab index, salt)` with its own salt; never use a
+  global RNG in the engine.
+- Rows rendered on worker threads get plain pointers into images detached on the calling thread;
+  never call `QImage::scanLine()` from a worker.
+- Read files with `ProjectFile::readBounded`, never `QIODevice::read(limit)` (it reserves the
+  limit).
+- Rendering changes that alter `tests/golden/stroke-*.png` must be looked at and re-recorded
+  deliberately (`DRAWAPP_WRITE_GOLDEN=1`).
 
 ## Selection and transform invariants
 

@@ -47,3 +47,11 @@ detail, so treat it as a map, not as findings.
 
 Not applicable to us: no Android or iOS target (desktop, FreeBSD and web/WebAssembly only), and
 no Qt.
+
+## Milestone 9
+
+- `milestone9-krita-brush-engine.md`: Krita's brush engines, sensors, curves, `.kpp`, multi-layer transforms (source study).
+- `milestone9-photocraft-architecture.md`: PhotoCraft's document model, selections and the empty-selection behaviour to avoid.
+- `milestone9-procreate-brush-studio.md`: Procreate's documented Brush Studio.
+- `milestone9-architecture-decisions.md`: decisions D1–D11 with reasons.
+- `milestone9-feature-parity.md`: what DrawApp has, newly has, partly has or lacks.
