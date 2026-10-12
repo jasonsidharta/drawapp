@@ -80,7 +80,7 @@ src/app/    (static QML module "drawapp_ui", URI DrawApp, used by the app and ts
   BrushPanel.qml   preset list, scratchpad, basic and advanced brush settings
   BrushStudioPage.qml, CurveEditor.qml   the Brush Studio (loaded when first opened)
   main.cpp         application setup (in the drawapp executable)
-tests/             tst_core, tst_brush, tst_brushengine, tst_tiles, tst_selection, tst_document, tst_recovery
+tests/             tst_core, tst_brush, tst_brushengine, tst_tiles, tst_fileformat, tst_selection, tst_document, tst_recovery
                    (headless); tst_canvas, tst_ui (window, offscreen under ctest); FakeProvider.h;
                    golden/ (reference strokes and preset files); bench_core, bench_canvas,
                    bench_m9, bench_tiles; brush_sheet (renders the brush test sheet)
@@ -537,8 +537,9 @@ Defined in `src/core/ProjectFile.h`.
 - **Version 3** (written since milestone 10): the version 2 header and metadata plus the tile
   size (64) and each layer's tile count; each layer block lists only its painted tiles
   (column, row, zlib block of the tile's pixels, BGRA premultiplied, exact), in row-major order.
-  Layers are never flattened when saving. Byte layout in `ProjectFile.h`; compatibility in
-  `docs/m10-file-compatibility.md`.
+  Layers are never flattened when saving. Byte layout in `ProjectFile.h`; compatibility (files
+  written by milestones 1 and 9 open identically; fuzzing) in `docs/m10-file-compatibility.md`.
+  Milestone 9 and earlier cannot open format 3 files (they say it is from a newer version).
 - **Version 2** (milestones 3–9, read): one zlib block per dense layer (8-bit RGBA premultiplied);
   opens into tiled layers, fully transparent tiles not allocated. Saving writes version 3.
 - **Version 1** (milestone 1, read only): opens as a one-layer document; saving writes version 3.

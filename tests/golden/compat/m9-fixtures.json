@@ -1,0 +1,125 @@
+{
+    "m1-manual.drawapp": {
+        "activeLayerId": "1",
+        "compositeSha256": "cad42d3eee4c7e41f74bb37a6ff6c6b3491b5df261db416d222ebe84d1fe24a1",
+        "height": 1536,
+        "layers": [
+            {
+                "id": "1",
+                "locked": false,
+                "name": "Layer 1",
+                "opacity": 1,
+                "sha256": "cad42d3eee4c7e41f74bb37a6ff6c6b3491b5df261db416d222ebe84d1fe24a1",
+                "visible": true
+            }
+        ],
+        "version": 1,
+        "width": 2048
+    },
+    "m9-android-layered.drawapp": {
+        "activeLayerId": "2",
+        "compositeSha256": "e48af641d1bbffaa37fea100b71049c40b65258381f2a5e7b91964ef72aa674c",
+        "height": 1536,
+        "layers": [
+            {
+                "id": "1",
+                "locked": false,
+                "name": "Layer 1",
+                "opacity": 1,
+                "sha256": "cfadd44a103cbd6d5726fa07b27d7aad2f67ed3930ff96901c486a5beaf7e723",
+                "visible": true
+            },
+            {
+                "id": "2",
+                "locked": false,
+                "name": "Layer 2",
+                "opacity": 1,
+                "sha256": "e48af641d1bbffaa37fea100b71049c40b65258381f2a5e7b91964ef72aa674c",
+                "visible": true
+            }
+        ],
+        "version": 2,
+        "width": 2048
+    },
+    "m9-layered.drawapp": {
+        "activeLayerId": "10",
+        "compositeSha256": "68585fa447b4b9b5d52907479ebd74d6322dafb1ba8fe6b21c7dc074106f9f8f",
+        "height": 197,
+        "layers": [
+            {
+                "id": "3",
+                "locked": true,
+                "name": "Paper",
+                "opacity": 1,
+                "sha256": "49481953dec1367ba0c5eb4ac4209c8d739f3b072e7c17fac093890709e6d80b",
+                "visible": true
+            },
+            {
+                "id": "10",
+                "locked": false,
+                "name": "Sketch ✏ 素描",
+                "opacity": 0.37,
+                "sha256": "099a2e5f1b0d499288c494c3f9d75a00f77d1c33f72dff0b0f597b12313dcf65",
+                "visible": false
+            },
+            {
+                "id": "42",
+                "locked": false,
+                "name": "Colour",
+                "opacity": 1,
+                "sha256": "f0957b967ec7c3fcbab9f11754496395765716ecfba6fcc9a002e131fc799da2",
+                "visible": true
+            }
+        ],
+        "width": 301
+    },
+    "m9-layered.drawrecovery": {
+        "activeLayerId": "10",
+        "compositeSha256": "68585fa447b4b9b5d52907479ebd74d6322dafb1ba8fe6b21c7dc074106f9f8f",
+        "height": 197,
+        "layers": [
+            {
+                "id": "3",
+                "locked": true,
+                "name": "Paper",
+                "opacity": 1,
+                "sha256": "49481953dec1367ba0c5eb4ac4209c8d739f3b072e7c17fac093890709e6d80b",
+                "visible": true
+            },
+            {
+                "id": "10",
+                "locked": false,
+                "name": "Sketch ✏ 素描",
+                "opacity": 0.37,
+                "sha256": "099a2e5f1b0d499288c494c3f9d75a00f77d1c33f72dff0b0f597b12313dcf65",
+                "visible": false
+            },
+            {
+                "id": "42",
+                "locked": false,
+                "name": "Colour",
+                "opacity": 1,
+                "sha256": "f0957b967ec7c3fcbab9f11754496395765716ecfba6fcc9a002e131fc799da2",
+                "visible": true
+            }
+        ],
+        "width": 301
+    },
+    "m9-sparse.drawapp": {
+        "activeLayerId": "1",
+        "compositeSha256": "4ff700b871092c8d1335bbe3302bc443cbe798c173a919558534159cde3c6f84",
+        "height": 1536,
+        "layers": [
+            {
+                "id": "1",
+                "locked": false,
+                "name": "Layer 1",
+                "opacity": 1,
+                "sha256": "4ff700b871092c8d1335bbe3302bc443cbe798c173a919558534159cde3c6f84",
+                "visible": true
+            }
+        ],
+        "width": 2048
+    },
+    "writtenBy": "DrawApp milestone 9, commit 7469a69 (ProjectFile format 2, RecoveryFile format 2)"
+}

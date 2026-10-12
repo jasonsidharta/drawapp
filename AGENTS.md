@@ -24,7 +24,7 @@ python tools\fetch_qt_windows.py          # once
 powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
 ```
 
-All tests must pass before handing off: `tst_core`, `tst_brush`, `tst_brushengine`, `tst_tiles`, `tst_selection`, `tst_document`, `tst_recovery` (headless),
+All tests must pass before handing off: `tst_core`, `tst_brush`, `tst_brushengine`, `tst_tiles`, `tst_fileformat`, `tst_selection`, `tst_document`, `tst_recovery` (headless),
 `tst_canvas` and `tst_ui` (windows; under ctest they render offscreen so they do not take over the
 user's desktop). They save screenshots to `build\windows-mingw-release\tests\tst_*.png`; look at
 them after rendering or QML changes. Do not drive the real desktop with synthetic OS input unless
