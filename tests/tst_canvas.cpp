@@ -62,6 +62,7 @@ private:
     std::unique_ptr<QPointingDevice> m_pen;
     std::unique_ptr<QPointingDevice> m_penNoPressure;
     std::unique_ptr<QPointingDevice> m_eraserTip;
+    std::unique_ptr<QPointingDevice> m_tiltPen;
     QPointingDevice *m_touch = nullptr;
 
     // Starts an asynchronous file operation and waits for its result: empty string on success,
@@ -124,11 +125,11 @@ private:
     }
 
     void sendTablet(QEvent::Type type, const QPointingDevice *device, const QPointF &pos, qreal pressure,
-                    Qt::MouseButton button = Qt::LeftButton)
+                    Qt::MouseButton button = Qt::LeftButton, QPointF tilt = {})
     {
         const Qt::MouseButtons buttons = type == QEvent::TabletRelease ? Qt::NoButton : Qt::MouseButtons(button);
-        QTabletEvent event(type, device, pos, m_window->mapToGlobal(pos), pressure, 0, 0, 0, 0, 0,
-                           Qt::NoModifier, button, buttons);
+        QTabletEvent event(type, device, pos, m_window->mapToGlobal(pos), pressure, float(tilt.x()), float(tilt.y()), 0, 0,
+                           0, Qt::NoModifier, button, buttons);
         QCoreApplication::sendEvent(m_window.get(), &event);
     }
 
@@ -159,6 +160,11 @@ private slots:
         m_eraserTip = std::make_unique<QPointingDevice>(
             "synthetic pen eraser", 1003, QInputDevice::DeviceType::Stylus, QPointingDevice::PointerType::Eraser,
             QInputDevice::Capability::Position | QInputDevice::Capability::Pressure, 1, 3);
+        m_tiltPen = std::make_unique<QPointingDevice>(
+            "synthetic pen with tilt", 1004, QInputDevice::DeviceType::Stylus, QPointingDevice::PointerType::Pen,
+            QInputDevice::Capability::Position | QInputDevice::Capability::Pressure | QInputDevice::Capability::XTilt
+                | QInputDevice::Capability::YTilt,
+            1, 3);
         m_touch = QTest::createTouchDevice();
     }
 
@@ -310,6 +316,34 @@ private slots:
         QVERIFY2(thick > 34, qPrintable(QString::number(thick)));
         QVERIFY(m_canvas->inputStatus().contains("pressure"));
         screenshot("pen_pressure");
+    }
+
+    void penTiltIsUsedOnlyWhenReported()
+    {
+        // Sketch Pencil shades wider with a tilted pen. The same tilt values from a pen that does not
+        // report tilt (or the mouse) change nothing.
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.sketch-pencil")));
+        m_canvas->setBrushSize(16);
+        const auto penStroke = [&](const QPointingDevice *pen, int y, QPointF tilt) {
+            sendTablet(QEvent::TabletPress, pen, QPointF(100, y), 1.0, Qt::LeftButton, tilt);
+            for (int i = 1; i <= 20; ++i)
+                sendTablet(QEvent::TabletMove, pen, QPointF(100 + 25 * i, y), 1.0, Qt::LeftButton, tilt);
+            sendTablet(QEvent::TabletRelease, pen, QPointF(600, y), 1.0, Qt::LeftButton, tilt);
+        };
+        const auto width = [&](int y) {
+            int n = 0;
+            for (int dy = -40; dy <= 40; ++dy)
+                n += alphaAt(toDoc(QPointF(350, y + dy))) > 0;
+            return n;
+        };
+        penStroke(m_tiltPen.get(), 150, {0, 0});
+        penStroke(m_tiltPen.get(), 300, {60, 0});
+        penStroke(m_pen.get(), 450, {60, 0});
+        const int upright = width(150), tilted = width(300), unreported = width(450);
+        QVERIFY2(tilted >= upright * 2, qPrintable(QString("%1 %2").arg(upright).arg(tilted)));
+        QVERIFY2(std::abs(unreported - upright) <= 3, qPrintable(QString("%1 %2").arg(upright).arg(unreported)));
+        QCOMPARE(m_canvas->history().undoCount(), 3);
+        screenshot("pen_tilt");
     }
 
     void penWithoutPressureUsesFullSize()

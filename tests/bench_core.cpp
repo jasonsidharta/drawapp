@@ -1,7 +1,8 @@
 // Times the CPU paths the app uses, for documents with 1, 5 and 10 layers. Prints Markdown tables.
 // These are CPU processing times on the calling thread, not input-to-display latency.
-// Usage: bench_core [repetitions]
+// Usage: bench_core [repetitions] [presets]   ("presets": only the brush preset tables)
 
+#include "BrushPresets.h"
 #include "LayeredDocument.h"
 #include "ProjectFile.h"
 #include "RasterDocument.h"
@@ -24,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #ifdef Q_OS_WIN
@@ -334,6 +336,82 @@ void brushEngineBench(int reps)
     }
 }
 
+// Every built-in preset at its own size and at a large size, per input event of the 1000-event
+// zig-zag (8 ms apart, pressure varying), on documents with 1, 5 and 10 layers: engine + undo
+// capture + composite refresh. Then the first event after a recovery snapshot (copy-on-write
+// layer copy) against the next one, for a small and a large brush.
+void presetBench(int reps)
+{
+    std::vector<StrokeSample> samples = zigZag();
+    for (size_t i = 0; i < samples.size(); ++i)
+        samples[i].timeMs = i * 8.0;
+    const int strokes = std::max(1, reps / 10);
+    std::printf("\n### Brush presets: one input event of a 1000-event stroke (engine + undo capture + composite refresh)\n\n");
+    std::printf("Coverage tiles are 64 x 64 x 16-bit (8 KiB); the undo snapshot holds the touched 64 x 64 layer tiles.\n");
+    for (int layers : {1, 5, 10}) {
+        LayeredDocument doc = makeDocument(layers);
+        const int active = doc.activeIndex();
+        std::printf("\n%d layer(s):\n\n| Preset | size px | median ms | p95 ms | max ms | coverage tiles | engine KiB | undo snapshot MiB |\n"
+                    "|---|---|---|---|---|---|---|---|\n", layers);
+        for (const BrushPreset &preset : BrushPresets::builtIns()) {
+            for (double size : {preset.settings.size, 200.0}) {
+                BrushSettings settings = preset.settings;
+                settings.size = size;
+                std::vector<double> events;
+                int tiles = 0;
+                qsizetype engineBytes = 0, snapshotBytes = 0;
+                for (int r = 0; r < strokes; ++r) {
+                    StrokeEngine engine(settings, QColor(30, 40, 90), quint64(r + 1), 0);
+                    TileSnapshot before;
+                    for (size_t i = 0; i < samples.size(); ++i) {
+                        QElapsedTimer t;
+                        t.start();
+                        QRect changed = i == 0 ? engine.begin(doc.pixels(active), samples[i], before)
+                                               : engine.moveTo(doc.pixels(active), samples[i], before);
+                        if (i + 1 == samples.size())
+                            changed |= engine.finish(doc.pixels(active), before);
+                        doc.refreshComposite(changed);
+                        events.push_back(t.nsecsElapsed() / 1e6);
+                    }
+                    tiles = engine.coverageTileCount();
+                    engineBytes = engine.bufferBytes();
+                    snapshotBytes = before.byteSize();
+                    before.swapWith(doc.pixels(active)); // undo, so every repetition starts from the same pixels
+                    doc.refreshComposite();
+                }
+                const Stats st = summarize(events);
+                std::printf("| %s | %.0f | %.3f | %.3f | %.3f | %d | %.0f | %.1f |\n", qPrintable(settings.name), size,
+                            st.medianMs, st.p95Ms, st.maxMs, tiles, engineBytes / 1024.0, snapshotBytes / 1048576.0);
+            }
+        }
+        // First stroke event after a snapshot (autosave / save) pays for copying the shared layer.
+        for (const char *id : {"builtin.clean-ink", "builtin.textured-paint"}) {
+            BrushSettings settings = BrushPresets::builtIn(QString::fromLatin1(id))->settings;
+            if (QLatin1String(id) == QLatin1String("builtin.textured-paint"))
+                settings.size = 200;
+            std::vector<double> first, next;
+            for (int r = 0; r < reps; ++r) {
+                const DocumentData snapshot = doc.snapshot();
+                StrokeEngine engine(settings, Qt::black, 1, 0);
+                TileSnapshot before;
+                QElapsedTimer t;
+                t.start();
+                doc.refreshComposite(engine.begin(doc.pixels(active), samples[0], before));
+                first.push_back(t.nsecsElapsed() / 1e6);
+                t.restart();
+                doc.refreshComposite(engine.moveTo(doc.pixels(active), samples[1], before));
+                next.push_back(t.nsecsElapsed() / 1e6);
+                before.swapWith(doc.pixels(active));
+                doc.refreshComposite();
+            }
+            const Stats a = summarize(first), b = summarize(next);
+            std::printf("| first event after a snapshot, %s %.0f px | | %.3f | %.3f | %.3f | (next event: median %.3f) | | |\n",
+                        qPrintable(settings.name), settings.size, a.medianMs, a.p95Ms, a.maxMs, b.medianMs);
+        }
+        std::printf("\nProcess private memory with this document: %.0f MiB\n", privateMiB());
+    }
+}
+
 void renderBench(const char *label, qreal zoom, const QRect &exposed, int reps)
 {
     LayeredDocument doc = makeDocument(5);
@@ -355,8 +433,13 @@ int main(int argc, char **argv)
     std::printf("%s, %s; canvas %dx%d\n", qPrintable(QSysInfo::prettyProductName()),
                 qPrintable(QSysInfo::currentCpuArchitecture()), LayeredDocument::DefaultWidth,
                 LayeredDocument::DefaultHeight);
+    if (argc > 2 && std::strcmp(argv[2], "presets") == 0) {
+        presetBench(reps);
+        return 0;
+    }
     singleLayerComparison(reps);
     brushEngineBench(reps);
+    presetBench(reps);
     for (int layers : {1, 5, 10})
         layerBench(layers, reps);
     std::printf("\n### View rendering (composite cache drawn through the view; independent of layer count)\n\n");

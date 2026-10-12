@@ -636,6 +636,66 @@ private slots:
         QVERIFY(before.tileCount() <= 100);
     }
 
+    // --- artefacts the brush sheet is inspected for ---
+    void noSeamsAtCoverageTileBorders()
+    {
+        // The same soft stroke at two alignments to the 64-pixel tiles: only the 8-bit dither
+        // (which is tied to the pixel grid) may differ, by at most one level.
+        BrushSettings s = roundBrush(70, 0.8);
+        s.hardness = 0.2;
+        QImage a = transparent(400, 300), b = transparent(400, 300);
+        StrokeEngine::render(a, s, Qt::black, line({{40, 60}, {300, 200}, {120, 240}}, 9));
+        StrokeEngine::render(b, s, Qt::black, line({{72, 92}, {332, 232}, {152, 272}}, 9));
+        int worst = 0;
+        for (int y = 0; y < 268; ++y)
+            for (int x = 0; x < 368; ++x)
+                worst = std::max(worst, std::abs(qAlpha(a.pixel(x, y)) - qAlpha(b.pixel(x + 32, y + 32))));
+        QVERIFY2(worst <= 1, qPrintable(QString::number(worst)));
+    }
+
+    void noHalosOnTransparency()
+    {
+        // Paint on a transparent layer keeps its own colour at every coverage: no dark or light
+        // fringes when the layer is composited over anything.
+        for (const BrushPreset &p : BrushPresets::builtIns()) {
+            if (p.settings.blend != BrushBlend::Paint)
+                continue;
+            for (const QColor &c : {QColor(255, 255, 255), QColor(200, 30, 30), QColor(0, 0, 0)}) {
+                QImage image = transparent(260, 120);
+                StrokeEngine::render(image, p.settings, c, line({{30, 60}, {130, 40}, {230, 70}}, 10, 0.7));
+                for (int y = 0; y < image.height(); ++y)
+                    for (int x = 0; x < image.width(); ++x) {
+                        const QRgb px = image.pixel(x, y);
+                        if (qAlpha(px) < 16)
+                            continue;
+                        const QRgb straight = qUnpremultiply(px);
+                        const int d = std::max({std::abs(qRed(straight) - c.red()), std::abs(qGreen(straight) - c.green()),
+                                                std::abs(qBlue(straight) - c.blue())});
+                        QVERIFY2(d <= 8, qPrintable(QString("%1 at %2,%3: %4").arg(p.id).arg(x).arg(y).arg(d)));
+                    }
+            }
+        }
+    }
+
+    void noStampBandsAlongAStroke()
+    {
+        // Along the centre of a straight stroke, coverage is even: no periodic dab pattern.
+        for (const char *id : {"builtin.soft-airbrush", "builtin.solid-round", "builtin.clean-ink", "builtin.soft-eraser"}) {
+            BrushSettings s = BrushPresets::builtIn(QString::fromLatin1(id))->settings;
+            s.airbrush = false; // the event timing of this synthetic line is not what is being tested
+            s.blend = BrushBlend::Paint;
+            s.size = std::min(s.size, 60.0);
+            QImage image = transparent(500, 100);
+            StrokeEngine::render(image, s, Qt::black, line({{20, 50}, {480, 50}}, 40));
+            int lo = 255, hi = 0;
+            for (int x = 120; x <= 380; ++x) {
+                lo = std::min(lo, qAlpha(image.pixel(x, 50)));
+                hi = std::max(hi, qAlpha(image.pixel(x, 50)));
+            }
+            QVERIFY2(hi - lo <= 3, qPrintable(QString("%1: %2..%3").arg(id).arg(lo).arg(hi)));
+        }
+    }
+
     // --- built-in presets ---
     void builtInPresetsAreValidAndDistinct()
     {

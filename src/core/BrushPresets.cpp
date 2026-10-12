@@ -75,7 +75,7 @@ std::vector<BrushPreset> makeBuiltIns()
         s.pressureSize = {true, 0.55, 1.0};
         s.pressureFlow = {true, 0.45, 1.0};
         s.texture = QStringLiteral("canvas");
-        s.textureStrength = 0.25;
+        s.textureStrength = 0.14; // stronger reads as a mesh rather than grain (brush sheet)
         s.smoothing = 15;
         list.push_back(preset("textured-paint", "Textured Paint", s));
     }

@@ -63,6 +63,7 @@ DocumentData makeDocument(int layers)
 
 qreal g_opacity = 1.0;
 int g_smoothing = 0;
+QString g_preset;
 
 void run(int layers)
 {
@@ -81,9 +82,14 @@ void run(int layers)
     canvas->openFile(QUrl::fromLocalFile(project));
     if (!QTest::qWaitFor([&] { return opened.count() > 0; }, 30000))
         return;
-    canvas->setBrushSize(12);
-    canvas->setBrushOpacity(g_opacity);
-    canvas->setSmoothing(g_smoothing);
+    if (!g_preset.isEmpty()) {
+        // A preset as it is, with its own size and settings.
+        canvas->brushes()->select(g_preset);
+    } else {
+        canvas->setBrushSize(12);
+        canvas->setBrushOpacity(g_opacity);
+        canvas->setSmoothing(g_smoothing);
+    }
 
     RecoveryManager recovery(dir.filePath("recovery"));
     canvas->setAutosaveInterval(1000);
@@ -168,11 +174,15 @@ void run(int layers)
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
-    // Usage: bench_canvas [brush opacity 0..1] [smoothing 0..100]
+    // Usage: bench_canvas [brush opacity 0..1] [smoothing 0..100] [preset id, e.g. builtin.textured-paint]
     if (argc > 1)
         g_opacity = std::atof(argv[1]);
     if (argc > 2)
         g_smoothing = std::atoi(argv[2]);
+    if (argc > 3)
+        g_preset = QString::fromLocal8Bit(argv[3]);
+    if (!g_preset.isEmpty())
+        std::printf("Preset: %s (its own settings; opacity and smoothing arguments ignored).\n", argv[3]);
     std::printf("Platform: %s. Synthetic mouse strokes at 250 Hz; autosave every 1 s; one async save at ~5 s; "
                 "brush 12 px, opacity %.0f %%, smoothing %d.\n",
                 qPrintable(QGuiApplication::platformName()), g_opacity * 100, g_smoothing);
