@@ -85,6 +85,24 @@ Memory (whole process, same runs):
   takes 155 ms (about 6 fps) and the per-layer preview about 1 s, the same order as milestone 9.
   A reduced-resolution preview was not built (`docs/m10-known-limitations.md`).
 
+### After the A/B runs: transform without a base copy
+
+On the Android emulator a five-layer 4096² transform kept 868 of its 980 MiB, so Apply was then
+refused (`BUILD.md`, milestone 10 emulator results). Without a selection the session kept, per
+layer, a "base" (layer minus source) that is entirely transparent; it is no longer kept. One run of
+the transform section afterwards (`docs/benchmarks/m10-transform-nobase.md`; the emulator shut
+down), against the milestone 10 medians above:
+
+| Workload | Session memory before → after | begin before → after (ms) |
+|---|---|---|
+| 9 × 2048 × 1536, no selection | 238 → 136 MiB | 118 → 70 |
+| 7 × 4096², no selection | 1021 → 583 MiB | 476 → 359 |
+
+The memory saving follows from the change (one dense copy per layer instead of two, plus the
+reductions); the begin times are from a single run and were not re-measured interleaved with
+milestone 9, so the "begin 1.10–1.14×" regression above is probably gone but is not claimed as
+measured. With a selection nothing changed (the remainder must stay behind).
+
 ## Workloads only milestone 10 can open
 
 `docs/benchmarks/m10-only-workloads.md` and `m10-heavy-rerun.md`.

@@ -3161,6 +3161,47 @@ private slots:
         MemoryBudget::release(wanted, MemoryBudget::Category::Temporary);
         QVERIFY(m_canvas->history().undoCount() < steps);
     }
+
+    void transformWithoutSelectionKeepsOneCopyPerLayer()
+    {
+        // Found on the Android emulator: five 4096² layers kept a transparent "base" copy each
+        // besides the source, 868 of 980 MiB, and Apply was then refused. Without a selection
+        // everything in the rectangle moves, so only the source (and its reductions) is kept.
+        const auto [colour, ink] = twoLayerCharacter();
+        m_canvas->setLayerSelected(colour, true);
+        const qint64 previewBefore = MemoryBudget::used(MemoryBudget::Category::Preview);
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        const TransformSession &session = m_canvas->transformSession();
+        const QRect rect = session.sourceRect();
+        const qsizetype perPart = qsizetype(rect.width()) * rect.height() * 4;
+        QCOMPARE(session.partCount(), 3);
+        QVERIFY2(session.byteSize() < session.partCount() * perPart * 3 / 2,
+                 qPrintable(QString::number(session.byteSize())));
+        // The reservation matches (the merged preview layer's own tiles come on top).
+        QVERIFY(MemoryBudget::used(MemoryBudget::Category::Preview) - previewBefore
+                < session.partCount() * perPart * 3 / 2 + qint64(m_canvas->width()) * m_canvas->height() * 4);
+        // Rotated and applied, every pixel outside the moved area is still the original (the
+        // missing base reads as transparent only inside the source rectangle).
+        const QImage ink0 = layerImage(layerIndex(ink)).copy();
+        m_canvas->setTransformValue("rotation", 90);
+        m_canvas->applyTransform();
+        QVERIFY(!m_canvas->isTransforming());
+        const QImage ink1 = layerImage(layerIndex(ink));
+        const QRect target = rect.united(QRect(QPoint(rect.center().x() - rect.height() / 2 - 2, rect.center().y() - rect.width() / 2 - 2),
+                                               QSize(rect.height() + 4, rect.width() + 4)));
+        for (int y = 0; y < ink0.height(); y += 3)
+            for (int x = 0; x < ink0.width(); x += 3)
+                if (!target.contains(x, y))
+                    QCOMPARE(ink1.pixel(x, y), ink0.pixel(x, y));
+        // With a selection the remainder is still kept: what is left behind stays.
+        m_canvas->undo();
+        m_canvas->setLayerSelected(colour, false);
+        m_canvas->selectAll();
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        const QRect selected = m_canvas->transformSession().sourceRect();
+        QVERIFY(m_canvas->transformSession().byteSize() >= qsizetype(selected.width()) * selected.height() * 4 * 2);
+        m_canvas->cancelTransform();
+    }
 };
 
 QTEST_MAIN(TestCanvas)

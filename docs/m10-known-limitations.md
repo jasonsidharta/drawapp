@@ -30,6 +30,13 @@ What milestone 10 does not do, does only partly, or did not verify. Measured num
 - **Format 3 file size**: smaller than format 2 for sparse drawings, larger for fully painted
   canvases (per-tile compression; measured in `docs/m10-file-compatibility.md`).
 - **Opening format 2 files** still decodes each layer densely, one at a time, before tiling it.
+- **Transform memory.** The session still keeps a dense source (and its reductions, about a third
+  more) per layer over the moved rectangle, plus a base with a selection. Five nearly full 4096²
+  layers take about 500 MiB while the preview is open, half of a 4 GB device's limit; more or
+  larger layers are refused at the start of the transform on such devices (with a message,
+  nothing changed). A tiled or reduced-resolution source would lower this; not done.
+- **Merged preview copy.** Adjacent layers without a selection get one more merged part for the
+  fast preview, which costs as much as one more layer.
 
 ## Not verified
 
@@ -37,8 +44,10 @@ What milestone 10 does not do, does only partly, or did not verify. Measured num
   no `libasan`/`libtsan`, and neither clang nor MSVC is installed (checked by building a test
   program). UndefinedBehaviorSanitizer in trap mode was run (`docs/m10-test-results.md`).
 - **Physical devices.** No phone, tablet or pen hardware was available. Android was checked on
-  the emulator only (`docs/m10-test-results.md`); the emulator says nothing about pressure, tilt,
-  latency or real device memory pressure.
+  the emulator only (`BUILD.md`, "Milestone 10 emulator results": large canvases, the memory
+  dialog, background Apply with Stop, Home during Apply, recovery; four defects found and fixed).
+  The emulator says nothing about pressure, tilt, latency or real device memory pressure; saving
+  a format 3 file through the Android picker was not checked.
 - **Hands-on artist use.** The fifteen workflows (`docs/m10-artist-workflows.md`) use synthetic
   input.
 - **Comparison with Krita and other applications** (`docs/m10-comparison-checklist.md`): not run.

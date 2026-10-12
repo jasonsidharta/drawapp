@@ -221,9 +221,13 @@ bool TransformSession::begin(const std::vector<TiledImage> &layers, const Select
     }
     if (rect.isEmpty())
         return false;
-    // The dense caches: base and source per layer, plus the source's reductions (about a third).
+    // The dense caches: source per layer plus its reductions (about a third), and the base only
+    // with a selection (without one everything in the rectangle is source and the base is
+    // transparent: on the Android emulator five 4096² layers plus the merged preview otherwise
+    // held 868 of 980 MiB, and Apply had no room left).
+    const bool withBase = selection.isActive();
     const qint64 perLayer = qint64(rect.width()) * rect.height() * 4;
-    const qint64 wanted = qint64(layers.size()) * (perLayer * 2 + perLayer / 3 + 64);
+    const qint64 wanted = qint64(layers.size()) * (perLayer * (withBase ? 2 : 1) + perLayer / 3 + 64);
     if (!MemoryBudget::tryReserve(wanted, MemoryBudget::Category::Preview)) {
         m_beginOutOfMemory = true;
         return false;
@@ -234,9 +238,10 @@ bool TransformSession::begin(const std::vector<TiledImage> &layers, const Select
     for (const TiledImage &layer : layers) {
         Part part;
         part.original = layer; // a snapshot: shares the layer's tiles, read only
-        part.base = QImage(rect.size(), QImage::Format_ARGB32_Premultiplied);
+        if (withBase)
+            part.base = QImage(rect.size(), QImage::Format_ARGB32_Premultiplied);
         QImage source(rect.size(), QImage::Format_ARGB32_Premultiplied);
-        if (part.base.isNull() || source.isNull()) {
+        if ((withBase && part.base.isNull()) || source.isNull()) {
             end(); // out of memory: nothing started
             m_beginOutOfMemory = true;
             return false;
@@ -248,8 +253,12 @@ bool TransformSession::begin(const std::vector<TiledImage> &layers, const Select
             readOriginal(layer, y, rect.left(), rect.right() + 1, row.data());
             const QRgb *in = row.data() - rect.left();
             const uchar *s = selection.isActive() ? selection.mask().constScanLine(y) : nullptr;
-            QRgb *base = reinterpret_cast<QRgb *>(part.base.scanLine(y - rect.top()));
             QRgb *src = reinterpret_cast<QRgb *>(source.scanLine(y - rect.top()));
+            if (!withBase) {
+                std::memcpy(src, in + rect.left(), size_t(rect.width()) * 4);
+                continue;
+            }
+            QRgb *base = reinterpret_cast<QRgb *>(part.base.scanLine(y - rect.top()));
             for (int x = rect.left(); x <= rect.right(); ++x) {
                 const QRgb p = in[x];
                 const quint32 c = s ? s[x] : 255;
@@ -606,6 +615,10 @@ void TransformSession::renderRows(const Part &part, const QRect &area, Quality q
         const int b0 = std::max(x0, m_sourceRect.left()), b1 = std::min(x1, m_sourceRect.right() + 1);
         if (b0 >= b1)
             return;
+        if (part.base.isNull()) { // no selection: everything in the rectangle moves
+            std::memset(dst + (b0 - x0), 0, size_t(b1 - b0) * 4);
+            return;
+        }
         const QRgb *base = reinterpret_cast<const QRgb *>(part.base.constScanLine(y - m_sourceRect.top()));
         std::memcpy(dst + (b0 - x0), base + (b0 - m_sourceRect.left()), size_t(b1 - b0) * 4);
     };

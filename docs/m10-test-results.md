@@ -18,9 +18,9 @@ init/cleanup and data rows):
 | tst_selection | 34 | 34 | |
 | tst_document | 63 | 86 | format 3 damaged-file cases (19), format 2 reading, sparse 16384² file, opening under memory pressure, undo memory on blank tiles |
 | tst_recovery | 28 | 28 | (updated for format 3) |
-| tst_canvas | 100 | 116 | background Apply (equivalence, blocked edits, cancel at four stages, worker failure, implicit apply, destruction, stale results, 150-round stress), "cannot be undone" confirmations, undo eviction, memory report, export refusal |
+| tst_canvas | 100 | 118 | background Apply (equivalence, blocked edits, cancel at four stages, worker failure, implicit apply, destruction, stale results, 150-round stress), "cannot be undone" confirmations, undo eviction, memory report, export refusal; two regressions found on the Android emulator (hopeless requests keep the undo history; a transform without a selection keeps one dense copy per layer) |
 | tst_ui | 13 | 15 | memory dialogs; fifteen artist workflows (`docs/m10-artist-workflows.md`) |
-| **Total** | 337 | **422** | |
+| **Total** | 337 | **424** | |
 
 The brush sheet was rendered and looked at after the engine changes; the window-test
 screenshots were looked at (`docs/m10-artist-workflows.md`).

@@ -238,6 +238,28 @@ deleting the file; cloud or stream-only providers.
 What is and is not guaranteed for local files and for provider documents is in ARCHITECTURE.md,
 "Save guarantees".
 
+**Milestone 10 emulator results, 2026-10-12** (same AVD: 4 GB RAM, so the memory limit is
+979.9 MiB and the undo budget 245 MiB; `-no-window`; touch from `adb shell input`, i.e.
+automated taps and swipes, not hands-on drawing; x86_64 debug APK of the milestone 10 code,
+reinstalled after each fix):
+
+| Check | Result |
+|---|---|
+| File → Memory usage… | Limit 979.9 MiB, undo budget 245 MiB, categories listed |
+| File → New canvas… 16384 × 16384, touch strokes | Created and drawn on; 84.5 MiB in use |
+| Recovery after reinstall (process killed) | Prompt offered; the 16384² and later a 4096² five-layer drawing were restored |
+| Transform far larger than the limit | Refused with the reason; every undo step kept (see fixes) |
+| 4096² single-layer rotate, Apply | Committed in about 1 s; Undo available |
+| Five 4096² layers selected by long-press, rotated 30.5°, Apply | "Applying… 0 %", progress bar and Stop shown in the toolbar; committed in the background |
+| Stop during Apply | "Apply cancelled. Nothing was changed; the preview is still open."; history unchanged (Redo still available) |
+| Back during an open transform, then return | Same process; the 45° preview still open |
+| Home during Apply, then return | Same process; Apply finished while in the background, result committed, recovery data saved |
+| Fixed during testing (1) | A request larger than the whole limit evicted every undo step and was refused anyway; now refused without giving anything up, and old undo steps are given up only if that makes room (`tst_canvas::hopelessRequestsKeepTheUndoHistory`) |
+| Fixed during testing (2) | The free-memory guard read MemFree (325 MiB) instead of MemAvailable (1980 MiB) and refused a 150 MB transform; now reads `/proc/meminfo` MemAvailable |
+| Fixed during testing (3) | A black strip below the toolbar after it re-wrapped; the canvas now redraws fully on resize |
+| Fixed during testing (4) | Five-layer 4096² transform: the preview kept 867.5 of 979.9 MiB (a transparent "base" copy per layer without a selection), so Apply was refused with "Not enough memory". Now 499.7 MiB; Apply committed ("Applying… 35 %" seen) (`tst_canvas::transformWithoutSelectionKeepsOneCopyPerLayer`) |
+| Not checked | Pen pressure and tilt (no pen), stroke latency and frame rate (an emulator says nothing about device performance), saving a format 3 file through the system picker, physical devices, low-memory kills by Android during a save |
+
 ### Physical Android device (arm64): install and test
 
 Nothing below has been run yet; no device was available.
@@ -326,8 +348,8 @@ Resolve the Qt LGPL/static linking question (ARCHITECTURE.md) before shipping.
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 8/8 suites, milestone 9 (tst_core 34, tst_brush 37, tst_brushengine 28, tst_selection 34, tst_document 63, tst_recovery 28, tst_canvas 100, tst_ui 13; QtTest totals including init/cleanup and data rows). Milestones 0–2 were driven on the desktop with real input. Milestones 3–8 (layers, async files, brush presets and panel, selections and transforms, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots and the brush test sheet inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
-| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall; milestone 6 brush panel, presets, scratchpad and airbrush by touch; milestone 8 selection, transform, copy and paste by touch; milestone 9 Brush Studio by touch |
-| Android arm64 | **Built; not run on a physical device** | Debug APK (development key) rebuilt for milestone 9. Same source as the emulator build. Pen pressure and tilt, brush feel, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 10/10 suites, milestone 10 (tst_core 34, tst_brush 37, tst_brushengine 30, tst_tiles 30, tst_fileformat 12, tst_selection 34, tst_document 86, tst_recovery 28, tst_canvas 118, tst_ui 15 = 424; QtTest totals including init/cleanup and data rows). UndefinedBehaviorSanitizer build passed; AddressSanitizer and ThreadSanitizer are not available in this toolchain (`docs/m10-test-results.md`). Milestones 0–2 were driven on the desktop with real input. Milestones 3–8 (layers, async files, brush presets and panel, selections and transforms, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots and the brush test sheet inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
+| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall; milestone 6 brush panel, presets, scratchpad and airbrush by touch; milestone 8 selection, transform, copy and paste by touch; milestone 9 Brush Studio by touch; milestone 10 large canvases, memory dialog, background Apply with Stop, Home during Apply, recovery of 16384² and 4096² drawings (four defects found and fixed) |
+| Android arm64 | **Built; not run on a physical device** | Debug APK (development key) rebuilt for milestone 10. Same source as the emulator build. Pen pressure and tilt, brush feel, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
 | Linux | **Blocked** | Needs the owner to run one `sudo apt install` command (above); everything after it is prepared |
 | iOS / iPadOS | **Blocked** | Needs a Mac with Xcode 16+ (above) |

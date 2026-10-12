@@ -392,7 +392,8 @@ so it reads on light and dark artwork at any zoom. It is not animated.
   active layer's content (cropped to its non-transparent bounds).
 - *Begin caches the source once:*
   - `source = layer × s`;
-  - `base = layer − source` (exactly complementary, rounding included);
+  - `base = layer − source` (exactly complementary, rounding included), kept only with a
+    selection: without one everything in the rectangle is source and the base is transparent;
   - 2× reductions of the source for prefiltering large reductions.
 - *Preview:* every preview is rendered from that source, never from an earlier preview:
   - into a separate preview layer and preview composite (shallow copies of the document's
@@ -448,9 +449,11 @@ so it reads on light and dark artwork at any zoom. It is not animated.
     never in it), and include the result after Apply;
   - closing the window discards the preview, and the unsaved-changes prompt is as before.
 - *Memory while transforming:* the preview layers and composite share tiles with the document
-  except where the preview differs; the base (only with a selection) and the source with its
-  reductions are dense over the source rectangle (about 2.33 × it per layer) and reserved against
-  `MemoryBudget` when the transform starts, which refuses it with a message if it does not fit.
+  except where the preview differs; the source with its reductions, and the base with a
+  selection, are dense over the source rectangle (about 1.33 × it per layer without a selection,
+  2.33 × with one) and reserved against `MemoryBudget` when the transform starts, which refuses it
+  with a message if it does not fit. (Until the milestone 10 emulator check the base was kept
+  without a selection too; five 4096² layers then held 868 of 980 MiB and Apply had no room.)
 
 **Copy, Cut and Paste.**
 - *Copy:* takes the active layer's pixels × selection (soft edges become partial alpha), trimmed

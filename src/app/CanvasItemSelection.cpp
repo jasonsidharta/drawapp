@@ -743,7 +743,8 @@ void CanvasItem::commitApply(const TransformApply::Result &result)
         return;
     if (!result.ok) {
         emit notice(result.outOfMemory
-                        ? QStringLiteral("Not enough memory to apply the transform. Nothing was changed; the preview is still open.")
+                        ? QStringLiteral("Not enough memory to apply the transform (%1). Nothing was changed; the preview is still open.")
+                              .arg(MemoryBudget::shortageText())
                         : QStringLiteral("The transform was not applied. Nothing was changed; the preview is still open."));
         updateAll();
         return;
