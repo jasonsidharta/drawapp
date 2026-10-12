@@ -17,6 +17,8 @@ add_library(drawcore STATIC
     src/core/BrushPresetStore.cpp src/core/BrushPresetStore.h
     src/core/BrushPresets.cpp src/core/BrushPresets.h
     src/core/BrushSettings.cpp src/core/BrushSettings.h
+    src/core/BrushDynamics.cpp src/core/BrushDynamics.h
+    src/core/BrushProperties.cpp src/core/BrushProperties.h
     src/core/BrushTips.cpp src/core/BrushTips.h
     src/core/DocumentData.cpp src/core/DocumentData.h
     src/core/DocumentProvider.cpp src/core/DocumentProvider.h

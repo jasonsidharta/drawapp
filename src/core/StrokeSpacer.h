@@ -13,6 +13,16 @@ struct StrokeSample
     qreal tiltY = 0;
     bool hasTilt = false;
     double timeMs = -1; // event time in milliseconds; < 0 when unknown
+    // False when the device reports no pressure (mouse, touch, pens without pressure): pressure is
+    // then 1 and pressure-driven dynamics are left out rather than fed an invented value.
+    bool hasPressure = true;
+
+    // Filled in by StrokeEngine from the (smoothed) path, for the dynamics sensors:
+    double distance = 0;      // stroke length up to here, px
+    double speed = -1;        // px/ms, smoothed; < 0 when unknown (no event times yet)
+    double acceleration = 0;  // px/ms², smoothed
+    double direction = 0;     // travel direction, radians; meaningful only with hasDirection
+    bool hasDirection = false;
 
     // Linear interpolation of every field (tilt only when both ends report it).
     static StrokeSample lerp(const StrokeSample &a, const StrokeSample &b, qreal t);
@@ -24,6 +34,7 @@ struct Dab
     qreal diameter;      // document pixels
     StrokeSample sample; // the input interpolated at this dab (pressure, tilt, time)
     qreal direction = 0; // travel direction at this dab, radians (0 = +x)
+    qreal step = 0;      // distance to the next dab, px (0 when not placed by distance)
 };
 
 // How pen pressure maps to dab size: size = brush size × (minFraction + (1 − minFraction) × p^gamma).
@@ -56,9 +67,13 @@ public:
 
     // The dab diameter for an input sample (clamped to MinDiameter by the spacer).
     using DiameterFunction = std::function<qreal(const StrokeSample &)>;
+    // Optional: a factor on the spacing after a dab with this sample and diameter (spacing
+    // dynamics and jitter). Called once per dab, after the diameter.
+    using SpacingFunction = std::function<qreal(const StrokeSample &, qreal diameter)>;
 
     explicit StrokeSpacer(qreal brushSize, qreal spacing = DefaultSpacing, PressureResponse response = {});
     StrokeSpacer(DiameterFunction diameter, qreal spacing);
+    void setSpacingFunction(SpacingFunction f) { m_spacingFactor = std::move(f); }
 
     qreal diameterFor(qreal pressure) const;
     qreal diameterFor(const StrokeSample &sample) const;
@@ -76,8 +91,12 @@ public:
     void moveTo(const StrokeSample &sample, std::vector<Dab> &out);
 
 private:
+    qreal stepAfter(const StrokeSample &sample, qreal diameter) const;
+
     DiameterFunction m_diameter;
+    SpacingFunction m_spacingFactor;
     qreal m_spacing;
+    qreal m_step = 1; // distance from the last dab to the next one
     StrokeSample m_last;
     qreal m_lastDabDiameter = 1;
     qreal m_sinceLastDab = 0;

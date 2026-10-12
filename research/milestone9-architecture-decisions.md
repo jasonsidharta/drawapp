@@ -60,8 +60,16 @@ undo and recovery for free, and is tested by the same harness. A plugin system i
 sensors read 0 (upright). Nothing is invented. Previews and tests may simulate pressure and are
 labelled as simulated.
 
-**Compatibility:** milestone 6 `pressureSize/Opacity/Flow` mappings (minimum, gamma) migrate to
-a pressure mapping with an equivalent curve (`docs/brush-preset-format.md`).
+**Compatibility (revised during implementation):** the milestone 6 `pressureSize/Opacity/Flow`
+responses (minimum, gamma) are kept as they are, as the *basic* pressure response that the quick
+brush panel edits. The engine multiplies them with the advanced dynamics of the same parameter.
+Converting them into curves would have changed every saved preset slightly (a 16-point curve only
+approximates `p^gamma`) and would have forced the simple panel to edit curves. Version 1 presets
+therefore load unchanged and render exactly as before (`docs/brush-preset-format.md`).
+
+**Colour targets** need no separate amount: hue turns by value × 360° (a full reading is a full
+turn, so the chosen colour), and saturation and lightness are multiplied by the value, like the
+other multiplying targets.
 
 ## D4. A single property registry drives settings, serialisation, UI and documentation
 

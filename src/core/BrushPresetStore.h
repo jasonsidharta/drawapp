@@ -12,7 +12,7 @@
 // favourites and the selected paint and eraser presets. One small JSON file, written atomically
 // (ProjectFile::writeFileSafely), with a format name and version:
 //
-//   {"format": "drawapp-brushes", "version": 1,
+//   {"format": "drawapp-brushes", "version": 2,
 //    "custom":    [{"id": "custom.3", "settings": {...BrushSettings::toJson()...}}, ...],
 //    "overrides": {"builtin.clean-ink": {...}},
 //    "favorites": ["builtin.clean-ink", "custom.3"],
@@ -23,7 +23,11 @@
 // skipped with a warning, so one bad entry does not cost the rest.
 namespace BrushPresetStore {
 
-constexpr int FormatVersion = 1;
+// 1: milestone 6. 2: milestone 9 brush settings (BrushSettings::FormatVersion 2). Version 1
+// files read unchanged (their settings are a subset; new properties take their defaults) and are
+// written back as version 2. A version 1 build refuses version 2 files instead of dropping the
+// new properties.
+constexpr int FormatVersion = 2;
 constexpr int MaxCustomPresets = 500;
 constexpr qint64 MaxFileBytes = 4 * 1024 * 1024;
 

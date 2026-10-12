@@ -1006,6 +1006,7 @@ bool CanvasItem::handleTabletEvent(QTabletEvent *event)
     const bool reportsPressure = event->pointingDevice()
         && event->pointingDevice()->capabilities().testFlag(QInputDevice::Capability::Pressure);
     const qreal pressure = effectivePressure(PointerKind::Pen, reportsPressure, event->pressure());
+    m_penReportsPressure = reportsPressure;
     // Tilt only when the pen reports it; brushes fall back to the stroke direction otherwise.
     const bool hasTilt = event->pointingDevice()
         && event->pointingDevice()->capabilities().testFlag(QInputDevice::Capability::XTilt)
@@ -1255,6 +1256,7 @@ StrokeSample CanvasItem::strokeSample(const QPointF &viewPos, qreal pressure, co
     StrokeSample sample;
     sample.pos = m_view.viewToDoc(viewPos);
     sample.pressure = pressure;
+    sample.hasPressure = m_strokeHasPressure;
     sample.hasTilt = hasTilt;
     if (hasTilt) {
         sample.tiltX = tilt.x();
@@ -1283,6 +1285,9 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
     m_lastPressure = pressure;
     m_lastTilt = tilt;
     m_lastHasTilt = hasTilt;
+    // Pressure-driven dynamics only see real pressure: mouse, touch and pens without pressure
+    // report none (the stroke still draws at full pressure).
+    m_strokeHasPressure = kind == PointerKind::Pen && m_penReportsPressure;
     startStroke(strokeSample(viewPos, pressure, tilt, hasTilt), kind, eraserTip || m_tool == Eraser);
 
     if (m_statsEnabled) {
@@ -1319,7 +1324,7 @@ bool CanvasItem::startStroke(const StrokeSample &sample, PointerKind kind, bool 
     const BrushSettings settings = strokeSettings(erase);
     m_strokeBlend = settings.blend;
     m_engine = std::make_unique<StrokeEngine>(settings, m_brushColor, ++m_strokeCount,
-                                              settings.smoothing / 100.0 * MaxSmoothingRadius / m_view.zoom());
+                                              StrokeEngine::smoothingRadius(settings, m_view.zoom()));
     if (selected.isActive())
         m_engine->setClipMask(selected.mask()); // applied once, when each pixel is composited
     QImage &layer = m_document.pixels(index);

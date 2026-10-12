@@ -114,7 +114,7 @@ public:
     static constexpr int MinBrushSize = 1;
     static constexpr int MaxBrushSize = 256;
     static constexpr qreal MinBrushOpacity = 0.01;
-    static constexpr qreal MaxSmoothingRadius = 40.0; // view pixels at smoothing 100
+    static constexpr qreal MaxSmoothingRadius = StrokeEngine::MaxSmoothingRadius; // view pixels at smoothing 100
 
     explicit CanvasItem(QQuickItem *parent = nullptr);
 
@@ -567,6 +567,8 @@ private:
     qreal m_lastPressure = 1.0;
     QPointF m_lastTilt;
     bool m_lastHasTilt = false;
+    bool m_penReportsPressure = false;
+    bool m_strokeHasPressure = false;
     QPointF m_lastPanPos;
     bool m_spaceHeld = false;
 

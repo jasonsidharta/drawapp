@@ -1,5 +1,8 @@
 #include "BrushSettings.h"
 
+#include "BrushProperties.h"
+#include "BrushTips.h"
+
 #include <QJsonValue>
 #include <algorithm>
 #include <cmath>
@@ -11,103 +14,15 @@ double clampOr(double v, double lo, double hi, double fallback)
     return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
 }
 
-const char *blendName(BrushBlend b)
+bool isDynamicsId(const QString &id)
 {
-    switch (b) {
-    case BrushBlend::Erase: return "erase";
-    case BrushBlend::Smudge: return "smudge";
-    default: return "paint";
-    }
+    return id.startsWith(QLatin1String("dynamics."));
 }
 
-QJsonObject mappingJson(const PressureMapping &m)
+QString dynamicsKey(const QString &id)
 {
-    return QJsonObject{{QStringLiteral("enabled"), m.enabled}, {QStringLiteral("minimum"), m.minimum},
-                       {QStringLiteral("gamma"), m.gamma}};
+    return id.mid(9);
 }
-
-// Small typed readers: a present key of the wrong type is an error; a missing key keeps *out.
-struct Reader
-{
-    const QJsonObject &json;
-    QString *error;
-    bool ok = true;
-
-    bool fail(const QString &key, const char *expected)
-    {
-        if (ok && error)
-            *error = QStringLiteral("Brush setting \"%1\" must be %2.").arg(key, QLatin1String(expected));
-        ok = false;
-        return false;
-    }
-    void number(const char *key, double *out)
-    {
-        const QJsonValue v = json.value(QLatin1String(key));
-        if (v.isUndefined())
-            return;
-        if (!v.isDouble())
-            fail(QLatin1String(key), "a number");
-        else
-            *out = v.toDouble();
-    }
-    void integer(const char *key, int *out)
-    {
-        double d = *out;
-        number(key, &d);
-        if (std::isfinite(d))
-            *out = int(std::lround(std::clamp(d, -1e6, 1e6)));
-    }
-    void boolean(const char *key, bool *out)
-    {
-        const QJsonValue v = json.value(QLatin1String(key));
-        if (v.isUndefined())
-            return;
-        if (!v.isBool())
-            fail(QLatin1String(key), "true or false");
-        else
-            *out = v.toBool();
-    }
-    void string(const char *key, QString *out)
-    {
-        const QJsonValue v = json.value(QLatin1String(key));
-        if (v.isUndefined())
-            return;
-        if (!v.isString())
-            fail(QLatin1String(key), "text");
-        else
-            *out = v.toString();
-    }
-    void mapping(const char *key, PressureMapping *out)
-    {
-        const QJsonValue v = json.value(QLatin1String(key));
-        if (v.isUndefined())
-            return;
-        if (!v.isObject()) {
-            fail(QLatin1String(key), "an object");
-            return;
-        }
-        Reader inner{v.toObject(), error};
-        inner.boolean("enabled", &out->enabled);
-        inner.number("minimum", &out->minimum);
-        inner.number("gamma", &out->gamma);
-        if (!inner.ok)
-            ok = false;
-    }
-    template <typename E>
-    void choice(const char *key, E *out, std::initializer_list<std::pair<const char *, E>> names)
-    {
-        const QJsonValue v = json.value(QLatin1String(key));
-        if (v.isUndefined())
-            return;
-        for (const auto &[name, value] : names) {
-            if (v.toString() == QLatin1String(name)) {
-                *out = value;
-                return;
-            }
-        }
-        fail(QLatin1String(key), "a known option");
-    }
-};
 
 } // namespace
 
@@ -126,16 +41,24 @@ bool PressureMapping::operator==(const PressureMapping &o) const
     return enabled == o.enabled && minimum == o.minimum && gamma == o.gamma;
 }
 
+bool BrushSettings::hasColorDynamics() const
+{
+    return hueJitter > 0 || saturationJitter > 0 || lightnessJitter > 0
+        || dynamicsFor(DynamicTarget::Hue).isActive() || dynamicsFor(DynamicTarget::Saturation).isActive()
+        || dynamicsFor(DynamicTarget::Lightness).isActive();
+}
+
 bool BrushSettings::operator==(const BrushSettings &o) const
 {
-    return name == o.name && blend == o.blend && tip == o.tip && size == o.size && hardness == o.hardness
-        && roundness == o.roundness && angle == o.angle && followDirection == o.followDirection
-        && angleJitter == o.angleJitter && spacing == o.spacing && opacity == o.opacity && flow == o.flow
-        && accumulation == o.accumulation && pressureSize == o.pressureSize && pressureOpacity == o.pressureOpacity
-        && pressureFlow == o.pressureFlow && tiltSize == o.tiltSize && tiltOpacity == o.tiltOpacity
-        && texture == o.texture && textureScale == o.textureScale && textureStrength == o.textureStrength
-        && textureMode == o.textureMode && airbrush == o.airbrush && airbrushRate == o.airbrushRate
-        && smudgeStrength == o.smudgeStrength && smudgePickup == o.smudgePickup && smoothing == o.smoothing;
+    if (name != o.name || extra != o.extra || dynamics != o.dynamics || tipImage != o.tipImage)
+        return false;
+    for (const BrushProperty &p : BrushProperties::all()) {
+        if (!p.implemented || p.type == PropertyType::Dynamics || p.type == PropertyType::Image)
+            continue;
+        if (p.get(*this) != p.get(o))
+            return false;
+    }
+    return true;
 }
 
 BrushSettings BrushSettings::sanitized() const
@@ -143,97 +66,195 @@ BrushSettings BrushSettings::sanitized() const
     BrushSettings s = *this;
     const BrushSettings d;
     s.name = name.trimmed().left(64);
-    s.size = clampOr(size, MinSize, MaxSize, d.size);
-    s.hardness = clampOr(hardness, 0.0, 1.0, d.hardness);
-    s.roundness = clampOr(roundness, 0.05, 1.0, d.roundness);
-    s.angle = clampOr(angle, -360.0, 360.0, d.angle);
-    s.angleJitter = clampOr(angleJitter, 0.0, 180.0, 0.0);
-    s.spacing = clampOr(spacing, 0.02, 2.0, d.spacing);
-    s.opacity = clampOr(opacity, 0.01, 1.0, d.opacity);
-    s.flow = clampOr(flow, 0.01, 1.0, d.flow);
+    for (const BrushProperty &p : BrushProperties::all()) {
+        if (!p.implemented)
+            continue;
+        switch (p.type) {
+        case PropertyType::Number:
+            p.set(s, clampOr(p.get(s).toDouble(), p.minimum, p.maximum, p.get(d).toDouble()));
+            break;
+        case PropertyType::Integer:
+            p.set(s, std::clamp(p.get(s).toInt(), int(p.minimum), int(p.maximum)));
+            break;
+        default:
+            break;
+        }
+    }
     for (PressureMapping *m : {&s.pressureSize, &s.pressureOpacity, &s.pressureFlow}) {
         m->minimum = clampOr(m->minimum, 0.0, 1.0, 0.0);
         m->gamma = clampOr(m->gamma, 1.0 / 3.0, 3.0, 1.0);
     }
-    s.tiltSize = clampOr(tiltSize, 0.25, 4.0, 1.0);
-    s.tiltOpacity = clampOr(tiltOpacity, 0.0, 1.0, 1.0);
-    s.textureScale = clampOr(textureScale, 0.1, 8.0, 1.0);
-    s.textureStrength = clampOr(textureStrength, 0.0, 1.0, 0.0);
-    s.airbrushRate = clampOr(airbrushRate, 1.0, 200.0, d.airbrushRate);
-    s.smudgeStrength = clampOr(smudgeStrength, 0.0, 1.0, d.smudgeStrength);
-    s.smudgePickup = clampOr(smudgePickup, 0.0, 1.0, d.smudgePickup);
-    s.smoothing = std::clamp(smoothing, 0, 100);
+    for (ParameterDynamics &dyn : s.dynamics)
+        dyn = dyn.sanitized();
+    if (!s.tipImage.isNull()
+        && (s.tipImage.format() != QImage::Format_Grayscale8 || s.tipImage.width() != s.tipImage.height()
+            || s.tipImage.width() > MaxTipImageSize))
+        s.tipImage = BrushProperties::tipFromImage(s.tipImage);
     return s;
 }
 
 QJsonObject BrushSettings::toJson() const
 {
     QJsonObject o;
+    QJsonObject dyn;
     o[QStringLiteral("name")] = name;
-    o[QStringLiteral("blend")] = QLatin1String(blendName(blend));
-    o[QStringLiteral("tip")] = tip;
-    o[QStringLiteral("size")] = size;
-    o[QStringLiteral("hardness")] = hardness;
-    o[QStringLiteral("roundness")] = roundness;
-    o[QStringLiteral("angle")] = angle;
-    o[QStringLiteral("followDirection")] = followDirection;
-    o[QStringLiteral("angleJitter")] = angleJitter;
-    o[QStringLiteral("spacing")] = spacing;
-    o[QStringLiteral("opacity")] = opacity;
-    o[QStringLiteral("flow")] = flow;
-    o[QStringLiteral("accumulation")] =
-        accumulation == Accumulation::BuildUp ? QStringLiteral("buildUp") : QStringLiteral("uniform");
-    o[QStringLiteral("pressureSize")] = mappingJson(pressureSize);
-    o[QStringLiteral("pressureOpacity")] = mappingJson(pressureOpacity);
-    o[QStringLiteral("pressureFlow")] = mappingJson(pressureFlow);
-    o[QStringLiteral("tiltSize")] = tiltSize;
-    o[QStringLiteral("tiltOpacity")] = tiltOpacity;
-    o[QStringLiteral("texture")] = texture;
-    o[QStringLiteral("textureScale")] = textureScale;
-    o[QStringLiteral("textureStrength")] = textureStrength;
-    o[QStringLiteral("textureMode")] =
-        textureMode == TextureMode::Subtract ? QStringLiteral("subtract") : QStringLiteral("multiply");
-    o[QStringLiteral("airbrush")] = airbrush;
-    o[QStringLiteral("airbrushRate")] = airbrushRate;
-    o[QStringLiteral("smudgeStrength")] = smudgeStrength;
-    o[QStringLiteral("smudgePickup")] = smudgePickup;
-    o[QStringLiteral("smoothing")] = smoothing;
+    for (const BrushProperty &p : BrushProperties::all()) {
+        if (!p.implemented)
+            continue;
+        if (p.type == PropertyType::Dynamics) {
+            DynamicTarget t;
+            DynamicTargets::fromId(dynamicsKey(p.id), &t);
+            if (dynamicsFor(t) != ParameterDynamics()) // only what differs from "off"
+                dyn[dynamicsKey(p.id)] = dynamicsFor(t).toJson();
+            continue;
+        }
+        if (p.type == PropertyType::Image) {
+            if (!tipImage.isNull())
+                o[p.id] = BrushProperties::encodeImage(tipImage);
+            continue;
+        }
+        const QVariant v = p.get(*this);
+        switch (p.type) {
+        case PropertyType::Number: o[p.id] = v.toDouble(); break;
+        case PropertyType::Integer: o[p.id] = v.toInt(); break;
+        case PropertyType::Bool: o[p.id] = v.toBool(); break;
+        case PropertyType::Pressure: o[p.id] = QJsonObject::fromVariantMap(v.toMap()); break;
+        default: o[p.id] = v.toString(); break;
+        }
+    }
+    // Keys from a newer version go back out unchanged.
+    for (auto it = extra.begin(); it != extra.end(); ++it) {
+        if (it.key() == QLatin1String("dynamics")) {
+            const QJsonObject unknown = it.value().toObject();
+            for (auto u = unknown.begin(); u != unknown.end(); ++u)
+                if (!dyn.contains(u.key()))
+                    dyn[u.key()] = u.value();
+        } else if (!o.contains(it.key())) {
+            o[it.key()] = it.value();
+        }
+    }
+    if (!dyn.isEmpty())
+        o[QStringLiteral("dynamics")] = dyn;
     return o;
 }
 
-bool BrushSettings::fromJson(const QJsonObject &json, BrushSettings *out, QString *error)
+bool BrushSettings::fromJson(const QJsonObject &json, BrushSettings *out, QString *error, QStringList *warnings)
 {
     BrushSettings s;
-    Reader r{json, error};
-    r.string("name", &s.name);
-    r.choice("blend", &s.blend, {{"paint", BrushBlend::Paint}, {"erase", BrushBlend::Erase}, {"smudge", BrushBlend::Smudge}});
-    r.string("tip", &s.tip);
-    r.number("size", &s.size);
-    r.number("hardness", &s.hardness);
-    r.number("roundness", &s.roundness);
-    r.number("angle", &s.angle);
-    r.boolean("followDirection", &s.followDirection);
-    r.number("angleJitter", &s.angleJitter);
-    r.number("spacing", &s.spacing);
-    r.number("opacity", &s.opacity);
-    r.number("flow", &s.flow);
-    r.choice("accumulation", &s.accumulation, {{"uniform", Accumulation::Uniform}, {"buildUp", Accumulation::BuildUp}});
-    r.mapping("pressureSize", &s.pressureSize);
-    r.mapping("pressureOpacity", &s.pressureOpacity);
-    r.mapping("pressureFlow", &s.pressureFlow);
-    r.number("tiltSize", &s.tiltSize);
-    r.number("tiltOpacity", &s.tiltOpacity);
-    r.string("texture", &s.texture);
-    r.number("textureScale", &s.textureScale);
-    r.number("textureStrength", &s.textureStrength);
-    r.choice("textureMode", &s.textureMode, {{"multiply", TextureMode::Multiply}, {"subtract", TextureMode::Subtract}});
-    r.boolean("airbrush", &s.airbrush);
-    r.number("airbrushRate", &s.airbrushRate);
-    r.number("smudgeStrength", &s.smudgeStrength);
-    r.number("smudgePickup", &s.smudgePickup);
-    r.integer("smoothing", &s.smoothing);
-    if (!r.ok)
+    auto fail = [&](const QString &key, const char *expected) {
+        if (error)
+            *error = QStringLiteral("Brush setting \"%1\" must be %2.").arg(key, QLatin1String(expected));
         return false;
+    };
+    auto warn = [&](const QString &message) {
+        if (warnings)
+            warnings->append(message);
+    };
+
+    const QJsonValue nameValue = json.value(QStringLiteral("name"));
+    if (!nameValue.isUndefined()) {
+        if (!nameValue.isString())
+            return fail(QStringLiteral("name"), "text");
+        s.name = nameValue.toString();
+    }
+    const QJsonValue dynValue = json.value(QStringLiteral("dynamics"));
+    if (!dynValue.isUndefined() && !dynValue.isObject())
+        return fail(QStringLiteral("dynamics"), "an object");
+    const QJsonObject dynJson = dynValue.toObject();
+
+    QStringList known{QStringLiteral("name"), QStringLiteral("dynamics")};
+    QStringList knownDynamics;
+    for (const BrushProperty &p : BrushProperties::all()) {
+        if (!p.implemented)
+            continue;
+        const bool nested = isDynamicsId(p.id);
+        (nested ? knownDynamics : known) << (nested ? dynamicsKey(p.id) : p.id);
+        const QJsonValue v = nested ? dynJson.value(dynamicsKey(p.id)) : json.value(p.id);
+        if (v.isUndefined())
+            continue;
+        switch (p.type) {
+        case PropertyType::Number:
+        case PropertyType::Integer:
+            if (!v.isDouble())
+                return fail(p.id, "a number");
+            p.set(s, v.toDouble());
+            break;
+        case PropertyType::Bool:
+            if (!v.isBool())
+                return fail(p.id, "true or false");
+            p.set(s, v.toBool());
+            break;
+        case PropertyType::Choice:
+            if (!v.isString())
+                return fail(p.id, "text");
+            if (p.id == QLatin1String("tip") || p.id == QLatin1String("texture")) {
+                // Resource ids: an unknown one (newer version, removed asset) is kept and drawn as
+                // round tip / no texture, never refused.
+                if (!v.toString().isEmpty() && !p.choices.contains(v.toString()))
+                    warn(QStringLiteral("Unknown %1 \"%2\": drawn as %3.")
+                             .arg(p.id, v.toString(),
+                                  p.id == QLatin1String("tip") ? QStringLiteral("a round tip") : QStringLiteral("no texture")));
+                p.set(s, v.toString());
+            } else {
+                if (!p.choices.contains(v.toString()))
+                    return fail(p.id, "a known option");
+                p.set(s, v.toString());
+            }
+            break;
+        case PropertyType::Text:
+            if (!v.isString())
+                return fail(p.id, "text");
+            p.set(s, v.toString());
+            break;
+        case PropertyType::Image: {
+            if (!v.isString())
+                return fail(p.id, "text");
+            bool ok = false;
+            const QImage image = BrushProperties::decodeImage(v.toString(), &ok);
+            if (!ok)
+                warn(QStringLiteral("The imported tip image could not be read; the tip shape is used instead."));
+            else if (!image.isNull())
+                s.tipImage = image.convertToFormat(QImage::Format_Grayscale8); // sanitized() squares and bounds it
+            break;
+        }
+        case PropertyType::Pressure: {
+            if (!v.isObject())
+                return fail(p.id, "an object");
+            const QJsonObject m = v.toObject();
+            const QJsonValue en = m.value(QStringLiteral("enabled")), mi = m.value(QStringLiteral("minimum")),
+                             ga = m.value(QStringLiteral("gamma"));
+            if ((!en.isUndefined() && !en.isBool()) || (!mi.isUndefined() && !mi.isDouble())
+                || (!ga.isUndefined() && !ga.isDouble()))
+                return fail(p.id, "an object of enabled, minimum and gamma");
+            p.set(s, m.toVariantMap());
+            break;
+        }
+        case PropertyType::Dynamics: {
+            if (!v.isObject())
+                return fail(p.id, "an object");
+            ParameterDynamics d;
+            QString why;
+            if (!ParameterDynamics::fromJson(v.toObject(), &d, &why)) {
+                if (error)
+                    *error = QStringLiteral("Brush setting \"%1\": %2").arg(p.id, why);
+                return false;
+            }
+            DynamicTarget t;
+            DynamicTargets::fromId(dynamicsKey(p.id), &t);
+            s.dynamicsFor(t) = d;
+            break;
+        }
+        }
+    }
+    for (auto it = json.begin(); it != json.end(); ++it)
+        if (!known.contains(it.key()))
+            s.extra[it.key()] = it.value();
+    QJsonObject unknownDynamics;
+    for (auto it = dynJson.begin(); it != dynJson.end(); ++it)
+        if (!knownDynamics.contains(it.key()))
+            unknownDynamics[it.key()] = it.value();
+    if (!unknownDynamics.isEmpty())
+        s.extra[QStringLiteral("dynamics")] = unknownDynamics;
     *out = s.sanitized();
     return true;
 }

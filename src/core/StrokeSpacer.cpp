@@ -19,6 +19,12 @@ StrokeSample StrokeSample::lerp(const StrokeSample &a, const StrokeSample &b, qr
         s.tiltY = known.tiltY;
     }
     s.timeMs = (a.timeMs >= 0 && b.timeMs >= 0) ? a.timeMs + (b.timeMs - a.timeMs) * t : b.timeMs;
+    s.hasPressure = a.hasPressure && b.hasPressure;
+    s.distance = a.distance + (b.distance - a.distance) * t;
+    s.speed = (a.speed >= 0 && b.speed >= 0) ? a.speed + (b.speed - a.speed) * t : b.speed;
+    s.acceleration = a.acceleration + (b.acceleration - a.acceleration) * t;
+    s.hasDirection = b.hasDirection || a.hasDirection;
+    s.direction = b.hasDirection ? b.direction : a.direction; // angles are not interpolated (wrap-around)
     return s;
 }
 
@@ -63,6 +69,17 @@ qreal StrokeSpacer::diameterFor(const StrokeSample &sample) const
     return std::isfinite(d) ? std::max(MinDiameter, d) : MinDiameter;
 }
 
+qreal StrokeSpacer::stepAfter(const StrokeSample &sample, qreal diameter) const
+{
+    qreal factor = 1.0;
+    if (m_spacingFactor) {
+        factor = m_spacingFactor(sample, diameter);
+        if (!std::isfinite(factor) || factor <= 0)
+            factor = 1.0;
+    }
+    return std::max(MinStep, m_spacing * factor * diameter);
+}
+
 qreal StrokeSpacer::stepFraction(qreal diameter) const
 {
     return std::max(MinStep, m_spacing * diameter) / std::max(MinDiameter, diameter);
@@ -72,8 +89,9 @@ void StrokeSpacer::begin(const StrokeSample &sample, std::vector<Dab> &out)
 {
     m_last = sample;
     m_lastDabDiameter = diameterFor(sample);
+    m_step = stepAfter(sample, m_lastDabDiameter);
     m_sinceLastDab = 0;
-    out.push_back({sample.pos, m_lastDabDiameter, sample, 0});
+    out.push_back({sample.pos, m_lastDabDiameter, sample, 0, m_step});
 }
 
 void StrokeSpacer::moveTo(const StrokeSample &sample, std::vector<Dab> &out)
@@ -89,11 +107,10 @@ void StrokeSpacer::moveTo(const StrokeSample &sample, std::vector<Dab> &out)
     }
     const qreal direction = std::atan2(delta.y(), delta.x());
 
-    // Invariant: m_sinceLastDab < step, because the step only changes when a dab resets it.
+    // Invariant: m_sinceLastDab < m_step, because the step only changes when a dab resets it.
     qreal travelled = 0;
     for (;;) {
-        const qreal step = std::max(MinStep, m_spacing * m_lastDabDiameter);
-        const qreal next = travelled + (step - m_sinceLastDab);
+        const qreal next = travelled + (m_step - m_sinceLastDab);
         if (next > length) {
             m_sinceLastDab += length - travelled;
             break;
@@ -101,8 +118,9 @@ void StrokeSpacer::moveTo(const StrokeSample &sample, std::vector<Dab> &out)
         travelled = next;
         const StrokeSample at = StrokeSample::lerp(m_last, sample, travelled / length);
         m_lastDabDiameter = diameterFor(at);
+        m_step = stepAfter(at, m_lastDabDiameter);
         m_sinceLastDab = 0;
-        out.push_back({at.pos, m_lastDabDiameter, at, direction});
+        out.push_back({at.pos, m_lastDabDiameter, at, direction, m_step});
     }
     m_last = sample;
 }

@@ -1,5 +1,6 @@
 #include "BrushLibrary.h"
 
+#include "BrushProperties.h"
 #include "BrushThumbnails.h"
 
 #include <QJsonObject>
@@ -12,6 +13,7 @@ const char *blendName(BrushBlend b)
     switch (b) {
     case BrushBlend::Erase: return "erase";
     case BrushBlend::Smudge: return "smudge";
+    case BrushBlend::WetPaint: return "wet";
     default: return "paint";
     }
 }
@@ -222,29 +224,71 @@ void BrushLibrary::setValue(const QString &key, const QVariant &value)
         return;
     const QString id = currentId();
     const BrushSettings before = workingSettings(id);
-    QJsonObject json = before.toJson();
-    const QJsonValue v = QJsonValue::fromVariant(value);
-    const int dot = key.indexOf(QLatin1Char('.'));
-    if (dot > 0) {
-        const QString outer = key.left(dot);
-        if (!json.value(outer).isObject())
-            return;
-        QJsonObject inner = json.value(outer).toObject();
-        inner.insert(key.mid(dot + 1), v);
-        json.insert(outer, inner);
-    } else {
-        if (!json.contains(key))
-            return;
-        json.insert(key, v);
-    }
-    BrushSettings after;
-    QString error;
-    if (!BrushSettings::fromJson(json, &after, &error))
+    BrushSettings after = before;
+    if (!applyValue(&after, key, value))
         return;
+    after = after.sanitized();
     after.name = before.name;
     after.blend = before.blend;
     if (after != before)
         setWorking(id, after);
+}
+
+bool BrushLibrary::applyValue(BrushSettings *settings, const QString &key, const QVariant &value)
+{
+    // "pressureSize.minimum" sets one field of a pressure response; everything else is a
+    // registry id ("dynamics.size" included).
+    const int dot = key.indexOf(QLatin1Char('.'));
+    const BrushProperty *p = BrushProperties::find(key);
+    QVariant v = value;
+    if (!p && dot > 0) {
+        p = BrushProperties::find(key.left(dot));
+        if (!p || p->type != PropertyType::Pressure)
+            return false;
+        const QString field = key.mid(dot + 1);
+        const bool wantBool = field == QLatin1String("enabled");
+        if (!wantBool && field != QLatin1String("minimum") && field != QLatin1String("gamma"))
+            return false;
+        if (wantBool ? value.typeId() != QMetaType::Bool
+                     : (value.typeId() == QMetaType::QString || !value.canConvert<double>()))
+            return false;
+        v = QVariantMap{{field, value}};
+    }
+    if (!p || !p->implemented)
+        return false;
+    // The same type rules as reading a preset: a value of the wrong kind changes nothing.
+    const int type = value.typeId();
+    const bool isText = type == QMetaType::QString;
+    switch (p->type) {
+    case PropertyType::Number:
+    case PropertyType::Integer:
+        if (p != BrushProperties::find(key) || isText || !value.canConvert<double>())
+            return false;
+        break;
+    case PropertyType::Bool:
+        if (type != QMetaType::Bool)
+            return false;
+        break;
+    case PropertyType::Choice:
+        if (!isText || (p->id != QLatin1String("tip") && p->id != QLatin1String("texture") && !p->choices.contains(value.toString())))
+            return false;
+        break;
+    case PropertyType::Text:
+        if (!isText)
+            return false;
+        break;
+    case PropertyType::Pressure:
+    case PropertyType::Dynamics:
+        if (p != BrushProperties::find(key) && p->type == PropertyType::Dynamics)
+            return false;
+        if (p == BrushProperties::find(key) && !value.canConvert<QVariantMap>())
+            return false;
+        break;
+    case PropertyType::Image:
+        break;
+    }
+    p->set(*settings, v);
+    return true;
 }
 
 void BrushLibrary::setWorking(const QString &id, const BrushSettings &settings)

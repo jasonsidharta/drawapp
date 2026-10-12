@@ -87,6 +87,9 @@ public:
     BrushSettings savedSettings(const QString &id) const;
     BrushSettings workingSettings(const QString &id) const;
     bool hasPreset(const QString &id) const;
+    // One setting by registry id (or "pressureX.field") with the type rules of setValue; false when
+    // the key or the kind of value is not accepted. Not sanitised.
+    static bool applyValue(BrushSettings *settings, const QString &key, const QVariant &value);
 
 signals:
     void presetsChanged();

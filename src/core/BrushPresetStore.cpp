@@ -85,7 +85,7 @@ bool BrushPresetStore::decode(const QByteArray &bytes, Data *out, QString *error
             continue;
         }
         if (!o.value(QStringLiteral("settings")).isObject()
-            || !BrushSettings::fromJson(o.value(QStringLiteral("settings")).toObject(), &settings, &why)) {
+            || !BrushSettings::fromJson(o.value(QStringLiteral("settings")).toObject(), &settings, &why, warnings)) {
             warnings->append(QStringLiteral("Skipped custom brush \"%1\": %2").arg(id, why.isEmpty() ? QStringLiteral("no settings") : why));
             continue;
         }
@@ -108,7 +108,7 @@ bool BrushPresetStore::decode(const QByteArray &bytes, Data *out, QString *error
             warnings->append(QStringLiteral("Skipped saved changes to an unknown built-in brush."));
             continue;
         }
-        if (!it.value().isObject() || !BrushSettings::fromJson(it.value().toObject(), &settings, &why)) {
+        if (!it.value().isObject() || !BrushSettings::fromJson(it.value().toObject(), &settings, &why, warnings)) {
             warnings->append(QStringLiteral("Skipped saved changes to \"%1\": %2").arg(builtIn->settings.name, why));
             continue;
         }

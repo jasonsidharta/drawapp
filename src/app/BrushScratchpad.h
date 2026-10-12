@@ -69,5 +69,7 @@ private:
     QTimer m_airbrush;
     quint64 m_strokes = 0;
     bool m_penDown = false;
+    // Whether the current input reports pressure (direct calls, as from tests, simulate it).
+    bool m_inputHasPressure = true;
     QElapsedTimer m_sincePen;
 };

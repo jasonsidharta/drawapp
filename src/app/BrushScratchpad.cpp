@@ -113,6 +113,7 @@ StrokeSample BrushScratchpad::sampleAt(const QPointF &pos, qreal pressure, const
     StrokeSample s;
     s.pos = pos;
     s.pressure = pressure;
+    s.hasPressure = m_inputHasPressure;
     s.hasTilt = hasTilt;
     if (hasTilt) {
         s.tiltX = tilt.x();
@@ -131,7 +132,7 @@ void BrushScratchpad::beginStroke(const QPointF &pos, qreal pressure, const QPoi
     const BrushSettings settings = m_canvas->strokeSettings(m_canvas->tool() == CanvasItem::Eraser);
     // Smoothing in screen pixels, as on the canvas at 100 % zoom.
     m_engine = std::make_unique<StrokeEngine>(settings, m_canvas->brushColor(), ++m_strokes,
-                                              settings.smoothing / 100.0 * CanvasItem::MaxSmoothingRadius);
+                                              StrokeEngine::smoothingRadius(settings));
     m_before = TileSnapshot();
     m_clock.start();
     // The scratchpad sits in a scrolling panel: a drag here draws, it does not scroll.
@@ -197,6 +198,7 @@ bool BrushScratchpad::handleTablet(QTabletEvent *event)
         && device->capabilities().testFlag(QInputDevice::Capability::YTilt);
     const qreal pressure = effectivePressure(PointerKind::Pen, reportsPressure, event->pressure());
     const QPointF tilt(event->xTilt(), event->yTilt());
+    m_inputHasPressure = reportsPressure;
     switch (event->type()) {
     case QEvent::TabletPress:
         if (!contains(pos) || event->button() != Qt::LeftButton)
@@ -232,6 +234,7 @@ void BrushScratchpad::mousePressEvent(QMouseEvent *event)
         event->accept();
         return;
     }
+    m_inputHasPressure = false;
     beginStroke(event->position(), 1.0);
     event->accept();
 }
@@ -259,7 +262,8 @@ void BrushScratchpad::touchEvent(QTouchEvent *event)
     const QEventPoint &point = event->points().first();
     switch (event->type()) {
     case QEvent::TouchBegin:
-        beginStroke(point.position(), 1.0); // touch never counts as pressure
+        m_inputHasPressure = false; // touch never counts as pressure
+        beginStroke(point.position(), 1.0);
         break;
     case QEvent::TouchUpdate:
         continueStroke(point.position(), 1.0);

@@ -1,0 +1,1087 @@
+// Milestone 9 brush engine: the sensor and dynamics framework, the property registry, every
+// implemented property's effect on rendering, the new stamps and blends, and preset format 2.
+//
+// Pressure and tilt in these tests are simulated (StrokeSample values); they show the engine's
+// response, not that any physical pen delivers them.
+
+#include "BrushPresets.h"
+#include "BrushProperties.h"
+#include "BrushTips.h"
+#include "StrokeEngine.h"
+#include "TileSnapshot.h"
+
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QPainter>
+#include <QRandomGenerator>
+#include <QSet>
+#include <QtTest>
+#include <cmath>
+#include <functional>
+
+namespace {
+
+constexpr double Pi = 3.14159265358979323846;
+const QColor Paint(200, 120, 40);
+
+QImage transparentCanvas(QSize size = {400, 200})
+{
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    return image;
+}
+
+// Vertical bands: red, transparent, blue, green, transparent, grey …, 40 px each.
+QImage stripes(QSize size = {400, 200})
+{
+    QImage image = transparentCanvas(size);
+    QPainter p(&image);
+    const QColor bands[] = {QColor(220, 30, 30), Qt::transparent, QColor(30, 60, 220), QColor(30, 180, 60),
+                            Qt::transparent, QColor(128, 128, 128)};
+    for (int i = 0; i * 40 < size.width(); ++i)
+        p.fillRect(QRect(i * 40, 0, 40, size.height()), bands[i % 6]);
+    return image;
+}
+
+StrokeSample sample(double x, double y, double pressure = 1.0, double timeMs = -1)
+{
+    StrokeSample s;
+    s.pos = QPointF(x, y);
+    s.pressure = pressure;
+    s.timeMs = timeMs;
+    return s;
+}
+
+// A wobbly left-to-right stroke with simulated pressure (ramp with alternating jitter), tilt
+// (about 10°), varying speed, and a pause at the end (for the airbrush).
+std::vector<StrokeSample> standardStroke()
+{
+    std::vector<StrokeSample> v;
+    double t = 0;
+    const int n = 106;
+    for (int i = 0; i <= n; ++i) {
+        StrokeSample s;
+        s.pos = QPointF(40 + i * 3.0, 100 + 12 * std::sin(i * 0.35));
+        s.pressure = std::clamp(0.2 + 0.7 * std::sin(Pi * i / n) + (i % 2 ? 0.1 : -0.1), 0.05, 1.0);
+        s.hasTilt = true;
+        s.tiltX = 8;
+        s.tiltY = 6;
+        s.timeMs = t;
+        t += 2.0 + (i % 7 == 0 ? 6.0 : 0.0);
+        v.push_back(s);
+    }
+    for (int i = 0; i < 15; ++i) {
+        StrokeSample s = v.back();
+        t += 20;
+        s.timeMs = t;
+        v.push_back(s);
+    }
+    return v;
+}
+
+std::vector<StrokeSample> line(QPointF from, QPointF to, int steps, std::function<double(double)> pressure = nullptr,
+                               double msPerStep = -1)
+{
+    std::vector<StrokeSample> v;
+    for (int i = 0; i <= steps; ++i) {
+        const double t = double(i) / steps;
+        StrokeSample s;
+        s.pos = from + (to - from) * t;
+        s.pressure = pressure ? pressure(t) : 1.0;
+        s.timeMs = msPerStep < 0 ? -1 : i * msPerStep;
+        v.push_back(s);
+    }
+    return v;
+}
+
+QImage render(const BrushSettings &settings, const std::vector<StrokeSample> &samples, const QImage &background,
+              quint64 seed = 7, const QColor &color = Paint, const QImage &clip = QImage(), qint64 *dabs = nullptr)
+{
+    QImage image = background.copy();
+    TileSnapshot before;
+    StrokeEngine engine(settings, color, seed, StrokeEngine::smoothingRadius(settings));
+    if (!clip.isNull())
+        engine.setClipMask(clip);
+    engine.begin(image, samples.front(), before);
+    for (size_t i = 1; i < samples.size(); ++i)
+        engine.moveTo(image, samples[i], before);
+    engine.finish(image, before);
+    if (dabs)
+        *dabs = engine.dabCount();
+    return image;
+}
+
+bool validPremultiplied(const QImage &image)
+{
+    for (int y = 0; y < image.height(); ++y) {
+        const QRgb *row = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+        for (int x = 0; x < image.width(); ++x)
+            if (qRed(row[x]) > qAlpha(row[x]) || qGreen(row[x]) > qAlpha(row[x]) || qBlue(row[x]) > qAlpha(row[x]))
+                return false;
+    }
+    return true;
+}
+
+int differingPixels(const QImage &a, const QImage &b)
+{
+    int n = 0;
+    for (int y = 0; y < a.height(); ++y) {
+        const QRgb *ra = reinterpret_cast<const QRgb *>(a.constScanLine(y));
+        const QRgb *rb = reinterpret_cast<const QRgb *>(b.constScanLine(y));
+        for (int x = 0; x < a.width(); ++x)
+            n += ra[x] != rb[x];
+    }
+    return n;
+}
+
+// Pixels in column x with alpha above half.
+int columnHeight(const QImage &image, int x)
+{
+    int n = 0;
+    for (int y = 0; y < image.height(); ++y)
+        n += qAlpha(image.pixel(x, y)) > 127;
+    return n;
+}
+
+int columnMaxAlpha(const QImage &image, int x)
+{
+    int m = 0;
+    for (int y = 0; y < image.height(); ++y)
+        m = std::max(m, qAlpha(image.pixel(x, y)));
+    return m;
+}
+
+// A right triangle in the upper left: an asymmetric tip image with transparency.
+QImage asymmetricImage()
+{
+    QImage image(64, 64, QImage::Format_ARGB32);
+    image.fill(Qt::transparent);
+    QPainter p(&image);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setBrush(Qt::black);
+    p.setPen(Qt::NoPen);
+    p.drawPolygon(QPolygonF({QPointF(4, 4), QPointF(60, 4), QPointF(4, 40)}));
+    return image;
+}
+
+QVariantMap dynamicsMap(Sensor sensor, SensorCurve curve = SensorCurve(), double minimum = 0)
+{
+    ParameterDynamics d;
+    d.enabled = true;
+    d.minimum = minimum;
+    d.mappings.push_back({sensor, curve, 0});
+    return d.toJson().toVariantMap();
+}
+
+void set(BrushSettings &s, const char *id, const QVariant &value)
+{
+    const BrushProperty *p = BrushProperties::find(QLatin1String(id));
+    QVERIFY2(p && p->implemented, id);
+    p->set(s, value);
+    s = s.sanitized();
+}
+
+BrushSettings baseSettings()
+{
+    BrushSettings s;
+    s.name = QStringLiteral("test");
+    s.size = 24;
+    return s;
+}
+
+// The engine a property is tested on: the first it applies to, in this order.
+unsigned testEngine(unsigned engines)
+{
+    for (unsigned e : {unsigned(EnginePaint), unsigned(EngineSmudge), unsigned(EngineWet), unsigned(EngineSpray),
+                       unsigned(EngineHatching), unsigned(EngineErase)})
+        if (engines & e)
+            return e;
+    return EnginePaint;
+}
+
+void applyEngine(BrushSettings &s, unsigned engine)
+{
+    switch (engine) {
+    case EngineErase: s.blend = BrushBlend::Erase; break;
+    case EngineSmudge: s.blend = BrushBlend::Smudge; break;
+    case EngineWet: s.blend = BrushBlend::WetPaint; break;
+    case EngineSpray: s.stamp = BrushStamp::Spray; break;
+    case EngineHatching: s.stamp = BrushStamp::Hatching; break;
+    default: break;
+    }
+}
+
+struct Scenario
+{
+    std::function<void(BrushSettings &)> setup; // preconditions, applied to both renders
+    QVariant changed;
+};
+
+std::map<QString, Scenario> scenarios()
+{
+    const QVariant randomDyn = dynamicsMap(Sensor::Random);
+    auto buildUp = [](double flow) {
+        return [flow](BrushSettings &s) {
+            s.accumulation = Accumulation::BuildUp;
+            s.flow = flow;
+        };
+    };
+    auto textured = [](BrushSettings &s) {
+        s.texture = QStringLiteral("paper");
+        s.textureStrength = 0.6;
+    };
+    auto oval = [](BrushSettings &s) { s.roundness = 0.3; };
+    auto asym = [](BrushSettings &s) { s.tipImage = BrushProperties::tipFromImage(asymmetricImage()); };
+    auto none = [](BrushSettings &) {};
+    const QVariant asymImage = QVariant::fromValue(asymmetricImage());
+    return {
+        // Engine
+        {"blend", {none, QStringLiteral("smudge")}},
+        {"stamp", {none, QStringLiteral("spray")}},
+        // Brush tip
+        {"tip", {none, QStringLiteral("bristle")}},
+        {"tipImage", {none, asymImage}},
+        {"size", {none, 40.0}},
+        {"hardness", {none, 0.0}},
+        {"roundness", {none, 0.3}},
+        {"angle", {oval, 60.0}},
+        {"flipX", {asym, true}},
+        {"flipY", {asym, true}},
+        {"minimumSize", {none, 20.0}},
+        {"tipDensity", {none, 0.3}},
+        // Stroke path
+        {"spacing", {none, 1.0}},
+        {"spacingJitter", {[](BrushSettings &s) { s.spacing = 1.0; }, 0.8}},
+        {"scatter", {none, 1.0}},
+        {"scatterBothAxes", {[](BrushSettings &s) { s.scatter = 1.0; }, true}},
+        {"count", {buildUp(0.3), 4}},
+        {"countJitter", {[](BrushSettings &s) { s.accumulation = Accumulation::BuildUp; s.flow = 0.2; s.count = 8; }, 1.0}},
+        {"airbrush", {none, true}},
+        {"airbrushRate", {[](BrushSettings &s) { s.airbrush = true; s.flow = 0.1; }, 120.0}},
+        // Pressure and tilt
+        {"pressureSize", {none, QVariantMap{{"enabled", false}}}},
+        {"pressureOpacity", {none, QVariantMap{{"enabled", true}, {"minimum", 0.0}}}},
+        {"pressureFlow", {buildUp(0.5), QVariantMap{{"enabled", true}, {"minimum", 0.0}}}},
+        {"tiltSize", {none, 2.5}},
+        {"tiltOpacity", {none, 0.2}},
+        {"fullTiltAngle", {[](BrushSettings &s) { s.tiltSize = 2.5; }, 20.0}},
+        {"tiltAzimuthThreshold", {[](BrushSettings &s) { s.followDirection = true; s.roundness = 0.3; }, 5.0}},
+        {"dynamics.size", {none, randomDyn}},
+        {"dynamics.opacity", {none, randomDyn}},
+        {"dynamics.flow", {buildUp(0.6), randomDyn}},
+        // Opacity and flow
+        {"opacity", {none, 0.5}},
+        {"flow", {buildUp(1.0), 0.3}},
+        {"accumulation", {[](BrushSettings &s) { s.flow = 0.5; }, QStringLiteral("buildUp")}},
+        {"opacityJitter", {none, 0.8}},
+        {"flowJitter", {buildUp(0.5), 0.9}},
+        // Texture and grain
+        {"texture", {[](BrushSettings &s) { s.textureStrength = 0.6; }, QStringLiteral("paper")}},
+        {"textureScale", {textured, 3.0}},
+        {"textureStrength", {[](BrushSettings &s) { s.texture = QStringLiteral("paper"); }, 0.9}},
+        {"textureMode", {textured, QStringLiteral("subtract")}},
+        {"textureRotation", {textured, 45.0}},
+        {"textureBrightness", {textured, 0.4}},
+        {"textureContrast", {textured, 2.5}},
+        {"textureInvert", {textured, true}},
+        {"textureEachDab", {[=](BrushSettings &s) { textured(s); buildUp(0.5)(s); }, true}},
+        {"textureMoving", {[=](BrushSettings &s) { textured(s); s.textureEachDab = true; }, true}},
+        {"textureRandomOffset", {textured, true}},
+        {"dynamics.textureStrength", {textured, randomDyn}},
+        // Shape dynamics
+        {"followDirection", {oval, true}},
+        {"angleJitter", {oval, 90.0}},
+        {"sizeJitter", {none, 0.8}},
+        {"strokeSizeJitter", {none, 0.9}},
+        {"roundnessJitter", {none, 0.9}},
+        {"randomFlipX", {asym, true}},
+        {"randomFlipY", {asym, true}},
+        {"dynamics.rotation", {oval, randomDyn}},
+        {"dynamics.roundness", {none, randomDyn}},
+        {"dynamics.scatter", {[](BrushSettings &s) { s.scatter = 1.0; }, randomDyn}},
+        {"dynamics.spacing", {[](BrushSettings &s) { s.spacing = 1.0; }, randomDyn}},
+        // Colour dynamics
+        {"hueJitter", {none, 120.0}},
+        {"saturationJitter", {none, 0.8}},
+        {"lightnessJitter", {none, 0.5}},
+        {"strokeHueJitter", {none, 120.0}},
+        {"strokeSaturationJitter", {none, 0.8}},
+        {"strokeLightnessJitter", {none, 0.5}},
+        {"dynamics.hue", {none, randomDyn}},
+        {"dynamics.saturation", {none, randomDyn}},
+        {"dynamics.lightness", {none, randomDyn}},
+        // Blending and smudge
+        {"paintMode", {none, QStringLiteral("multiply")}},
+        {"smudgeStrength", {none, 0.95}},
+        {"smudgePickup", {none, 0.9}},
+        {"smudgeMode", {none, QStringLiteral("dulling")}},
+        {"smudgeColorRate", {none, 0.6}},
+        {"smudgePreserveAlpha", {none, true}},
+        {"dynamics.smudgeStrength", {none, randomDyn}},
+        // Wet paint
+        {"wetLoad", {none, 0.2}},
+        {"wetLoadLength", {none, 50.0}},
+        {"wetAttack", {none, 0.1}},
+        {"wetPull", {none, 0.9}},
+        {"wetDilution", {none, 0.8}},
+        {"wetnessJitter", {none, 1.0}},
+        // Stabilisation
+        {"smoothing", {none, 80}},
+        {"pressureSmoothing", {none, 1.0}},
+        {"jitterFilter", {none, 12.0}},
+        {"smoothingFinish", {[](BrushSettings &s) { s.smoothing = 80; }, false}},
+        // Taper
+        {"taperStart", {none, 120.0}},
+        {"taperEnd", {none, 120.0}},
+        {"taperStartSize", {[](BrushSettings &s) { s.taperStart = 120; }, 0.9}},
+        {"taperEndSize", {[](BrushSettings &s) { s.taperEnd = 120; }, 0.9}},
+        {"taperOpacity", {[](BrushSettings &s) { s.taperStart = 120; }, 1.0}},
+        {"taperShape", {[](BrushSettings &s) { s.taperStart = 120; }, 3.0}},
+        // Special effects
+        {"sprayDensity", {none, 150.0}},
+        {"sprayParticleSize", {none, 6.0}},
+        {"sprayParticleJitter", {none, 1.0}},
+        {"hatchAngle", {none, -30.0}},
+        {"hatchSpacing", {none, 12.0}},
+        {"hatchThickness", {none, 4.0}},
+    };
+}
+
+} // namespace
+
+class TestBrushEngine : public QObject
+{
+    Q_OBJECT
+
+private slots:
+    // --- sensor curves ---
+
+    void sensorCurves()
+    {
+        const SensorCurve lin;
+        for (double x : {0.0, 0.1, 0.37, 0.5, 0.99, 1.0})
+            QVERIFY(std::abs(lin.value(x) - x) < 1e-9);
+        QVERIFY(std::abs(SensorCurve::inverted().value(0.25) - 0.75) < 1e-9);
+        const SensorCurve step = SensorCurve::threshold(0.5);
+        QCOMPARE(step.value(0.3), 0.0);
+        QCOMPARE(step.value(0.6), 1.0);
+        const SensorCurve firm = SensorCurve::exponential(2.0);
+        QVERIFY(std::abs(firm.value(0.5) - 0.25) < 0.01);
+        const SensorCurve band = SensorCurve::clamped(0.2, 0.8);
+        QVERIFY(std::abs(band.value(0.0) - 0.2) < 1e-9);
+        QVERIFY(std::abs(band.value(1.0) - 0.8) < 1e-9);
+        for (const SensorCurve &c : {firm, step, band, SensorCurve::exponential(0.4)}) {
+            double last = -1;
+            for (int i = 0; i <= 200; ++i) {
+                const double y = c.value(i / 200.0);
+                QVERIFY(y >= last - 1e-12); // these presets are monotone
+                last = y;
+            }
+        }
+        // Monotone cubic: never overshoots its points, even for a spike.
+        const SensorCurve spike({{0, 0}, {0.1, 1}, {0.2, 0}, {1, 1}});
+        for (int i = 0; i <= 1000; ++i) {
+            const double x = i / 1000.0, y = spike.value(x);
+            QVERIFY(y >= 0 && y <= 1);
+            if (x > 0.1 && x < 0.2)
+                QVERIFY(y <= 1.0 && y >= 0.0);
+        }
+        // Sanitising: sorted, NaN dropped, at most 16 points, and never fewer than 2.
+        const SensorCurve messy({{1, 1}, {0, 0}, {0.5, std::nan("")}, {0.5, 0.3}});
+        QCOMPARE(messy.points().size(), size_t(3));
+        QCOMPARE(messy.points()[1], QPointF(0.5, 0.3));
+        std::vector<QPointF> many;
+        for (int i = 0; i < 30; ++i)
+            many.emplace_back(i / 29.0, 0.5);
+        QCOMPARE(SensorCurve(many).points().size(), size_t(SensorCurve::MaxPoints));
+        QCOMPARE(SensorCurve({{0.5, 0.5}}).points().size(), size_t(2));
+        // JSON
+        SensorCurve back;
+        QVERIFY(SensorCurve::fromJson(firm.toJson(), &back));
+        QCOMPARE(back, firm);
+        QVERIFY(!SensorCurve::fromJson(QJsonArray{QJsonArray{0, 0}}, &back));
+        QVERIFY(!SensorCurve::fromJson(QJsonArray{QJsonArray{0, "a"}, QJsonArray{1, 1}}, &back));
+        QVERIFY(!SensorCurve::fromJson(QJsonArray{1, 2}, &back));
+    }
+
+    void dynamicsCombination()
+    {
+        ParameterDynamics d;
+        d.enabled = true;
+        d.mappings = {{Sensor::Pressure, SensorCurve(), 0}, {Sensor::TiltMagnitude, SensorCurve(), 0}};
+        SensorReadings r;
+        r.set(Sensor::Pressure, 0.5);
+        r.set(Sensor::TiltMagnitude, 30); // degrees: 0.5 of full tilt
+        auto eval = [&](CombineMode mode, double minimum = 0) {
+            ParameterDynamics x = d;
+            x.combine = mode;
+            x.minimum = minimum;
+            double v = -1;
+            const bool ok = CompiledDynamics(x, DynamicTarget::Size).evaluate(r, &v);
+            return ok ? v : -1.0;
+        };
+        QVERIFY(std::abs(eval(CombineMode::Multiply) - 0.25) < 0.01);
+        QVERIFY(std::abs(eval(CombineMode::Add) - 1.0) < 0.01);
+        QVERIFY(std::abs(eval(CombineMode::Max) - 0.5) < 0.01);
+        QVERIFY(std::abs(eval(CombineMode::Min) - 0.5) < 0.01);
+        QVERIFY(std::abs(eval(CombineMode::Difference)) < 0.01);
+        QVERIFY(std::abs(eval(CombineMode::Multiply, 0.5) - 0.625) < 0.01);
+        // A sensor without data is left out; none at all: no value (the parameter keeps its base).
+        r.available[size_t(Sensor::TiltMagnitude)] = false;
+        QVERIFY(std::abs(eval(CombineMode::Multiply) - 0.5) < 0.01);
+        r.available[size_t(Sensor::Pressure)] = false;
+        QCOMPARE(eval(CombineMode::Multiply), -1.0);
+        d.enabled = false;
+        r.set(Sensor::Pressure, 0.5);
+        QCOMPARE(eval(CombineMode::Multiply), -1.0);
+        // Random: repeatable per (seed, dab, parameter), different across dabs and parameters.
+        ParameterDynamics rnd;
+        rnd.enabled = true;
+        rnd.mappings = {{Sensor::Random, SensorCurve(), 0}};
+        SensorReadings a;
+        a.seed = 9;
+        a.dabIndex = 3;
+        double v1, v2, v3, v4;
+        QVERIFY(CompiledDynamics(rnd, DynamicTarget::Size).evaluate(a, &v1));
+        QVERIFY(CompiledDynamics(rnd, DynamicTarget::Size).evaluate(a, &v2));
+        QCOMPARE(v1, v2);
+        QVERIFY(CompiledDynamics(rnd, DynamicTarget::Opacity).evaluate(a, &v3));
+        QVERIFY(v3 != v1);
+        a.dabIndex = 4;
+        QVERIFY(CompiledDynamics(rnd, DynamicTarget::Size).evaluate(a, &v4));
+        QVERIFY(v4 != v1);
+    }
+
+    void dynamicsJson()
+    {
+        ParameterDynamics d;
+        d.enabled = true;
+        d.minimum = 0.2;
+        d.combine = CombineMode::Max;
+        d.mappings = {{Sensor::Speed, SensorCurve::inverted(), 4.0}, {Sensor::Random, SensorCurve::threshold(0.7), 0}};
+        ParameterDynamics back;
+        QString error;
+        QVERIFY(ParameterDynamics::fromJson(d.toJson(), &back, &error));
+        QCOMPARE(back, d);
+        QJsonObject bad = d.toJson();
+        bad["combine"] = "sometimes";
+        QVERIFY(!ParameterDynamics::fromJson(bad, &back, &error));
+        bad = d.toJson();
+        bad["sensors"] = QJsonArray{QJsonObject{{"sensor", "mood"}}};
+        QVERIFY(!ParameterDynamics::fromJson(bad, &back, &error));
+        QVERIFY(error.contains("mood"));
+        // Ranges are clamped; mappings beyond the maximum are dropped.
+        bad = d.toJson();
+        bad["sensors"] = QJsonArray{QJsonObject{{"sensor", "speed"}, {"range", 1e9}}, QJsonObject{{"sensor", "random"}},
+                                    QJsonObject{{"sensor", "random"}}, QJsonObject{{"sensor", "random"}},
+                                    QJsonObject{{"sensor", "random"}}};
+        QVERIFY(ParameterDynamics::fromJson(bad, &back, &error));
+        QCOMPARE(int(back.mappings.size()), ParameterDynamics::MaxMappings);
+        QCOMPARE(back.mappings[0].range, Sensors::maxRange(Sensor::Speed));
+    }
+
+    // --- sensors driving parameters (simulated input) ---
+
+    void dynamicsPressureToSize()
+    {
+        BrushSettings s = baseSettings();
+        s.size = 40;
+        s.pressureSize.enabled = false;
+        set(s, "dynamics.size", dynamicsMap(Sensor::Pressure));
+        auto pressure = [](double t) { return t < 0.5 ? 0.25 : 1.0; };
+        const QImage img = render(s, line({30, 100}, {370, 100}, 170, pressure), transparentCanvas());
+        QVERIFY(std::abs(columnHeight(img, 100) - 10) <= 2);
+        QVERIFY(std::abs(columnHeight(img, 300) - 40) <= 2);
+        // A device without pressure: no reading, so the size stays the brush size.
+        auto noPressure = line({30, 100}, {370, 100}, 170, pressure);
+        for (StrokeSample &x : noPressure)
+            x.hasPressure = false;
+        const QImage flat = render(s, noPressure, transparentCanvas());
+        QVERIFY(std::abs(columnHeight(flat, 100) - 40) <= 2);
+        // Inverted curve: light pressure is large.
+        set(s, "dynamics.size", dynamicsMap(Sensor::Pressure, SensorCurve::inverted(), 0.2));
+        const QImage inv = render(s, line({30, 100}, {370, 100}, 170, pressure), transparentCanvas());
+        QVERIFY(columnHeight(inv, 100) > columnHeight(inv, 300));
+    }
+
+    void dynamicsPressureToOpacityAndFlow()
+    {
+        BrushSettings s = baseSettings();
+        s.pressureSize.enabled = false;
+        set(s, "dynamics.opacity", dynamicsMap(Sensor::Pressure));
+        auto pressure = [](double t) { return t < 0.5 ? 0.3 : 1.0; };
+        const auto stroke = line({30, 100}, {370, 100}, 170, pressure);
+        const QImage img = render(s, stroke, transparentCanvas());
+        QVERIFY(std::abs(columnMaxAlpha(img, 100) - 77) <= 2); // round(0.3 × 255)
+        QCOMPARE(columnMaxAlpha(img, 300), 255);
+        // Flow: a build-up brush deposits less per pass at light pressure, below the ceiling.
+        BrushSettings f = baseSettings();
+        f.pressureSize.enabled = false;
+        f.accumulation = Accumulation::BuildUp;
+        f.flow = 0.6;
+        set(f, "dynamics.flow", dynamicsMap(Sensor::Pressure));
+        const QImage flow = render(f, stroke, transparentCanvas());
+        QVERIFY(columnMaxAlpha(flow, 100) < columnMaxAlpha(flow, 300));
+        // One pass deposits the flow along the centre, within the discreteness of the dab count.
+        QVERIFY2(columnMaxAlpha(flow, 300) <= 255 * 0.6 + 6,
+                 qPrintable(QString("%1 %2").arg(columnMaxAlpha(flow, 100)).arg(columnMaxAlpha(flow, 300))));
+    }
+
+    void dynamicsTiltToRotation()
+    {
+        BrushSettings s = baseSettings();
+        s.size = 60;
+        s.roundness = 0.2;
+        s.pressureSize.enabled = false;
+        set(s, "dynamics.rotation", dynamicsMap(Sensor::TiltDirection));
+        auto dot = [&](double tiltX, double tiltY) {
+            StrokeSample a = sample(200, 100);
+            a.hasTilt = true;
+            a.tiltX = tiltX;
+            a.tiltY = tiltY;
+            return render(s, {a}, transparentCanvas());
+        };
+        auto extent = [](const QImage &img) {
+            QRect r;
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = 0; x < img.width(); ++x)
+                    if (qAlpha(img.pixel(x, y)) > 127)
+                        r |= QRect(x, y, 1, 1);
+            return r;
+        };
+        const QRect east = extent(dot(40, 0)); // azimuth 0: tip along x
+        const QRect south = extent(dot(0, 40)); // azimuth 90°: tip along y
+        QVERIFY(east.width() > east.height() * 3);
+        QVERIFY(south.height() > south.width() * 3);
+        // Without tilt data the angle is the brush's own (along x).
+        const QRect none = extent(render(s, {sample(200, 100)}, transparentCanvas()));
+        QVERIFY(none.width() > none.height() * 3);
+    }
+
+    void dynamicsSpeedToSpacing()
+    {
+        BrushSettings s = baseSettings();
+        s.spacing = 0.5;
+        // Spacing follows speed: slow strokes place dabs close together, fast ones far apart.
+        set(s, "dynamics.spacing", dynamicsMap(Sensor::Speed, SensorCurve::linear(), 0.05));
+        qint64 slow = 0, fast = 0, untimed = 0;
+        render(s, line({30, 100}, {370, 100}, 170, nullptr, 20.0), transparentCanvas(), 7, Paint, QImage(), &slow);
+        render(s, line({30, 100}, {370, 100}, 170, nullptr, 1.0), transparentCanvas(), 7, Paint, QImage(), &fast);
+        render(s, line({30, 100}, {370, 100}, 170), transparentCanvas(), 7, Paint, QImage(), &untimed);
+        QVERIFY2(slow > fast * 3, qPrintable(QString("slow %1, fast %2").arg(slow).arg(fast)));
+        // Without event times there is no speed: the spacing is the brush's own.
+        QVERIFY(std::abs(untimed - (340.0 / 12.0 + 1)) <= 2);
+    }
+
+    void dynamicsAreStableAtExtremes()
+    {
+        BrushSettings s = baseSettings();
+        set(s, "dynamics.size", dynamicsMap(Sensor::Speed));
+        set(s, "dynamics.opacity", dynamicsMap(Sensor::Pressure));
+        set(s, "dynamics.spacing", dynamicsMap(Sensor::Acceleration, SensorCurve::inverted()));
+        set(s, "dynamics.rotation", dynamicsMap(Sensor::Direction));
+        s.minimumSize = 2;
+        std::vector<StrokeSample> v{sample(10, 10, 0.0, 0), sample(20, 10, std::nan(""), 0), // duplicate time
+                                    sample(30, 10, 0.0, -5),                                 // time going back
+                                    sample(390, 190, 1.0, 1),                                // 380 px in 1 ms
+                                    sample(390, 190, 1.0, 1), sample(10, 190, 2.0, 1e9), sample(200, 100, -1, 1e9 + 1)};
+        qint64 dabs = 0;
+        const QImage img = render(s, v, transparentCanvas(), 7, Paint, QImage(), &dabs);
+        QVERIFY(validPremultiplied(img));
+        QVERIFY(dabs > 0 && dabs < 20000);
+        // Zero pressure with a pressure-driven size never gives a zero or negative dab.
+        BrushSettings z = baseSettings();
+        set(z, "dynamics.size", dynamicsMap(Sensor::Pressure));
+        const QImage zero = render(z, line({30, 100}, {370, 100}, 100, [](double) { return 0.0; }), transparentCanvas());
+        QVERIFY(validPremultiplied(zero));
+        QVERIFY(columnMaxAlpha(zero, 200) > 0); // minimum size 1 px still draws
+    }
+
+    void randomSeedReproducibility()
+    {
+        BrushSettings s = baseSettings();
+        s.sizeJitter = 0.5;
+        s.scatter = 0.8;
+        s.hueJitter = 60;
+        s.tipDensity = 0.6;
+        set(s, "dynamics.rotation", dynamicsMap(Sensor::Random));
+        s.roundness = 0.4;
+        const auto stroke = standardStroke();
+        const QImage a = render(s, stroke, stripes(), 3);
+        const QImage b = render(s, stroke, stripes(), 3);
+        QCOMPARE(a, b);
+        QVERIFY(differingPixels(a, render(s, stroke, stripes(), 4)) > 100);
+        // Splitting the input differently gives the same pixels.
+        QImage split = stripes();
+        TileSnapshot before;
+        StrokeEngine e(s, Paint, 3, 0);
+        e.begin(split, stroke.front(), before);
+        for (size_t i = 1; i < stroke.size(); ++i) {
+            if (i % 2 == 0) { // an extra event half way along each segment
+                StrokeSample mid = StrokeSample::lerp(stroke[i - 1], stroke[i], 0.5);
+                e.moveTo(split, mid, before);
+            }
+            e.moveTo(split, stroke[i], before);
+        }
+        e.finish(split, before);
+        QVERIFY(differingPixels(split, a) < a.width() * a.height() / 50); // only the spacing phase may shift
+    }
+
+    void colorDynamicsVaryPerDab()
+    {
+        BrushSettings s = baseSettings();
+        s.size = 30;
+        const auto stroke = line({30, 100}, {370, 100}, 170);
+        const QImage plain = render(s, stroke, transparentCanvas());
+        s.hueJitter = 180;
+        const QImage varied = render(s, stroke, transparentCanvas());
+        QSet<int> hues;
+        for (int x = 30; x < 370; x += 2) {
+            const QColor c = QColor::fromRgba(varied.pixel(x, 100));
+            if (c.alpha() == 255)
+                hues.insert(c.hslHue() / 10);
+        }
+        QVERIFY2(hues.size() > 8, qPrintable(QString::number(hues.size())));
+        // Colour changes never change coverage.
+        for (int y = 0; y < plain.height(); ++y)
+            for (int x = 0; x < plain.width(); ++x)
+                QCOMPARE(qAlpha(varied.pixel(x, y)), qAlpha(plain.pixel(x, y)));
+        // Pressure → lightness: light pressure is darker (lightness × value).
+        BrushSettings l = baseSettings();
+        l.pressureSize.enabled = false;
+        set(l, "dynamics.lightness", dynamicsMap(Sensor::Pressure, SensorCurve(), 0.2));
+        const QImage lit = render(l, line({30, 100}, {370, 100}, 170, [](double t) { return t < 0.5 ? 0.0 : 1.0; }),
+                                  transparentCanvas());
+        QVERIFY(QColor::fromRgba(lit.pixel(100, 100)).lightness() < QColor::fromRgba(lit.pixel(300, 100)).lightness());
+        QCOMPARE(QColor::fromRgba(lit.pixel(300, 100)).rgb(), Paint.rgb());
+    }
+
+    void taperStartAndEnd()
+    {
+        BrushSettings s = baseSettings();
+        s.size = 30;
+        s.pressureSize.enabled = false;
+        s.taperStart = 100;
+        s.taperEnd = 100;
+        const auto stroke = line({30, 100}, {370, 100}, 170);
+        const QImage img = render(s, stroke, transparentCanvas());
+        QVERIFY(columnHeight(img, 40) < 10);
+        QVERIFY(std::abs(columnHeight(img, 200) - 30) <= 1);
+        QVERIFY(columnHeight(img, 360) < 10);
+        QVERIFY(columnHeight(img, 80) < columnHeight(img, 120));
+        QVERIFY(columnHeight(img, 320) < columnHeight(img, 280));
+        // The end is held back until the pen lifts, then drawn with the taper.
+        QImage live = transparentCanvas();
+        TileSnapshot before;
+        StrokeEngine e(s, Paint, 7, 0);
+        e.begin(live, stroke.front(), before);
+        for (size_t i = 1; i < stroke.size(); ++i)
+            e.moveTo(live, stroke[i], before);
+        QCOMPARE(columnMaxAlpha(live, 330), 0);
+        QVERIFY(columnMaxAlpha(live, 200) > 0);
+        e.finish(live, before);
+        QCOMPARE(live, img);
+    }
+
+    void sprayAndHatching()
+    {
+        BrushSettings spray = baseSettings();
+        spray.size = 60;
+        spray.stamp = BrushStamp::Spray;
+        spray.sprayDensity = 40;
+        spray.sprayParticleSize = 2;
+        spray.spacing = 2.0; // separate dabs
+        const QImage dots = render(spray, line({60, 100}, {340, 100}, 20), transparentCanvas());
+        int covered = 0, area = 0;
+        for (int y = 70; y < 130; ++y)
+            for (int x = 60; x < 340; ++x) {
+                ++area;
+                covered += qAlpha(dots.pixel(x, y)) > 0;
+            }
+        QVERIFY(covered > area / 50 && covered < area / 2);
+        QCOMPARE(dots, render(spray, line({60, 100}, {340, 100}, 20), transparentCanvas())); // deterministic
+
+        BrushSettings hatch = baseSettings();
+        hatch.size = 120;
+        hatch.stamp = BrushStamp::Hatching;
+        hatch.hatchAngle = 0; // horizontal lines
+        hatch.hatchSpacing = 10;
+        hatch.hatchThickness = 2;
+        const QImage lines = render(hatch, line({100, 100}, {300, 100}, 50), transparentCanvas());
+        // Down a column the alpha alternates with the line period.
+        int runs = 0;
+        bool inLine = false;
+        for (int y = 50; y < 150; ++y) {
+            const bool on = qAlpha(lines.pixel(200, y)) > 127;
+            if (on && !inLine)
+                ++runs;
+            inLine = on;
+        }
+        QVERIFY2(runs >= 9 && runs <= 11, qPrintable(QString::number(runs)));
+    }
+
+    void paintModes()
+    {
+        QImage bg = transparentCanvas();
+        QPainter(&bg).fillRect(QRect(0, 0, 200, 200), QColor(128, 128, 128));
+        BrushSettings s = baseSettings();
+        s.size = 30;
+        const auto stroke = line({20, 100}, {380, 100}, 180);
+        auto at = [&](const char *mode, int x) {
+            BrushSettings m = s;
+            set(m, "paintMode", QString::fromLatin1(mode));
+            return QColor::fromRgba(render(m, stroke, bg).pixel(x, 100));
+        };
+        QCOMPARE(at("normal", 100).rgb(), Paint.rgb());
+        const QColor mul = at("multiply", 100);
+        QVERIFY(std::abs(mul.red() - 200 * 128 / 255) <= 1 && std::abs(mul.blue() - 40 * 128 / 255) <= 1);
+        QCOMPARE(at("multiply", 300).rgb(), Paint.rgb()); // over transparency: the colour itself
+        const QColor scr = at("screen", 100);
+        QVERIFY(scr.red() > 200 && scr.blue() > 128);
+        QCOMPARE(at("behind", 100).rgb(), QColor(128, 128, 128).rgb()); // opaque paint stays in front
+        QCOMPARE(at("behind", 300).rgb(), Paint.rgb());
+        QCOMPARE(at("preserveAlpha", 100).rgb(), Paint.rgb());
+        QCOMPARE(at("preserveAlpha", 300).alpha(), 0); // transparency stays transparent
+    }
+
+    void smudgeModes()
+    {
+        BrushSettings s = baseSettings();
+        s.blend = BrushBlend::Smudge;
+        s.size = 40;
+        s.smudgeStrength = 0.9;
+        const auto stroke = line({20, 100}, {300, 100}, 140);
+        const QImage smear = render(s, stroke, stripes());
+        s.smudgeMode = SmudgeMode::Dulling;
+        const QImage dull = render(s, stroke, stripes());
+        QVERIFY(differingPixels(smear, dull) > 1000);
+        // Dulling carries one colour: across the stroke the smudged pixels are more alike.
+        auto spread = [](const QImage &img, int x) {
+            int lo = 255, hi = 0;
+            for (int y = 90; y <= 110; ++y) {
+                lo = std::min(lo, qRed(img.pixel(x, y)));
+                hi = std::max(hi, qRed(img.pixel(x, y)));
+            }
+            return hi - lo;
+        };
+        QVERIFY(spread(dull, 150) <= spread(smear, 150) + 2);
+        // Colour rate paints the brush colour in while smudging.
+        BrushSettings tint = baseSettings();
+        tint.blend = BrushBlend::Smudge;
+        tint.size = 40;
+        tint.smudgeColorRate = 0.8;
+        const QImage tinted = render(tint, stroke, stripes(), 7, QColor(0, 255, 0));
+        QVERIFY(qGreen(tinted.pixel(250, 100)) > qGreen(smear.pixel(250, 100)) + 30);
+    }
+
+    void wetPaintLoadsDepositsAndDrags()
+    {
+        BrushSettings s = baseSettings();
+        s.blend = BrushBlend::WetPaint;
+        s.size = 30;
+        s.pressureSize.enabled = false;
+        s.wetLoadLength = 120;
+        s.wetAttack = 0.8;
+        const auto stroke = line({20, 100}, {380, 100}, 180);
+        const QImage onEmpty = render(s, stroke, transparentCanvas());
+        // Charged: brush colour at the start; the load runs out, so the far end gets nothing new.
+        const QColor start = QColor::fromRgba(qUnpremultiply(onEmpty.pixel(40, 100)));
+        // Attack 0.8 per pass, less what the pull takes back up from the empty layer.
+        QVERIFY2(start.alpha() > 170, qPrintable(QString("alpha %1 at 40, %2 at 100, %3 at 360").arg(start.alpha())
+                                                    .arg(qAlpha(onEmpty.pixel(100, 100))).arg(qAlpha(onEmpty.pixel(360, 100)))));
+        QVERIFY(std::abs(start.red() - Paint.red()) < 30 && std::abs(start.green() - Paint.green()) < 30);
+        QVERIFY(qAlpha(onEmpty.pixel(360, 100)) < qAlpha(onEmpty.pixel(40, 100)) / 2);
+        // Dilution thins the paint.
+        BrushSettings thin = s;
+        thin.wetDilution = 0.7;
+        QVERIFY(qAlpha(render(thin, stroke, transparentCanvas()).pixel(40, 100)) < start.alpha() - 60);
+        // Pull drags canvas paint: after the red band, the brush lays down reddish paint.
+        BrushSettings drag = s;
+        drag.wetLoad = 0;
+        drag.wetPull = 0.6;
+        const QImage dragged = render(drag, stroke, stripes());
+        QVERIFY(qRed(dragged.pixel(45, 100)) > 60 && qAlpha(dragged.pixel(45, 100)) > 60); // into the transparent band
+        QVERIFY(validPremultiplied(dragged));
+        // A feathered selection is applied once: nothing changes where it is 0.
+        QImage clip(400, 200, QImage::Format_Grayscale8);
+        clip.fill(0);
+        QPainter(&clip).fillRect(QRect(100, 0, 200, 200), QColor(255, 255, 255));
+        const QImage clipped = render(drag, stroke, stripes(), 7, Paint, clip);
+        const QImage bg = stripes();
+        for (int x : {50, 90, 310, 350})
+            QCOMPARE(clipped.pixel(x, 100), bg.pixel(x, 100));
+        QVERIFY(clipped.pixel(150, 100) != bg.pixel(150, 100));
+    }
+
+    void importedTipIsUsedAndSaved()
+    {
+        const QImage tip = BrushProperties::tipFromImage(asymmetricImage());
+        QCOMPARE(tip.format(), QImage::Format_Grayscale8);
+        QCOMPARE(tip.width(), tip.height());
+        QVERIFY(tip.pixelColor(10, 10).red() > 200 && tip.pixelColor(50, 50).red() == 0);
+        // An opaque image uses darkness.
+        QImage opaque(32, 16, QImage::Format_RGB32);
+        opaque.fill(Qt::white);
+        QPainter(&opaque).fillRect(QRect(0, 0, 8, 16), Qt::black);
+        const QImage fromDark = BrushProperties::tipFromImage(opaque);
+        QCOMPARE(fromDark.size(), QSize(32, 32));
+        QVERIFY(fromDark.pixelColor(2, 16).red() == 255 && fromDark.pixelColor(20, 16).red() == 0);
+        QVERIFY(BrushProperties::tipFromImage(QImage(1000, 600, QImage::Format_ARGB32)).width() <= BrushSettings::MaxTipImageSize);
+
+        BrushSettings s = baseSettings();
+        s.size = 64;
+        s.tipImage = tip;
+        const QImage dot = render(s, {sample(200, 100)}, transparentCanvas());
+        // The triangle's corner is upper left: more paint there than lower right.
+        QVERIFY(qAlpha(dot.pixel(180, 80)) > 200);
+        QCOMPARE(qAlpha(dot.pixel(220, 120)), 0);
+
+        BrushSettings back;
+        QString error;
+        QStringList warnings;
+        QVERIFY(BrushSettings::fromJson(s.toJson(), &back, &error, &warnings));
+        QCOMPARE(back.tipImage, s.tipImage);
+        QVERIFY(back == s);
+        QJsonObject broken = s.toJson();
+        broken["tipImage"] = "not a png!";
+        QVERIFY(BrushSettings::fromJson(broken, &back, &error, &warnings));
+        QVERIFY(back.tipImage.isNull());
+        QVERIFY(!warnings.isEmpty());
+    }
+
+    // --- presets ---
+
+    void presetFormat2RoundTripAndUnknownKeys()
+    {
+        BrushSettings s = baseSettings();
+        s.blend = BrushBlend::WetPaint;
+        s.scatter = 0.5;
+        s.count = 3;
+        s.hueJitter = 30;
+        s.taperEnd = 80;
+        s.textureRotation = 30;
+        s.paintMode = PaintMode::Screen;
+        s.smudgeMode = SmudgeMode::Dulling;
+        set(s, "dynamics.size", dynamicsMap(Sensor::Speed, SensorCurve::exponential(2), 0.3));
+        set(s, "dynamics.hue", dynamicsMap(Sensor::Random, SensorCurve::threshold(0.4)));
+        BrushSettings back;
+        QString error;
+        QVERIFY(BrushSettings::fromJson(s.toJson(), &back, &error));
+        QVERIFY(back == s);
+        QCOMPARE(back.toJson(), s.toJson());
+        // Keys from a newer version survive a round trip, at the top level and inside dynamics.
+        QJsonObject future = s.toJson();
+        future["glitter"] = QJsonObject{{"amount", 0.5}};
+        QJsonObject dyn = future["dynamics"].toObject();
+        dyn["sparkle"] = QJsonObject{{"enabled", true}};
+        future["dynamics"] = dyn;
+        QVERIFY(BrushSettings::fromJson(future, &back, &error));
+        QCOMPARE(back.toJson()["glitter"], future["glitter"]);
+        QCOMPARE(back.toJson()["dynamics"].toObject()["sparkle"], dyn["sparkle"]);
+        QVERIFY(back.toJson()["dynamics"].toObject().contains("size"));
+        // Version 1 settings (milestone 6) load with the new properties at their defaults.
+        const QJsonObject v1{{"name", "Old ink"}, {"size", 9.0}, {"pressureSize", QJsonObject{{"enabled", true}, {"minimum", 0.2}, {"gamma", 1.5}}},
+                             {"accumulation", "buildUp"}, {"texture", "paper"}, {"textureStrength", 0.3}};
+        QVERIFY(BrushSettings::fromJson(v1, &back, &error));
+        QCOMPARE(back.size, 9.0);
+        QCOMPARE(back.pressureSize.gamma, 1.5);
+        QCOMPARE(back.count, 1);
+        QVERIFY(!back.dynamicsFor(DynamicTarget::Size).enabled);
+        // Wrong types and unknown option names are refused; unknown resource ids only warned about.
+        QJsonObject bad = s.toJson();
+        bad["count"] = "three";
+        QVERIFY(!BrushSettings::fromJson(bad, &back, &error));
+        bad = s.toJson();
+        bad["paintMode"] = "glow";
+        QVERIFY(!BrushSettings::fromJson(bad, &back, &error));
+        bad = s.toJson();
+        bad["dynamics"] = QJsonObject{{"size", QJsonObject{{"sensors", QJsonArray{QJsonObject{{"sensor", "mood"}}}}}}};
+        QVERIFY(!BrushSettings::fromJson(bad, &back, &error));
+        QStringList warnings;
+        bad = s.toJson();
+        bad["tip"] = "future-tip";
+        QVERIFY(BrushSettings::fromJson(bad, &back, &error, &warnings));
+        QCOMPARE(back.tip, QStringLiteral("future-tip")); // kept, drawn round
+        QVERIFY(!warnings.isEmpty());
+        // Out-of-range values are clamped.
+        bad = s.toJson();
+        bad["count"] = 1000;
+        bad["scatter"] = -3;
+        QVERIFY(BrushSettings::fromJson(bad, &back, &error));
+        QCOMPARE(back.count, 16);
+        QCOMPARE(back.scatter, 0.0);
+    }
+
+    void malformedPresetFuzz()
+    {
+        // Random type swaps and values in a full preset: never a crash, and anything accepted is
+        // within range and renders.
+        BrushSettings s = baseSettings();
+        set(s, "dynamics.size", dynamicsMap(Sensor::Pressure));
+        const QJsonObject valid = s.toJson();
+        const QStringList keys = valid.keys();
+        QRandomGenerator rng(1234);
+        const QJsonValue junk[] = {QJsonValue(), QJsonValue(true), QJsonValue(-1e300), QJsonValue(1e300),
+                                   QJsonValue(QStringLiteral("x")), QJsonValue(QJsonArray{1, 2}), QJsonValue(QJsonObject{{"a", 1}}),
+                                   QJsonValue(0.5), QJsonValue(qQNaN())};
+        int accepted = 0;
+        for (int i = 0; i < 400; ++i) {
+            QJsonObject o = valid;
+            const int changes = 1 + int(rng.bounded(3));
+            for (int k = 0; k < changes; ++k)
+                o[keys[int(rng.bounded(keys.size()))]] = junk[rng.bounded(int(std::size(junk)))];
+            BrushSettings out;
+            QString error;
+            QStringList warnings;
+            if (!BrushSettings::fromJson(o, &out, &error, &warnings)) {
+                QVERIFY(!error.isEmpty());
+                continue;
+            }
+            ++accepted;
+            for (const BrushProperty &p : BrushProperties::all()) {
+                if (!p.implemented || (p.type != PropertyType::Number && p.type != PropertyType::Integer))
+                    continue;
+                const double v = p.get(out).toDouble();
+                QVERIFY2(std::isfinite(v) && v >= p.minimum && v <= p.maximum, qPrintable(p.id));
+            }
+            if (i % 20 == 0)
+                QVERIFY(validPremultiplied(render(out, line({10, 50}, {120, 60}, 10), transparentCanvas({140, 100}))));
+        }
+        QVERIFY2(accepted > 10, qPrintable(QString::number(accepted)));
+    }
+
+    void randomSettingsFuzz()
+    {
+        // Every implemented property at random values, including outside its range: rendering
+        // stays bounded and valid.
+        QRandomGenerator rng(99);
+        const auto stroke = standardStroke();
+        for (int i = 0; i < 60; ++i) {
+            BrushSettings s = baseSettings();
+            for (const BrushProperty &p : BrushProperties::all()) {
+                if (!p.implemented || rng.bounded(3) != 0)
+                    continue;
+                switch (p.type) {
+                case PropertyType::Number:
+                case PropertyType::Integer: {
+                    const double span = p.maximum - p.minimum;
+                    p.set(s, p.minimum - span * 0.2 + rng.generateDouble() * span * 1.4);
+                    break;
+                }
+                case PropertyType::Bool: p.set(s, rng.bounded(2) == 1); break;
+                case PropertyType::Choice: p.set(s, p.choices.value(int(rng.bounded(p.choices.size())))); break;
+                case PropertyType::Dynamics:
+                    p.set(s, dynamicsMap(Sensor(rng.bounded(SensorCount)), SensorCurve::exponential(0.3 + rng.generateDouble() * 3)));
+                    break;
+                default: break;
+                }
+            }
+            s = s.sanitized();
+            s.size = std::min(s.size, 80.0); // keep the test quick
+            s.sprayDensity = std::min(s.sprayDensity, 60.0);
+            s.smoothing = std::min(s.smoothing, 30);
+            qint64 dabs = 0;
+            const QImage img = render(s, stroke, stripes(), quint64(i), Paint, QImage(), &dabs);
+            QVERIFY(validPremultiplied(img));
+            QVERIFY(dabs < 200000);
+        }
+    }
+
+    // --- the registry ---
+
+    void registryIsComplete()
+    {
+        const auto &all = BrushProperties::all();
+        QCOMPARE(BrushProperties::designTargetCount(), 120);
+        const std::map<QString, int> target{{"Brush Tip", 12},        {"Stroke Path", 10},       {"Pressure and Tilt", 12},
+                                            {"Opacity and Flow", 8},  {"Texture and Grain", 12}, {"Shape Dynamics", 12},
+                                            {"Color Dynamics", 10},   {"Blending and Smudge", 12}, {"Wet Paint", 10},
+                                            {"Stabilization", 8},     {"Taper", 8},              {"Special Effects", 6}};
+        for (const auto &[group, count] : target)
+            QCOMPARE(int(std::count_if(all.begin(), all.end(), [&](const BrushProperty &p) { return p.group == group; })), count);
+        QSet<QString> ids;
+        int implemented = 0;
+        for (const BrushProperty &p : all) {
+            QVERIFY2(!ids.contains(p.id), qPrintable(p.id));
+            ids.insert(p.id);
+            QVERIFY2(!p.name.isEmpty() && !p.description.isEmpty(), qPrintable(p.id));
+            if (!p.implemented) {
+                QVERIFY2(!p.get && !p.set, qPrintable(p.id));
+                QVERIFY2(p.description.contains("Not implemented") || p.description.contains("Planned"), qPrintable(p.id));
+                continue;
+            }
+            if (p.group != QLatin1String("Engine"))
+                ++implemented;
+            QVERIFY2(p.get && p.set && !p.rendering.isEmpty() && !p.cost.isEmpty() && !p.tests.isEmpty(), qPrintable(p.id));
+            QVERIFY2(p.engines != 0, qPrintable(p.id));
+            const QVariant d = p.defaultValue();
+            if (p.type == PropertyType::Number || p.type == PropertyType::Integer)
+                QVERIFY2(d.toDouble() >= p.minimum && d.toDouble() <= p.maximum, qPrintable(p.id));
+            if (p.type == PropertyType::Choice)
+                QVERIFY2(p.choices.contains(d.toString()) && p.choices.size() == p.choiceLabels.size(), qPrintable(p.id));
+        }
+        QCOMPARE(implemented, BrushProperties::implementedCount());
+        qInfo("Implemented brush properties: %d of %d", implemented, BrushProperties::designTargetCount());
+    }
+
+    void everyImplementedPropertyChangesRendering()
+    {
+        const auto table = scenarios();
+        const auto stroke = standardStroke();
+        int checked = 0;
+        for (const BrushProperty &p : BrushProperties::all()) {
+            if (!p.implemented)
+                continue;
+            const auto it = table.find(p.id);
+            QVERIFY2(it != table.end(), qPrintable(QStringLiteral("no rendering scenario for ") + p.id));
+            BrushSettings base = baseSettings();
+            const unsigned engine = testEngine(p.engines);
+            applyEngine(base, engine);
+            it->second.setup(base);
+            base = base.sanitized();
+            BrushSettings changed = base;
+            p.set(changed, it->second.changed);
+            changed = changed.sanitized();
+            QVERIFY2(changed != base, qPrintable(QStringLiteral("%1: the changed value equals the default").arg(p.id)));
+            QVERIFY2(BrushProperties::appliesTo(p, base), qPrintable(p.id));
+            const QImage a = render(base, stroke, stripes());
+            const QImage b = render(changed, stroke, stripes());
+            QVERIFY(validPremultiplied(b));
+            const int diff = differingPixels(a, b);
+            QVERIFY2(diff > 0, qPrintable(QStringLiteral("%1 has no visible effect").arg(p.id)));
+            ++checked;
+        }
+        qInfo("Properties with a demonstrated rendering effect: %d", checked);
+        QCOMPARE(checked, BrushProperties::implementedCount() + 2); // + the two engine selectors
+    }
+
+    void specificationIsCurrent()
+    {
+        const QString path = QStringLiteral(DRAWAPP_SOURCE_DIR "/docs/brush-settings-specification.md");
+        const QString spec = BrushProperties::specificationMarkdown();
+        if (qEnvironmentVariableIntValue("DRAWAPP_WRITE_SPEC") == 1) {
+            QFile out(path);
+            QVERIFY(out.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            out.write(spec.toUtf8());
+        }
+        QFile in(path);
+        QVERIFY2(in.open(QIODevice::ReadOnly), "docs/brush-settings-specification.md is missing (run with DRAWAPP_WRITE_SPEC=1)");
+        QVERIFY2(QString::fromUtf8(in.readAll()).replace("\r\n", "\n") == spec,
+                 "docs/brush-settings-specification.md is out of date: run tst_brushengine with DRAWAPP_WRITE_SPEC=1");
+    }
+
+    void builtInPresetsStillRender()
+    {
+        // The milestone 6 presets still render through the extended engine (their behaviour is
+        // checked in tst_brush; here: valid and visible on every background).
+        for (const BrushPreset &p : BrushPresets::builtIns()) {
+            const QImage img = render(p.settings, standardStroke(), stripes());
+            QVERIFY2(validPremultiplied(img), qPrintable(p.id));
+            QVERIFY2(differingPixels(img, stripes()) > 100, qPrintable(p.id));
+        }
+    }
+};
+
+QTEST_GUILESS_MAIN(TestBrushEngine)
+#include "tst_brushengine.moc"

@@ -36,6 +36,8 @@ struct Texture
 
 // nullptr for an unknown id.
 const Tip *tip(const QString &id);
+// A tip from an image (imported tips): converted to Grayscale8, mip chain and pass length built.
+Tip makeTip(const QImage &image);
 const Texture *texture(const QString &id);
 QStringList tipIds();
 QStringList textureIds();

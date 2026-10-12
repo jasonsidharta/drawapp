@@ -792,8 +792,9 @@ private slots:
         QVERIFY(!BrushPresetStore::decode("not json", &out, &error, &warnings));
         QVERIFY(!BrushPresetStore::decode(R"({"format":"other","version":1})", &out, &error, &warnings));
         error.clear();
-        QVERIFY(!BrushPresetStore::decode(R"({"format":"drawapp-brushes","version":2})", &out, &error, &warnings));
+        QVERIFY(!BrushPresetStore::decode(R"({"format":"drawapp-brushes","version":3})", &out, &error, &warnings));
         QVERIFY(error.contains("newer"));
+        QVERIFY(BrushPresetStore::decode(R"({"format":"drawapp-brushes","version":2})", &out, &error, &warnings));
         QVERIFY(!BrushPresetStore::decode(R"({"format":"drawapp-brushes","version":"1"})", &out, &error, &warnings));
 
         // One bad entry is skipped; the rest loads.

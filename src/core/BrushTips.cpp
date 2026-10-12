@@ -212,6 +212,12 @@ const BrushTips::Tip *BrushTips::tip(const QString &id)
     return it == tips.end() ? nullptr : &it->second;
 }
 
+BrushTips::Tip BrushTips::makeTip(const QImage &image)
+{
+    const QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
+    return Tip{QStringLiteral("imported"), QStringLiteral("Imported"), mipChain(gray), passLength(gray)};
+}
+
 const BrushTips::Texture *BrushTips::texture(const QString &id)
 {
     const auto &textures = library().textures;
