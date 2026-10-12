@@ -356,6 +356,49 @@ On the x86_64 emulator by touch: the preset panel, thumbnails, favourites, scrat
 Paint and smudge strokes, and airbrush buildup while held still all worked. A 1.5 s hold built a
 dark dot where a tap left a faint one. No timings were taken; the emulator is not a phone.
 
+## Milestone 8: selections and transforms, 2026-10-12, same machine (Intel Core Ultra 7 155H, 15.4 GB RAM, Windows 11 25H2)
+
+`bench_core 30 selection`: CPU wall time on the calling thread. Renders split rows over a
+dedicated pool of worker threads, with the caller taking part. Canvas 2048 × 1536, one layer of
+the representative 5-layer document. These are not display latencies.
+
+**Selections**
+
+| Operation | median ms | p95 ms |
+|---|---|---|
+| Rasterize a 1024 × 768 rectangle / ellipse / 600-point lasso (full-size mask) | 1.0 / 1.3 / 1.7 | 1.5 / 1.5 / 1.8 |
+| Combine (Add), with new bounds | 6.7 | 7.6 |
+| Invert, with new bounds | 3.5 | 3.6 |
+| Outline of a 1024 × 768 ellipse / of Select All | 5.7 / 24.1 | 6.5 / 31.3 |
+
+Each of these runs once per selection change, not per frame.
+
+**Transforms** (preview = bilinear while dragging; apply = Catmull–Rom, written once on Apply)
+
+| Source | begin | move: preview / apply | scale 1.5×: preview / apply | rotate 30°: preview / apply | reduce to 0.3×: preview / apply | selection after Apply |
+|---|---|---|---|---|---|---|
+| 512 × 512 selection | 3.9 | 0.2 / 0.2 | 3.0 / 9.4 | 1.6 / 4.9 | 0.3 / 0.8 | 5.5 |
+| 1024 × 1024 selection | 8.0 | 0.6 / 0.5 | 14.7 / 42.0 | 6.3 / 19.8 | 0.8 / 2.3 | 6.3 |
+| Whole layer (no selection) | 11.1 | 1.4 / 1.6 | 17.1 / 61.3 | 16.6 / 48.3 | 2.1 / 5.7 | – |
+
+All values are medians in ms. A whole-pixel move or flip is a pixel copy. Before that path
+existed, a whole-layer move took 13.5 ms per preview and 49.9 ms to apply (same machine, earlier
+run that day).
+
+**Preview composite** (the transformed layer recomposited with the others over the changed area;
+the full canvas here, the worst case): 1.2 / 5.1 / 12.8 ms median for 1 / 5 / 10 layers.
+
+A drag frame is roughly preview + composite. For the whole layer scaled on 10 layers that is
+about 30 ms CPU (about 30 frames per second), and under 15 ms for selections up to 1024 px.
+Apply on the UI thread takes up to 61 ms (whole layer, scaled).
+
+**Memory while a transform preview is open:** a copy of the layer and of the composite
+(24 MiB), the base layer when there is a selection (12 MiB), and the source with its reductions
+(about 1.33 × the source). All of it is freed on Apply or Cancel.
+
+**Android emulator:** the selection and transform tools were exercised by touch (BUILD.md); no
+timings were taken.
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera). The
@@ -366,4 +409,6 @@ dark dot where a tap left a faint one. No timings were taken; the emulator is no
 - Brush feel on hardware: pressure and tilt response, and a comparison with Krita's presets on
   the same device (no pen hardware was available for milestone 6).
 - Brush performance on a phone or tablet CPU (the 200 px brushes are the ones to watch).
+- Transform previews on a phone or tablet CPU (whole-layer scaling is the case to watch), and the
+  time from a transform drag to the screen.
 - On-screen Windows memory and timing with a real GPU surface for layers and async save.

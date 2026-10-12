@@ -60,6 +60,7 @@ Brush tools (not part of ctest):
 ```powershell
 build\windows-mingw-release\brush_sheet.exe brush-sheet.png     # every preset on the standard strokes
 build\windows-mingw-release\bench_core.exe 30 presets            # per-event preset timings, 1/5/10 layers
+build\windows-mingw-release\bench_core.exe 30 selection          # selections and transforms incl. full canvas
 build\windows-mingw-release\bench_canvas.exe 1 0 builtin.textured-paint   # real canvas with autosave, one preset
 ```
 
@@ -204,6 +205,17 @@ touch from `adb shell input`; mouse and touch have no pressure or tilt):
 
 Not checked on the emulator: pressure and tilt (it has no pen), and performance.
 
+**Milestone 8 emulator results, 2026-10-12** (same AVD, `-no-window`; touch from
+`adb shell input`):
+
+| Check | Result |
+|---|---|
+| Select tool and its bar | The bar sits at the bottom of the canvas and wraps onto two rows in portrait; buttons are 40 px tall |
+| Rectangle selection by touch | Outline drawn as a two-tone line on the drawing |
+| Transform by touch | Box, eight handles, rotation knob and pivot shown. Dragging the knob rotated the selection (67° shown in the angle field); Flip H; Apply. The selection outline followed the rotated pixels and was cut off at the canvas edge |
+| Copy, Paste | "Pasted" layer added above, at the original position |
+| Not checked | Pen input (the emulator has none), performance, the system clipboard |
+
 Not reachable on the emulator: the provider's own free-space check (private and shared storage
 share one partition, so the local copy fails first, which is also safe); a write that stops part
 way (covered by `tst_canvas` with a fault-injecting provider); revoking a URI grant without
@@ -300,8 +312,8 @@ Resolve the Qt LGPL/static linking question (ARCHITECTURE.md) before shipping.
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 6/6 suites (tst_core 34, tst_brush 37, tst_document 62, tst_recovery 28, tst_canvas 82, tst_ui 10 test functions; counts include init/cleanup). Milestones 0–2 were driven on the desktop with real input. Milestones 3–6 (layers, async files, brush presets and panel, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots and the brush test sheet inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
-| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall; milestone 6 brush panel, presets, scratchpad and airbrush by touch |
-| Android arm64 | **Built; not run on a physical device** | Debug APK (development key) rebuilt for milestone 6. Same source as the emulator build. Pen pressure and tilt, brush feel, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 7/7 suites (tst_core 34, tst_brush 37, tst_selection 24, tst_document 62, tst_recovery 28, tst_canvas 91, tst_ui 11 test functions; counts include init/cleanup). Milestones 0–2 were driven on the desktop with real input. Milestones 3–8 (layers, async files, brush presets and panel, selections and transforms, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots and the brush test sheet inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
+| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall; milestone 6 brush panel, presets, scratchpad and airbrush by touch; milestone 8 selection, transform, copy and paste by touch |
+| Android arm64 | **Built; not run on a physical device** | Debug APK (development key) rebuilt for milestone 8. Same source as the emulator build. Pen pressure and tilt, brush feel, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
 | Linux | **Blocked** | Needs the owner to run one `sudo apt install` command (above); everything after it is prepared |
 | iOS / iPadOS | **Blocked** | Needs a Mac with Xcode 16+ (above) |

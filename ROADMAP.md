@@ -108,7 +108,28 @@ on the offscreen platform), Android at runtime.
 | Windows suites; Android rebuilt and preset UI checked | Done (emulator) | ctest 6/6; emulator by touch. Fixed: arrow glyphs missing in Android's font |
 | Physical pen evaluation; comparison with Krita on the same hardware | **Not done: no pen hardware available**. Drawing feel is unverified | Instructions in BUILD.md |
 
-## Milestone 7: hardware validation (next)
+## Milestone 8: selections and basic transforms (done; hardware feel and Krita comparison not run)
+
+| Criterion | Status | How verified |
+|---|---|---|
+| Research: Krita and PhotoCraft selection and transform code, versions and files recorded | Done | `research/selections-transforms.md` (code reading; neither app could be run here) |
+| Document-space soft selection separate from pixels and visibility | Done | `Selection`; `selectionChangesNeverTouchArtwork` |
+| Rectangle, ellipse, freehand lasso; Replace/Add/Subtract/Intersect; All, Deselect, Invert, Reselect; anti-aliased | Done | `tst_selection` shape and mode tests (incl. `addingShapesThatShareAnEdgeLeavesNoSeam`), `selectionToolsUnderZoomAndPan` (mouse, modifiers, lasso, click to deselect, Reselect, undo) |
+| Outline readable under zoom and pan | Done | Two-tone outline; screenshots `tst_canvas_paint_in_selection`, workflow screenshots. Fixed: a full repaint was being swallowed by a following partial one |
+| No selection vs explicitly empty | Done | `noSelectionAndEmptySelectionAreDifferent`, `emptySelectionNeverPaintsEverywhere` |
+| Selection undo; not saved in files | Done | `selectionUndoDoesNotMakeTheDocumentUnsaved`; ARCHITECTURE.md (format unchanged) |
+| Every preset through the selection; soft edges applied once; smudge samples outside, writes inside | Done | `selectionLimitsEveryPreset`, `paintAndEraseApplyCoverageOnce`, `smudgeWritesOnlyInsideAndAppliesTheEdgeOnce`, `eraserAndSmudgeStopAtTheSelectionEdge`, `paintingIsClippedToTheSelectionUnderZoomAndPan` |
+| Move, scale, rotate, flip; handles, pivot, keep ratio, numeric fields, Apply/Cancel, Enter/Esc, touch-sized controls | Done | `tst_selection` transform tests, `transformByHandlesApplyUndoRedo`, the `tst_ui` workflow (handles, Alt, numeric angle, Flip, Enter) and the emulator by touch |
+| Preview from the source, no repeated resampling, premultiplied without fringes, non-destructive preview, one undo step, exact Cancel | Done | `identityAndCancelAreExact`, `transparentEdgesKeepTheirColour`, `movesAndFlipsStaySharp`, `transformCancelRestoresExactlyAndUndoCancels` |
+| Selection after Apply, pixels beyond the canvas, Save/Open/Close/recovery during a preview defined | Done | `selectionFollowsTheTransformedPixels`, `pixelsMovedOffTheCanvasAreClipped`, `savingAndRecoveryDuringAPreview`; ARCHITECTURE.md |
+| Copy, Cut, Paste to a new layer, with and without a selection; undo and dirty state | Done (internal clipboard) | `copyCutAndPaste`; workflow task 4. System clipboard is offered but interchange with other apps is untested |
+| Artist tasks 1–7 in our app | Done (synthetic input, offscreen) | `artistTasksWithSelectionsAndTransforms`. Found and fixed: dragging the middle of a small box moved the pivot; corner scaling needed Alt (from centre). Found, not fixed: transforms are one layer at a time |
+| The same tasks in Krita; PhotoCraft | **Not run**: Krita is not installed here and PhotoCraft needs a Rust toolchain | Manual checklist in `research/selections-transforms.md` |
+| Benchmarks incl. full canvas; no allocations from unchecked scales | Done | BENCHMARKS.md milestone 8; `scaleIsClampedAndWorkIsBoundedByTheCanvas` |
+| Windows suites; Android rebuilt and selection/transform exercised on the emulator | Done (emulator) | ctest 7/7; BUILD.md milestone 8 emulator results |
+| Physical device | **Not done** | No device; milestone 7 |
+
+## Milestone 7: hardware validation (outstanding: no pen hardware yet)
 
 - Run the short Windows on-screen checklist with real mouse input (and a pen if available).
 - A physical Android tablet with stylus:

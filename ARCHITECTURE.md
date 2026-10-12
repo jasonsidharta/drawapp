@@ -1,6 +1,6 @@
 # Architecture
 
-State: milestone 6 (artist brush system) on top of milestones 5 (Android save safety), 4 (background
+State: milestone 8 (selections and basic transforms) on top of milestone 6 (artist brush system) and milestones 5 (Android save safety), 4 (background
 file operations), 3 (raster layers), 2 (crash recovery), 1 (undo/redo, project save/open, PNG
 export) and the milestone 0 prototype. Everything described here exists in
 the code unless labelled *planned*.
@@ -34,7 +34,11 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
   StrokeSpacer     StrokeSample (position, pressure, tilt, time); distance-spaced dabs with the
                    input interpolated; PressureResponse (firmness -> gamma)
   StrokeEngine     the one brush renderer: smoothing, spacing, airbrush timing, dab parameters,
-                   coverage (paint, erase) or pixel smudging, texture, clip mask; undo tiles
+                   coverage (paint, erase) or pixel smudging, texture, selection mask; undo tiles
+  Selection        document-space selection coverage (none / active / empty), shapes, modes,
+                   invert, outline
+  TransformSession move/scale/rotate/flip of a layer's (selected) pixels: cached source and
+                   base, previews, handles, the selection after Apply
   TileSnapshot     copies of the 64x64 tiles an edit touched; swap = undo/redo
   UndoHistory      UndoCommand (pixels / layer presence / properties / move) + linear history
                    under one byte budget; state ids for "unsaved"
@@ -48,14 +52,15 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
   RecoveryManager  session lock, orphan discovery, one-at-a-time worker writes with stale checks
   ViewTransform, Pressure.h, ViewRenderer   (view and input policy; unchanged)
 src/app/    (static QML module "drawapp_ui", URI DrawApp, used by the app and tst_ui)
-  CanvasItem       QQuickPaintedItem; input, strokes, layer commands, history, files, recovery
+  CanvasItem       QQuickPaintedItem; input, strokes, layer commands, history, files, recovery;
+                   selections, transforms and the clipboard in CanvasItemSelection.cpp
   BrushLibrary     presets and the paint/eraser working brushes (canvas.brushes in QML)
   BrushThumbnails  image provider: preset thumbnails drawn by StrokeEngine
   BrushScratchpad  try-out surface on the same engine, settings and input handling
   Main.qml         window, toolbar (active brush, size, opacity), File menu, layer panel, dialogs
   BrushPanel.qml   preset list, scratchpad, basic and advanced brush settings
   main.cpp         application setup (in the drawapp executable)
-tests/             tst_core, tst_brush, tst_document, tst_recovery (headless); tst_canvas, tst_ui
+tests/             tst_core, tst_brush, tst_selection, tst_document, tst_recovery (headless); tst_canvas, tst_ui
                    (window, offscreen under ctest); FakeProvider.h; bench_core, bench_canvas;
                    brush_sheet (renders the brush test sheet)
 ```
@@ -259,6 +264,125 @@ application's assets:
 
 The hash is splitmix64. The round tip is computed per dab.
 
+## Selections, transforms and the clipboard (milestone 8)
+
+Research notes: `research/selections-transforms.md` (Krita and PhotoCraft read for concepts only).
+
+**The selection model** (`Selection`). Coverage 0..255 per document pixel, in its own
+Grayscale8 image the size of the document. It is held by `LayeredDocument`, apart from the
+layers, so it never changes pixels or visibility. It has three states:
+
+| State | Meaning | How you get it |
+|---|---|---|
+| none | every pixel is editable | the default; Deselect; a click with the plain Select tool; a new or opened document |
+| active | 255 editable, 0 protected, between = soft edge | any selection shape or Select All |
+| empty | active, but nothing is selected: **no** pixel is editable | e.g. subtracting everything |
+
+An empty result never turns into "none" by itself. Painting, Clear, Copy, Cut and Transform
+refuse with "Nothing is selected" and point to Deselect.
+
+**Shapes and modes.**
+- *Shapes:* rectangle, ellipse and freehand lasso, filled with `QPainter` anti-aliasing into an
+  Alpha8 mask whose bytes are the coverage. A lasso that crosses itself is filled with the
+  nonzero winding rule, so everything the artist circled is inside.
+- *Replace:* the shape becomes the selection.
+- *Add:* `min(1, a + b)`, a saturating sum, as Krita does. Shapes that share an anti-aliased edge
+  join without a half-transparent seam; a max would leave one.
+- *Subtract:* `max(0, a − b)`.
+- *Intersect:* `min(a, b)`.
+- *Combining with "none":* treated as nothing selected.
+- *Modifiers:* Shift adds, Alt subtracts and Shift+Alt intersects, read from the pointer event
+  that starts the shape. The bar's mode buttons do the same for touch.
+- *Other commands:* Select All, Deselect, Invert (`255 − a`; disabled without a selection) and
+  Reselect (the last non-empty selection before it changed).
+
+**Undo and files.**
+- Every selection change is one undo step, so an accidental lasso can be undone. A change that
+  leaves the selection as it was records nothing.
+- Selection steps never make the document "unsaved". `UndoHistory::stateId` skips them, because
+  selections are **not saved**: neither project files nor recovery files contain them, so the
+  `.drawapp` format is unchanged. A reopened or recovered drawing starts with no selection.
+
+**Outline.** The boundary at 50 % coverage, computed once per change as runs along pixel edges.
+It is drawn in view coordinates as a white line under black dashes (cosmetic, one screen pixel),
+so it reads on light and dark artwork at any zoom. It is not animated.
+
+**Painting through a selection.**
+- *Paint and erase:* the brush engine gets the mask as its clip and applies it once, when each
+  pixel is composited from the stroke's coverage (`k = S × texture × selection`). A 50 % edge
+  therefore gives at most half of the stroke, however many dabs or passes the stroke makes; it
+  never darkens towards a hard edge.
+- *Smudge:* it reads the layer, so it works on an unclipped stroke-local copy of the tiles it
+  touches. It writes `before + (work − before) × selection` once. Smudge can therefore pick up
+  colour from outside the selection, but it writes only inside.
+- *Unchanged rules:* layer locks, hidden layers and one undo step per stroke.
+
+**Transforms** (`TransformSession`; the Transform tool or Ctrl+T).
+- *What moves:* with a selection, the selected pixels of the active layer; without one, the whole
+  active layer's content (cropped to its non-transparent bounds).
+- *Begin caches the source once:*
+  - `source = layer × s`;
+  - `base = layer − source` (exactly complementary, rounding included);
+  - 2× reductions of the source for prefiltering large reductions.
+- *Preview:* every preview is rendered from that source, never from an earlier preview:
+  - into a separate preview layer and preview composite (shallow copies of the document's
+    layers with the active one swapped);
+  - the view shows that composite, and the document is not touched;
+  - while dragging: bilinear; on release, numeric edits and Apply: Catmull–Rom bicubic.
+- *Resampling:*
+  - colour is resampled premultiplied, so transparent pixels carry no colour into edges;
+  - overshoot past opaque scales colour with alpha, so edges get no light or saturated fringe;
+  - colour is clamped to alpha;
+  - a whole-pixel move or flip (no scale, no rotation) is a pixel copy (moves snap to whole
+    pixels), so ink stays exactly sharp;
+  - rendering is split across a dedicated thread pool, with the UI thread taking part.
+- *Geometry:*
+  - eight scale handles: corners scale both axes, edges one. "Keep ratio" is on by default and
+    Shift inverts it while dragging; Alt scales from the centre;
+  - a rotation knob above the top edge, and dragging outside the box rotates (Shift snaps to 15°);
+  - a movable pivot. Its target is small, and smaller on small boxes, so dragging the middle of a
+    small selection moves it;
+  - inside the box moves;
+  - numeric X/Y (box centre), W/H (pixels, kept proportional with Keep ratio), angle;
+  - Flip H/V around the pivot, and Reset.
+- *Limits:* scale is clamped to at most 32× and at least 1 px; non-finite input is ignored.
+  Rendering covers only (source ∪ target) ∩ canvas, so no buffer depends on the scale.
+- *Apply* (Enter or the button): renders the result once more from the source into the layer,
+  inside a tile snapshot. It is one undo step: the pixels together with the selection, which
+  **follows the transformed pixels** (the source's mask, transformed bilinearly), so shading the
+  moved part works at once. An unchanged box records nothing.
+- *Cancel* (Esc, the button, or Undo while transforming) drops the preview. The document was
+  never changed, so it is exactly as before.
+- *Pixels beyond the canvas:* while the preview is open, the source is kept whole, so you can
+  move it off the canvas and back without loss. On Apply, pixels outside the canvas are **cut
+  off**, because layers are canvas-sized. The transform is destructive once applied, except for
+  undo.
+- *Other actions during a preview:*
+  - layer actions (select another layer, add, delete, reorder, properties, opacity, Clear) and
+    switching tools apply the transform first;
+  - Save, Save As, Export and Open are refused with "Apply or cancel the transform first";
+  - New and any document replacement cancel it;
+  - autosave and recovery write the document as it was before the transform (the preview is
+    never in it), and include the result after Apply;
+  - closing the window discards the preview, and the unsaved-changes prompt is as before.
+- *Memory while transforming:* a copy of the layer and of the composite (24 MiB at
+  2048 × 1536), the base (12 MiB, only with a selection) and the source with its reductions
+  (about 1.33 × the source).
+
+**Copy, Cut and Paste.**
+- *Copy:* takes the active layer's pixels × selection (soft edges become partial alpha), trimmed
+  to the visible bounds, with their position. Without a selection it takes the whole layer.
+- *Cut:* copies, then leaves `layer × (1 − selection)`, one undo step ("Cut"), so pasting the
+  copy back in place recomposes the original (exactly for hard edges).
+- *Paste:* puts the clipboard on a new layer above the active one, at its original position (one
+  undo step, "Paste"). It is centred when it came from a canvas of another size or would land off
+  the canvas.
+- *Clipboard:* internal. Copy also offers the image to the system clipboard, and Paste uses a
+  system image (centred, at its own pixel size) when the internal clipboard is empty.
+  Interchange with other applications has not been tested (the tests run on the offscreen
+  platform).
+- *Delete:* clears the selected pixels; Clear Layer does the same when there is a selection.
+
 ## Undo and redo
 
 - **Commands** (`UndoCommand`), each already applied when recorded; `swap()` both undoes and redoes:
@@ -413,6 +537,12 @@ physical device. iOS is unverified.
 | Airbrush from elapsed time with a timer | Buildup does not depend on how many events a device sends |
 | Size is a temporary value, never auto-saved | Resizing while drawing must not change a saved preset |
 | Generated tips and textures, no image files | Provenance is simple and nothing third-party ships |
+| Selection = separate document-space coverage with distinct "none" and "empty" | An empty result can never let an edit apply everywhere (a risk seen in a reference implementation) |
+| Add = saturating sum (as Krita), not max | Adjacent anti-aliased shapes join without a seam |
+| Selection steps in history but not "unsaved"; selections not saved | Undoable like other editors, without changing file semantics or nagging about unsaved changes |
+| Transform preview in separate images, rendered from the cached source | The document is never touched before Apply; Cancel is exact; no repeated resampling |
+| Catmull–Rom final filter, overshoot scaled with alpha, copies for whole-pixel moves | Interpolating (moves and flips stay exact) without fringes; full-layer moves cost a copy, not a resample (measured 50 → 1.6 ms) |
+| The selection follows the pixels on Apply | Continue shading the moved part (as in Krita) |
 
 ## Limitations (known)
 
@@ -427,6 +557,16 @@ physical device. iOS is unverified.
 - Brushes: Normal blending only. One sampled tip and two textures. Smudge is colour pushing, not
   wet paint. No colour dynamics, scatter, dual tips or stabiliser curves. Smoothing cuts corners by
   design (by up to the string length) and is not a curve fitter.
+- Selections: rectangle, ellipse and freehand lasso only (no polygonal lasso, magic wand, colour
+  range, feather, grow/shrink or border). The outline is static, not animated. Selections are not
+  saved in files.
+- Transforms work on one layer at a time (the active layer). A character drawn on several layers
+  needs one transform per layer (found in the workflow test: enlarging a head moved the ink but
+  not the colour layer). There is no perspective, skew, warp or mesh. Pixels moved off the
+  canvas are cut off on Apply.
+- During a transform drag on the whole 2048 × 1536 layer, a preview frame costs up to about 20 ms
+  plus the composite (12 ms at 10 layers), measured on a desktop CPU. Phones are unmeasured.
+- Clipboard exchange with other applications is untested.
 - Drawing feel (pen pressure response, tilt, latency) is **unverified on hardware**: pressure and
   tilt were exercised only with synthetic tablet events and the emulator's touch input.
 - Large brushes cost more per dab: up to about 2–4 ms for an event that places a 200 px dab

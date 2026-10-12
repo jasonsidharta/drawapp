@@ -24,7 +24,7 @@ python tools\fetch_qt_windows.py          # once
 powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
 ```
 
-All tests must pass before handing off: `tst_core`, `tst_brush`, `tst_document`, `tst_recovery` (headless),
+All tests must pass before handing off: `tst_core`, `tst_brush`, `tst_selection`, `tst_document`, `tst_recovery` (headless),
 `tst_canvas` and `tst_ui` (windows; under ctest they render offscreen so they do not take over the
 user's desktop). They save screenshots to `build\windows-mingw-release\tests\tst_*.png`; look at
 them after rendering or QML changes. Do not drive the real desktop with synthetic OS input unless
@@ -109,6 +109,21 @@ push. Never commit build outputs, APKs/AABs, keystores or other credentials (see
   presets copied from other applications.
 - The temporary size never changes a saved preset; only an explicit Save does.
 - After changing the engine, tips or presets, render `brush_sheet` and look at it.
+
+## Selection and transform invariants
+
+- "No selection" and an empty selection are different states. Never turn an empty result into
+  "no selection"; every edit through a selection must refuse when it is empty.
+- The selection is applied once per pixel (at compositing, or as `before + (work − before) × s`
+  for smudge); never multiply it per dab.
+- Selection changes go through `setSelectionWithUndo`; they must not change the saved state.
+  Selections are not written to project or recovery files.
+- A transform preview never writes to the document. Render previews from the session's cached
+  source only. Apply is one `UndoCommand` (pixels with the selection); Cancel only drops images.
+- Anything that edits the document or replaces it calls `finishPendingEdits()` (applies an
+  open transform) or, for replacement, cancels it first.
+- Full repaints use `updateAll()`: `update()` without a rectangle is lost if a partial update
+  follows before the next frame.
 
 ## Conventions
 

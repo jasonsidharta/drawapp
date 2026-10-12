@@ -47,6 +47,9 @@ future feature with no work scheduled.
   airbrush, textured paint, smudge and two erasers). Includes a preset panel with rendered
   thumbnails, favourites and a scratchpad, custom presets, and pressure to size, opacity and flow
   (tilt where the pen reports it).
+- Milestone 8: selections (rectangle, ellipse, lasso; add, subtract, intersect; soft edges) that
+  every brush respects, and move, scale, rotate and flip of the selection or the layer, with
+  handles, numeric entry, Apply and Cancel; copy, cut and paste to a new layer.
 
 See ROADMAP.md for acceptance status.
 

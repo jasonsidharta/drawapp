@@ -138,3 +138,79 @@ reading code, not from hands-on use.
   - Since 2019, corner handles scale proportionally by default, and Shift toggles that.
 - **Clip Studio Paint:** selection launcher bar under the selection (Deselect, Invert, Transform
   and similar).
+
+## Comparing the artist experience (milestone 8, stage 5)
+
+### What was tested (our app)
+
+`tst_ui::artistTasksWithSelectionsAndTransforms` runs the seven tasks on a drawn character
+(colour layer under an ink layer, 2048 × 1536). It drives the real controls with synthetic mouse
+input on the offscreen platform. Interactions counted as the test performs them:
+
+| Task | Our steps | Count | Result |
+|---|---|---|---|
+| 1. Lasso the head, enlarge proportionally | Select, Lasso, lasso drag, Transform, Alt + corner drag, Apply | 6 | Works on the active layer only: the ink head grows, but the colour layer under it does not (one transform per layer). Without Alt the opposite corner stays put and the head drifts |
+| 2. Rotate a hand and move it | Rectangle, drag, Transform, type 35 in the angle field (or drag the knob), drag inside, Enter | 6 | Works |
+| 3. Add/subtract regions, shade inside | Ellipse, drag, Add, drag, Subtract, drag (or Shift-drag / Alt-drag), choose Soft Airbrush, Brush tool, strokes | 9 + strokes (6 with modifiers) | Works; nothing changes outside the region |
+| 4. Copy an eye to another layer and flip it | Ellipse, drag, Copy, Paste, Transform, Flip H, drag, Apply | 8 | Works after a fix: dragging the middle of the small box used to move the pivot instead of the eye |
+| 5. Cancel a transform | Transform, drag, Cancel | 3 | The document is identical (compared pixel for pixel) |
+| 6. Undo/redo an applied transform | Undo, Redo | 2 | Identical before and after |
+| 7. Save and reopen | Save As, Open | 2 dialogs | Composite and layer count identical; the selection is not saved (by design) |
+
+Edge quality was checked by tests, not by eye on hardware:
+- transparent edges keep their colour within a few levels after scaling and rotating;
+- whole-pixel moves and flips are exact copies;
+- soft selection edges give at most their own coverage.
+
+Preview responsiveness was measured as CPU time only (BENCHMARKS.md milestone 8).
+
+### Krita: documented or inferred, not tested here
+
+From the code (see above) and Krita's documented conventions:
+- the transform tool works on the current layer, with options for more;
+- the rotation centre is a handle;
+- Shift constrains, Ctrl+T starts;
+- the default filter is bicubic;
+- canvas-unbounded layers keep pixels moved off the canvas.
+
+None of this was observed in the running application for this report.
+
+### Not run, and why
+
+- Krita is not installed on this machine. Installing and driving it needs the desktop, which
+  needs an agreed idle period.
+- PhotoCraft needs a Rust toolchain that is not installed.
+- No comparison claims are made from CPU timings or screenshots.
+
+### Manual comparison checklist (same machine, same artwork)
+
+Preparation:
+- Export the workflow's character (or any two-layer drawing, colour under ink) as PNG layers.
+- Open it at 2048 × 1536 in DrawApp and in Krita, at the same zoom (fit to window) and the same
+  window size.
+- Use a mouse first, then a pen if available.
+
+For each task 1–7 above, in each application, record:
+1. **Interactions:** clicks, drags, key presses and dialogs from start to done. Note any menu you
+   had to look for (discoverability).
+2. **Selection visibility:** can you see the outline on the light face and the dark ink at 25 %,
+   100 % and 400 % zoom?
+3. **Handles:**
+   - are the handles easy to grab with the mouse and with a finger or pen?
+   - does dragging the middle of a small selection move it?
+   - how do you keep proportions and scale from the centre?
+4. **Preview responsiveness:** does the preview follow the pointer smoothly for a small selection
+   and for the whole layer? Note any visible lag or jumps (a phone camera at 240 fps can measure
+   it).
+5. **Edge quality** after task 1 (enlarge) and task 2 (rotate), zoomed to 400 %:
+   - ink edges: sharp or soft, any halo;
+   - pencil texture: is the grain kept or smeared;
+   - soft transparency (the cheek shading): any dark or light fringe.
+6. **Intent:**
+   - did the whole head (ink and colour) grow, or only one layer?
+   - did the flipped eye land where intended?
+   - after Cancel, is everything exactly as before?
+7. **Undo/redo and save:** one undo step per transform? Reopen: identical? (Krita also keeps
+   selections in .kra files; DrawApp does not save selections.)
+
+Record DrawApp's version (git hash) and Krita's version.
