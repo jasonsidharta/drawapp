@@ -227,8 +227,10 @@ StrokeEngine::StrokeEngine(const BrushSettings &settings, const QColor &color, q
     , m_spacer([this](const StrokeSample &s) { return diameterAt(s); }, m_settings.spacing)
 {
     const BrushSettings &s = m_settings;
-    for (int i = 0; i < DynamicTargetCount; ++i)
+    for (int i = 0; i < DynamicTargetCount; ++i) {
         m_dyn[i] = CompiledDynamics(s.dynamics[size_t(i)], DynamicTarget(i));
+        m_anyDynamics = m_anyDynamics || m_dyn[i].isActive();
+    }
     if (m_dyn[int(DynamicTarget::Spacing)].isActive() || s.spacingJitter > 0)
         m_spacer.setSpacingFunction([this](const StrokeSample &sample, qreal) { return spacingFactorAt(sample); });
     if (!m_coverageBlend)
@@ -641,7 +643,7 @@ double StrokeEngine::diameterAt(const StrokeSample &s)
     double d = st.size * m_strokeSize * st.pressureSize.apply(pressure)
              * tiltFactor(st.tiltSize, tiltMagnitude(s, st.fullTiltAngle));
     double v;
-    if (m_dyn[int(DynamicTarget::Size)].evaluate(readingsFor(s, index), &v))
+    if (m_anyDynamics && m_dyn[int(DynamicTarget::Size)].evaluate(readingsFor(s, index), &v))
         d *= v;
     if (st.sizeJitter > 0)
         d *= 1.0 - st.sizeJitter * random(index, SaltSize);
@@ -654,7 +656,7 @@ double StrokeEngine::spacingFactorAt(const StrokeSample &s)
     const qint64 index = m_sizeIndex - 1; // the dab just sized
     double factor = 1.0;
     double v;
-    if (m_dyn[int(DynamicTarget::Spacing)].evaluate(readingsFor(s, index), &v))
+    if (m_anyDynamics && m_dyn[int(DynamicTarget::Spacing)].evaluate(readingsFor(s, index), &v))
         factor *= v;
     if (m_settings.spacingJitter > 0)
         factor *= 1.0 + m_settings.spacingJitter * (random(index, SaltSpacing) * 2.0 - 1.0);
@@ -666,7 +668,8 @@ StrokeEngine::DabParams StrokeEngine::paramsFor(const Dab &dab) const
     const BrushSettings &st = m_settings;
     const StrokeSample &s = dab.sample;
     const qint64 index = m_dabCount; // the index renderDab will give this dab
-    const SensorReadings r = readingsFor(s, index);
+    // Readings are only needed when a parameter follows sensors (evaluate() is false otherwise).
+    const SensorReadings r = m_anyDynamics ? readingsFor(s, index) : SensorReadings();
     const double tilt = tiltMagnitude(s, st.fullTiltAngle);
     const double pressure = s.hasPressure ? s.pressure : 1.0;
     double v;
@@ -850,6 +853,37 @@ void StrokeEngine::rasterize(const DabParams &dab, const QRect &rect)
     const bool moving = texture && st.textureMoving;
     const double texCos = std::cos(dab.angle), texSin = std::sin(dab.angle);
     const bool subtract = st.textureMode == TextureMode::Subtract;
+    if (density >= 1.0 && !hatch && !texture && !m_colorPerDab) {
+        // The common case keeps the milestone 6 loop: nothing per pixel beyond the tip and the
+        // accumulation rule (the general loop below measured up to ~15 % slower on large dabs).
+        for (int row = rect.top() / Tile; row <= rect.bottom() / Tile; ++row) {
+            for (int column = rect.left() / Tile; column <= rect.right() / Tile; ++column) {
+                const QRect part = rect & QRect(column * Tile, row * Tile, Tile, Tile);
+                CoverageTile &tile = coverageTile(column, row);
+                const int ox = column * Tile;
+                for (int y = part.top(); y <= part.bottom(); ++y) {
+                    const double dy = y + 0.5 - dab.center.y();
+                    quint16 *line = tile.data() + (y - row * Tile) * Tile;
+                    for (int x = part.left(); x <= part.right(); ++x) {
+                        const double v = shape.value(x + 0.5 - dab.center.x(), dy);
+                        if (v <= 0.0)
+                            continue;
+                        quint16 &s = line[x - ox];
+                        if (!m_buildUp) {
+                            const quint32 target = quint32(std::lround(v * ceiling));
+                            if (target > s)
+                                s = quint16(target);
+                        } else if (ceiling > s) {
+                            const double inc = v * dab.flow * double(ceiling - s);
+                            const quint32 step = quint32(inc + threshold(x + int(index * 29), y + int(index * 17)));
+                            s = quint16(std::min<quint32>(ceiling, s + step));
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
     for (int row = rect.top() / Tile; row <= rect.bottom() / Tile; ++row) {
         for (int column = rect.left() / Tile; column <= rect.right() / Tile; ++column) {
             const QRect part = rect & QRect(column * Tile, row * Tile, Tile, Tile);
@@ -1012,10 +1046,22 @@ void StrokeEngine::composite(QImage &image, const QRect &rect, const TileSnapsho
     const double strength = m_settings.textureStrength;
     const double opacity = m_settings.opacity;
     const bool subtract = m_settings.textureMode == TextureMode::Subtract;
+    // The usual grain (unscaled, unrotated, unadjusted) is read straight from its row.
+    const BrushSettings &st = m_settings;
+    const bool directGrain = strokeTexture && m_textureNearest && !st.textureInvert && st.textureContrast == 1.0
+                          && st.textureBrightness == 0.0;
+    const QImage *grainImage = strokeTexture ? &m_texture->image : nullptr;
     for (int y = rect.top(); y <= rect.bottom(); ++y) {
         QRgb *out = reinterpret_cast<QRgb *>(image.scanLine(y));
         const QRgb *src = reinterpret_cast<const QRgb *>(original->constScanLine(y - oy));
         const quint16 *cov = tile.data() + (y - oy) * Tile;
+        const uchar *grainRow = nullptr;
+        int grainWidth = 0;
+        if (directGrain) {
+            const int gh = grainImage->height(), gy = y + m_textureOffset.y();
+            grainRow = grainImage->constScanLine(((gy % gh) + gh) % gh);
+            grainWidth = grainImage->width();
+        }
         const quint32 *col = colors ? colors->data() + (y - oy) * Tile : nullptr;
         const uchar *clip = m_clip.isNull() ? nullptr : m_clip.constScanLine(y);
         for (int x = rect.left(); x <= rect.right(); ++x) {
@@ -1031,7 +1077,14 @@ void StrokeEngine::composite(QImage &image, const QRect &rect, const TileSnapsho
             } else {
                 double s = coverage / double(FullCoverage);
                 if (strokeTexture) {
-                    const double valley = strength * (1.0 - grain(x + 0.5, y + 0.5));
+                    double t;
+                    if (grainRow) {
+                        const int gx = x + m_textureOffset.x();
+                        t = grainRow[((gx % grainWidth) + grainWidth) % grainWidth] / 255.0;
+                    } else {
+                        t = grain(x + 0.5, y + 0.5);
+                    }
+                    const double valley = strength * (1.0 - t);
                     // Subtract works on the coverage relative to the brush opacity, so a light
                     // mark breaks up into grain while a heavy one fills the tooth.
                     s = subtract ? opacity * std::max(0.0, s / opacity - valley) : s * (1.0 - valley);

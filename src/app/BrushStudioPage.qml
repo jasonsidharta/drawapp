@@ -57,8 +57,7 @@ Item {
         ToolButton {
             visible: header.row.implemented && header.row.modified === true
             objectName: "reset_" + header.row.id
-            text: "↺"
-            implicitWidth: 32
+            text: "Reset" // plain text: Android's default font has no "↺"
             ToolTip.visible: hovered
             ToolTip.text: "Reset to the brush's saved value"
             onClicked: page.studio.resetValue(header.row.id)
@@ -208,7 +207,7 @@ Item {
                             onActivated: index => page.studio.setSensor(dyn.row.id, mapping.index, page.studio.sensorIds[index])
                         }
                         ToolButton {
-                            text: "✕"
+                            text: "Remove" // plain text: Android's default font has no "✕"
                             ToolTip.visible: hovered
                             ToolTip.text: "Remove this sensor"
                             onClicked: page.studio.removeSensor(dyn.row.id, mapping.index)

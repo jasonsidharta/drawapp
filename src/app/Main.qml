@@ -185,6 +185,7 @@ ApplicationWindow {
     }
 
     header: ToolBar {
+        id: headerBar
         // Android draws apps edge to edge (target API 35+): keep controls out of the status bar and
         // display cutouts. The margins are 0 on desktop.
         topPadding: SafeArea.margins.top
@@ -914,6 +915,7 @@ ApplicationWindow {
     Component.onCompleted: syncOpacitySlider()
 
     footer: ToolBar {
+        id: footerBar
         // Above the Android navigation bar (0 on desktop).
         bottomPadding: SafeArea.margins.bottom
         leftPadding: SafeArea.margins.left
@@ -957,10 +959,12 @@ ApplicationWindow {
         id: studioPopup
         objectName: "studioPopup"
         parent: Overlay.overlay
-        x: 8
-        y: 8
-        width: window.width - 16
-        height: window.height - 16
+        // Inside the system bars (Android status and navigation bars).
+        // (The header and footer reach the window's edges, so their margins are the window's.)
+        x: 8 + headerBar.SafeArea.margins.left
+        y: 8 + headerBar.SafeArea.margins.top
+        width: window.width - 16 - headerBar.SafeArea.margins.left - headerBar.SafeArea.margins.right
+        height: window.height - 16 - headerBar.SafeArea.margins.top - footerBar.SafeArea.margins.bottom
         modal: true
         closePolicy: Popup.CloseOnEscape
         padding: 10

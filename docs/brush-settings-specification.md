@@ -233,8 +233,8 @@ Moves each dab sideways off the path by up to this many dab diameters, at random
 
 - Status: implemented (Brush Studio)
 - Type: number
-- Range: 0 … 400 % of size
-- Default: 0 % of size
+- Range: 0 … 400 %
+- Default: 0 %
 - Engines: paint, erase, wet paint, spray, hatching
 - Sensors: —
 - Serialisation: `scatter`: JSON number

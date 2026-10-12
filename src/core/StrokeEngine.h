@@ -192,6 +192,7 @@ private:
     double m_minimumDiameter = 1.0;
     QImage m_clip;
     CompiledDynamics m_dyn[DynamicTargetCount];
+    bool m_anyDynamics = false;
 
     StrokeSmoother m_smoother;
     StrokeSpacer m_spacer;

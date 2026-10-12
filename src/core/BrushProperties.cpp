@@ -353,7 +353,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::spacingJitter));
     add("scatter", "Scatter", PropertyType::Number)
-        .range(0, 4, 100, "% of size")
+        .range(0, 4, 100, "%")
         .engines(EngineCoverage | EngineWet)
         .desc("Moves each dab sideways off the path by up to this many dab diameters, at random.")
         .render("Offsets the dab centre perpendicular to the direction of travel (and along it with both axes).")
