@@ -42,8 +42,13 @@ cmake --install build\windows-mingw-release --prefix dist\windows-mingw
 dist\windows-mingw\bin\drawapp.exe
 ```
 
-Set `DRAWAPP_STATS=1` (plus `QT_FORCE_STDERR_LOGGING=1` to see output) to print paint and input
-timings every 2 s.
+Environment variables for testing and measurement:
+
+| Variable | Effect |
+|---|---|
+| `DRAWAPP_STATS=1` | Logs paint/input timings and UI loop lag every 2 s, plus `[recovery]` tick/snapshot/commit lines (add `QT_FORCE_STDERR_LOGGING=1` to see them, `QT_MESSAGE_PATTERN="%{time hh:mm:ss.zzz} %{message}"` for timestamps) |
+| `DRAWAPP_AUTOSAVE_MS=<ms>` | Recovery autosave interval (default 10000, minimum 50) |
+| `DRAWAPP_RECOVERY_DIR=<folder>` | Recovery folder instead of `%APPDATA%\DrawApp\recovery` |
 
 The deploy step warns that translations are missing because `qttranslations` is not downloaded.
 This is harmless for now.
@@ -60,6 +65,11 @@ Run `dist\windows-mingw\bin\drawapp.exe` (after the install step above), then:
    keeps the current drawing.
 6. Ctrl+Shift+E exports a PNG; the title keeps its `*` if there were unsaved changes.
 7. Closing the window with unsaved changes asks first.
+8. Crash recovery: draw, wait more than 10 s, then end the process
+   (`taskkill /F /IM drawapp.exe`). Start the app again: it offers Restore / Discard. Restore brings
+   back the drawing as of the last autosave, with `*` in the title. Strokes made in the last
+   seconds before the kill may be missing (see BENCHMARKS.md). Escape keeps the recovery data for
+   the next start; Discard deletes it.
 
 ## Android (APK builds; not launched)
 
@@ -116,7 +126,7 @@ linking question (ARCHITECTURE.md) before shipping.
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 3/3 suites (22 + 36 + 23 tests); deployed build driven with real keyboard/mouse input: draw, undo/redo, unsaved prompt on New and on close, native Save/Open/Export dialogs, damaged-file error (screenshots checked) |
-| Android arm64 | **Built but not launched** | Release (unsigned) and debug (signed with the development key, `apksigner` verified) APKs built after milestone 1; no device or emulator image available. Drawing, file dialogs and `content://` saving are unverified |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 4/4 suites (22 + 36 + 24 + 32 tests); deployed build driven with real keyboard/mouse input: drawing, undo/redo, prompts, native file dialogs, damaged-file error; 9 forced kills with restore (screenshots checked) |
+| Android arm64 | **Built but not launched** | Release (unsigned) and debug (signed with the development key, `apksigner` verified) APKs rebuilt after milestone 2; no device or emulator image available. Drawing, file dialogs, `content://` saving and recovery are unverified |
 | Linux | **Blocked** | WSL needs a sudo password to install the compiler and libraries |
 | iOS / iPadOS | **Blocked** | No macOS or Xcode |

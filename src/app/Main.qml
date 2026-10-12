@@ -65,10 +65,27 @@ ApplicationWindow {
         if (canvas.modified && !closeConfirmed) {
             close.accepted = false
             whenChangesHandled(() => {
+                // Still modified here means the user chose Discard (a save would have cleared it).
+                if (canvas.modified)
+                    canvas.discardForClose()
                 closeConfirmed = true
                 window.close()
             })
         }
+    }
+
+    function showRecoveryMessages() {
+        if (canvas.recoveryWarning) {
+            showError(canvas.recoveryWarning)
+            canvas.clearRecoveryWarning()
+        }
+        if (canvas.recoveryOffered && !recoveryDialog.visible)
+            recoveryDialog.open()
+    }
+
+    Connections {
+        target: canvas
+        function onRecoveryChanged() { Qt.callLater(window.showRecoveryMessages) }
     }
 
     header: ToolBar {
@@ -213,7 +230,7 @@ ApplicationWindow {
         id: canvas
         anchors.fill: parent
         focus: true
-        enabled: !unsavedDialog.visible && !errorDialog.visible
+        enabled: !unsavedDialog.visible && !errorDialog.visible && !recoveryDialog.visible
     }
 
     footer: ToolBar {
@@ -223,7 +240,9 @@ ApplicationWindow {
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
             text: canvas.inputStatus + "   ·   Canvas " + canvas.documentSize.width + " × "
-                  + canvas.documentSize.height + " px   ·   Wheel: zoom   ·   Middle-drag or Space+drag: pan"
+                  + canvas.documentSize.height + " px"
+                  + (canvas.recoveryStatus ? "   ·   " + canvas.recoveryStatus : "")
+                  + "   ·   Wheel: zoom   ·   Middle-drag or Space+drag: pan"
         }
     }
 
@@ -311,6 +330,45 @@ ApplicationWindow {
         }
         onRejected: window.pendingAction = null
         onClosed: canvas.forceActiveFocus()
+    }
+
+    Dialog {
+        id: recoveryDialog
+        property bool decided: false
+        anchors.centerIn: parent
+        width: Math.min(window.width - 32, 520)
+        modal: true
+        focus: true
+        title: "Recover unsaved artwork?"
+        footer: DialogButtonBox {
+            Button { text: "Restore"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
+            Button { text: "Discard"; DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole }
+        }
+        Label {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: canvas.recoveryDescription
+                  + "\n\nRestored artwork stays marked as unsaved until you save it. Discard deletes the recovery data."
+            focus: true
+            Keys.onReturnPressed: recoveryDialog.accept()
+            Keys.onEnterPressed: recoveryDialog.accept()
+        }
+        onOpened: decided = false
+        onAccepted: {
+            decided = true
+            canvas.restoreRecovery()
+        }
+        onDiscarded: {
+            decided = true
+            recoveryDialog.close()
+            canvas.discardRecovery() // may offer the next one through recoveryChanged
+        }
+        // Escape: keep the recovery data for the next start without restoring it now.
+        onClosed: {
+            if (!decided)
+                canvas.postponeRecovery()
+            canvas.forceActiveFocus()
+        }
     }
 
     Dialog {

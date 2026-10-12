@@ -4,7 +4,10 @@
 #include "ViewRenderer.h"
 
 #include <QCursor>
+#include <QDateTime>
 #include <QFileInfo>
+#include <QLocale>
+#include <limits>
 #include <QPainter>
 #include <QPointingDevice>
 #include <QQuickWindow>
@@ -67,6 +70,23 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     m_inputStatus = QStringLiteral("Input: waiting");
     m_statsEnabled = qEnvironmentVariableIsSet("DRAWAPP_STATS");
     m_statsWindow.start();
+    m_recoveryClock.start();
+    if (m_statsEnabled) {
+        // UI-thread responsiveness probe: how late a 5 ms timer fires.
+        m_lagProbe.setTimerType(Qt::PreciseTimer);
+        m_lagProbe.setInterval(5);
+        connect(&m_lagProbe, &QTimer::timeout, this, [this] {
+            const qint64 now = m_recoveryClock.elapsed();
+            if (m_lagProbeLastMs >= 0)
+                m_statsMaxLoopLagMs = std::max(m_statsMaxLoopLagMs, now - m_lagProbeLastMs - 5);
+            m_lagProbeLastMs = now;
+            reportStats();
+        });
+        m_lagProbe.start();
+    }
+    m_autosaveTimer.setInterval(m_autosaveIntervalMs);
+    m_autosaveTimer.setTimerType(Qt::CoarseTimer);
+    connect(&m_autosaveTimer, &QTimer::timeout, this, &CanvasItem::autosaveNow);
     // Constructed with a parent already in a window: ItemSceneChange ran before this class existed.
     watchWindow(window());
 }
@@ -113,7 +133,8 @@ void CanvasItem::clearCanvas()
         endStroke();
     TileSnapshot before;
     m_document.clear(&before);
-    commitEdit(std::move(before), QStringLiteral("Clear canvas"));
+    if (commitEdit(std::move(before), QStringLiteral("Clear canvas")))
+        markPixelsChanged();
     update();
 }
 
@@ -125,6 +146,7 @@ void CanvasItem::undo()
     if (!m_history.canUndo())
         return;
     updateDocumentRect(m_document.undo(m_history));
+    markPixelsChanged();
     emit historyChanged();
 }
 
@@ -135,17 +157,19 @@ void CanvasItem::redo()
     if (!m_history.canRedo())
         return;
     updateDocumentRect(m_document.redo(m_history));
+    markPixelsChanged();
     emit historyChanged();
 }
 
-void CanvasItem::commitEdit(TileSnapshot before, const QString &label)
+bool CanvasItem::commitEdit(TileSnapshot before, const QString &label)
 {
     // Tiles touched but left identical (for example erasing transparent pixels) are not history.
     before.dropUnchanged(m_document.image());
     if (before.isEmpty())
-        return;
+        return false;
     m_history.push(std::move(before), label);
     emit historyChanged();
+    return true;
 }
 
 void CanvasItem::replaceDocument(const QImage &image)
@@ -153,9 +177,14 @@ void CanvasItem::replaceDocument(const QImage &image)
     if (m_gesture == Gesture::Stroke)
         endStroke();
     m_gesture = Gesture::None;
+    // The previous document was saved or explicitly discarded: its recovery data goes too.
+    discardRecoveryFile();
     m_document = RasterDocument(image);
     m_history.clear();
     m_savedStateId = m_history.stateId();
+    ++m_documentId;
+    ++m_pixelRevision;
+    m_oldestUnrecoveredMs = -1;
     m_view.fit(QSizeF(m_document.size()), size());
     update();
     emit documentChanged();
@@ -206,8 +235,11 @@ QString CanvasItem::saveTo(const QString &path, const QUrl &url)
         endStroke();
     const QString error = ProjectFile::save(m_document.image(), path);
     if (!error.isEmpty())
-        return error;
+        return error; // recovery data stays: the work is still only recoverable from there
     m_savedStateId = m_history.stateId();
+    // The saved file now holds this state; recovery data would only duplicate it.
+    discardRecoveryFile();
+    m_oldestUnrecoveredMs = -1;
     const bool fileChangedNow = path != m_filePath;
     m_filePath = path;
     m_fileUrl = url;
@@ -588,8 +620,253 @@ void CanvasItem::applyPendingDabs()
     if (m_pendingDabs.empty())
         return;
     m_statsDabs += qint64(m_pendingDabs.size());
-    updateDocumentRect(m_document.stampDabs(m_pendingDabs, m_strokeColor, m_strokeMode, &m_strokeBefore));
+    const QRect changed = m_document.stampDabs(m_pendingDabs, m_strokeColor, m_strokeMode, &m_strokeBefore);
+    if (!changed.isEmpty())
+        markPixelsChanged();
+    updateDocumentRect(changed);
     m_pendingDabs.clear();
+}
+
+// --- crash recovery ---
+
+void CanvasItem::markPixelsChanged()
+{
+    ++m_pixelRevision;
+    if (m_oldestUnrecoveredMs < 0)
+        m_oldestUnrecoveredMs = m_recoveryClock.elapsed();
+}
+
+bool CanvasItem::needsRecovery() const
+{
+    // A stroke in progress counts before it is committed to history.
+    return isModified() || (m_gesture == Gesture::Stroke && !m_strokeBefore.isEmpty());
+}
+
+RecoveryFile::Metadata CanvasItem::recoveryMetadata() const
+{
+    RecoveryFile::Metadata meta;
+    meta.documentId = m_documentId;
+    meta.revision = m_pixelRevision;
+    meta.savedAt = QDateTime::currentDateTimeUtc();
+    meta.originalPath = m_filePath;
+    meta.originalUrl = m_fileUrl.toString();
+    return meta;
+}
+
+void CanvasItem::setAutosaveInterval(int milliseconds)
+{
+    milliseconds = std::max(50, milliseconds);
+    if (milliseconds == m_autosaveIntervalMs)
+        return;
+    m_autosaveIntervalMs = milliseconds;
+    m_autosaveTimer.setInterval(milliseconds);
+    emit autosaveIntervalChanged();
+}
+
+void CanvasItem::setRecoveryManager(RecoveryManager *manager)
+{
+    m_recovery = manager;
+    if (!manager)
+        return;
+    connect(manager, &RecoveryManager::writeFinished, this, &CanvasItem::onRecoveryWriteFinished);
+    const QString error = manager->start();
+    if (!error.isEmpty()) {
+        setRecoveryStatus(QStringLiteral("Crash recovery unavailable: %1").arg(error));
+        return;
+    }
+
+    QStringList damaged;
+    for (const RecoveryManager::Orphan &orphan : manager->findOrphans()) {
+        if (orphan.contents.ok()) {
+            m_orphans.append(orphan);
+        } else {
+            const QString aside = manager->setAside(orphan);
+            damaged.append(aside.isEmpty() ? orphan.contents.error
+                                           : QStringLiteral("%1 It was moved to \"%2\".").arg(orphan.contents.error, aside));
+        }
+    }
+    if (!damaged.isEmpty())
+        m_recoveryWarning = QStringLiteral("Recovery data from an earlier session could not be used.\n\n")
+                            + damaged.join(QLatin1Char('\n'));
+    m_autosaveTimer.start();
+    emit recoveryChanged();
+}
+
+QString CanvasItem::recoveryDescription() const
+{
+    if (m_orphans.isEmpty())
+        return {};
+    const RecoveryFile::Contents &c = m_orphans.first().contents;
+    const QString name = c.metadata.originalPath.isEmpty() ? QStringLiteral("Untitled")
+                                                           : QFileInfo(c.metadata.originalPath).fileName();
+    return QStringLiteral("DrawApp did not close normally. Unsaved artwork \"%1\" (%2 × %3 px) from %4 can be restored.")
+        .arg(name)
+        .arg(c.image.width())
+        .arg(c.image.height())
+        .arg(QLocale().toString(c.metadata.savedAt.toLocalTime(), QLocale::ShortFormat));
+}
+
+void CanvasItem::restoreRecovery()
+{
+    if (m_orphans.isEmpty() || !m_recovery)
+        return;
+    const RecoveryManager::Orphan orphan = m_orphans.takeFirst();
+    m_orphans.clear(); // further orphans stay on disk for the next start
+    replaceDocument(orphan.contents.image);
+    m_filePath = orphan.contents.metadata.originalPath;
+    m_fileUrl = orphan.contents.metadata.originalUrl.isEmpty() ? (m_filePath.isEmpty() ? QUrl() : QUrl::fromLocalFile(m_filePath))
+                                                               : QUrl(orphan.contents.metadata.originalUrl);
+    // Restored artwork was never saved: no history state equals the "saved" id.
+    m_savedStateId = std::numeric_limits<quint64>::max();
+    const QString error = m_recovery->adopt(orphan);
+    if (error.isEmpty()) {
+        // The adopted file already holds exactly this state.
+        m_requestedDocumentId = m_documentId;
+        m_requestedRevision = m_pixelRevision;
+        setRecoveryStatus(QStringLiteral("Restored unsaved artwork"));
+    } else {
+        m_oldestUnrecoveredMs = m_recoveryClock.elapsed();
+        setRecoveryStatus(error);
+    }
+    emit historyChanged();
+    emit fileChanged();
+    emit recoveryChanged();
+}
+
+void CanvasItem::discardRecovery()
+{
+    if (m_orphans.isEmpty() || !m_recovery)
+        return;
+    m_recovery->removeOrphan(m_orphans.takeFirst());
+    emit recoveryChanged();
+}
+
+void CanvasItem::postponeRecovery()
+{
+    m_orphans.clear();
+    emit recoveryChanged();
+}
+
+void CanvasItem::clearRecoveryWarning()
+{
+    m_recoveryWarning.clear();
+    emit recoveryChanged();
+}
+
+void CanvasItem::discardForClose()
+{
+    m_discardedForClose = true;
+    m_autosaveTimer.stop();
+    discardRecoveryFile();
+}
+
+void CanvasItem::discardRecoveryFile()
+{
+    if (!m_recovery || !m_recovery->isStarted())
+        return;
+    m_recovery->discard(); // also makes any in-flight write stale
+    m_requestedDocumentId = 0;
+    m_requestedRevision = 0;
+    if (!m_recoveryStatus.isEmpty() && !m_recoveryStatus.startsWith(QLatin1String("Crash recovery unavailable")))
+        setRecoveryStatus(QString());
+}
+
+void CanvasItem::autosaveNow()
+{
+    if (!m_recovery || !m_recovery->isStarted() || m_discardedForClose)
+        return;
+    const qint64 now = m_recoveryClock.elapsed();
+    if (m_statsEnabled && m_lastTickMs >= 0)
+        qInfo().noquote() << QStringLiteral("[recovery] tick after %1 ms").arg(now - m_lastTickMs);
+    m_lastTickMs = now;
+
+    if (!needsRecovery()) {
+        if (m_recovery->hasRecoveryFile() || m_recovery->isWriting())
+            discardRecoveryFile();
+        m_oldestUnrecoveredMs = -1;
+        return;
+    }
+    if (m_documentId == m_requestedDocumentId && m_pixelRevision == m_requestedRevision)
+        return; // already written or being written
+    if (m_recovery->isWriting()) {
+        m_autosaveTickMissed = true; // run again as soon as the current write ends
+        return;
+    }
+
+    // Consistent snapshot on the UI thread; the worker only ever sees this private copy.
+    QElapsedTimer copyTimer;
+    copyTimer.start();
+    const QImage snapshot = m_document.image().copy();
+    const qint64 copyUs = copyTimer.nsecsElapsed() / 1000;
+    if (!m_recovery->requestWrite(snapshot, recoveryMetadata()))
+        return;
+    m_requestedDocumentId = m_documentId;
+    m_requestedRevision = m_pixelRevision;
+    m_inFlightOldestMs = m_oldestUnrecoveredMs;
+    m_oldestUnrecoveredMs = -1;
+    if (m_statsEnabled)
+        qInfo().noquote() << QStringLiteral("[recovery] snapshot rev %1 copied on UI thread in %2 ms")
+                                 .arg(m_pixelRevision)
+                                 .arg(copyUs / 1000.0, 0, 'f', 3);
+}
+
+void CanvasItem::onRecoveryWriteFinished(bool committed, bool stale, const QString &error, quint64 documentId,
+                                         quint64 revision, qint64 workerMs)
+{
+    const qint64 now = m_recoveryClock.elapsed();
+    if (committed && documentId == m_documentId) {
+        if (m_inFlightOldestMs >= 0) {
+            const qint64 lag = now - m_inFlightOldestMs;
+            m_maxRecoveryLagMs = std::max(m_maxRecoveryLagMs, lag);
+            if (m_statsEnabled)
+                qInfo().noquote() << QStringLiteral("[recovery] committed rev %1, worker %2 ms, oldest change was %3 ms old "
+                                                    "(max so far %4 ms)")
+                                         .arg(revision).arg(workerMs).arg(lag).arg(m_maxRecoveryLagMs);
+        }
+        setRecoveryStatus(QStringLiteral("Recovery data saved %1").arg(QTime::currentTime().toString(QStringLiteral("HH:mm:ss"))));
+    } else if (!error.isEmpty()) {
+        // The previous recovery file is intact. Retry at the next tick, and keep measuring the
+        // loss window from the older change.
+        if (m_inFlightOldestMs >= 0 && (m_oldestUnrecoveredMs < 0 || m_inFlightOldestMs < m_oldestUnrecoveredMs))
+            m_oldestUnrecoveredMs = m_inFlightOldestMs;
+        m_requestedDocumentId = 0;
+        m_requestedRevision = 0;
+        setRecoveryStatus(error);
+        if (m_statsEnabled)
+            qInfo().noquote() << QStringLiteral("[recovery] write failed: %1").arg(error);
+    } else if (stale && m_statsEnabled) {
+        qInfo().noquote() << QStringLiteral("[recovery] write of rev %1 skipped (stale)").arg(revision);
+    }
+    m_inFlightOldestMs = -1;
+    if (m_autosaveTickMissed) {
+        m_autosaveTickMissed = false;
+        autosaveNow();
+    }
+}
+
+void CanvasItem::shutdownRecovery()
+{
+    if (!m_recovery || !m_recovery->isStarted())
+        return;
+    m_autosaveTimer.stop();
+    if (needsRecovery() && !m_discardedForClose) {
+        // Quitting without the close prompt (for example the OS ending the session): keep the
+        // latest state recoverable instead of deleting it.
+        if (m_gesture == Gesture::Stroke)
+            endStroke();
+        m_recovery->writeNow(m_document.image().copy(), recoveryMetadata());
+        m_recovery->releaseKeepingFile();
+    } else {
+        m_recovery->finishCleanly();
+    }
+}
+
+void CanvasItem::setRecoveryStatus(const QString &status)
+{
+    if (status == m_recoveryStatus)
+        return;
+    m_recoveryStatus = status;
+    emit recoveryStatusChanged();
 }
 
 void CanvasItem::updateDocumentRect(const QRect &docRect)
@@ -621,13 +898,16 @@ void CanvasItem::reportStats()
     if (m_statsWindow.elapsed() < 2000)
         return;
     const auto ms = [](qint64 ns) { return QString::number(ns / 1e6, 'f', 3); };
-    qInfo().noquote() << QStringLiteral("[stats] paints=%1 avg=%2ms max=%3ms | input events=%4 avg=%5ms max=%6ms dabs=%7 | zoom=%8")
+    qInfo().noquote() << QStringLiteral("[stats] paints=%1 avg=%2ms max=%3ms | input events=%4 avg=%5ms max=%6ms dabs=%7 | "
+                                        "zoom=%8 | max UI loop lag=%9ms")
                              .arg(m_statsPaints)
                              .arg(ms(m_statsPaints ? m_statsPaintNs / m_statsPaints : 0), ms(m_statsPaintMaxNs))
                              .arg(m_statsInputs)
                              .arg(ms(m_statsInputs ? m_statsInputNs / m_statsInputs : 0), ms(m_statsInputMaxNs))
                              .arg(m_statsDabs)
-                             .arg(m_view.zoom(), 0, 'f', 3);
+                             .arg(m_view.zoom(), 0, 'f', 3)
+                             .arg(m_statsMaxLoopLagMs);
+    m_statsMaxLoopLagMs = 0;
     m_statsWindow.restart();
     m_statsPaints = 0;
     m_statsPaintNs = m_statsPaintMaxNs = 0;

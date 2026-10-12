@@ -26,7 +26,7 @@ future feature with no work scheduled.
 - Pressure-sensitive brushes with a pressure curve, smoothing and a small set of brush presets.
 - Selection and transform basics.
 - Undo/redo for layer operations (single-canvas undo/redo is done).
-- Crash recovery (atomic project saving and PNG export are done); JPEG export.
+- JPEG export (atomic project saving, crash recovery and PNG export are done).
 - Canvas rotation and mirroring.
 - Touch gestures on tablets (pinch zoom/pan, two-finger tap undo) with palm rejection.
 - Interface that works on phone, tablet and desktop sizes.
@@ -37,6 +37,7 @@ future feature with no work scheduled.
   (pressure) and touch input; zoom and pan; clear.
 - Milestone 1: undo/redo (stroke, eraser stroke, clear) under a 128 MiB budget; New/Open/Save/Save As
   with a versioned .drawapp format, atomic saving and unsaved-changes prompts; PNG export.
+- Milestone 2: crash recovery (10 s autosave to a separate recovery file, restore/discard on start).
 
 See ROADMAP.md for acceptance status.
 

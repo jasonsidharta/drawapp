@@ -24,7 +24,7 @@ python tools\fetch_qt_windows.py          # once
 powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
 ```
 
-All tests must pass before handing off: `tst_core` and `tst_document` (headless) and `tst_canvas`
+All tests must pass before handing off: `tst_core`, `tst_document`, `tst_recovery` (headless) and `tst_canvas`
 (opens real windows and saves screenshots to `build\windows-mingw-release\tests\tst_canvas_*.png`;
 look at them after rendering changes). Android: `tools\build-android.ps1 [-Config Debug]` (build
 directory must not contain spaces).
@@ -42,6 +42,17 @@ push. Never commit build outputs, APKs/AABs, keystores or other credentials (see
 - Changing the meaning of `.drawapp` bytes requires a new format version and keeping the reader
   for older versions. Validate before allocating; never replace the open document on failure.
 - File writes go through `ProjectFile::writeFileSafely`.
+
+## Crash recovery invariants
+
+- Recovery never writes the user's project path; only `RecoveryManager` touches the recovery folder.
+- Worker code receives a private `QImage` copy and metadata only; it must not reach `CanvasItem`
+  or `RasterDocument`. Every commit or delete of the recovery file happens under
+  `m_commitMutex`, and `discard()` must bump the generation.
+- Anything that changes pixels must call `markPixelsChanged()`. Anything that makes the current
+  pixels saved or deliberately abandoned must call `discardRecoveryFile()`; failures and
+  cancellations must not.
+- Do not claim the autosave interval is the maximum loss; report measured windows (BENCHMARKS.md).
 
 ## Conventions
 

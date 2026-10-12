@@ -1,7 +1,7 @@
 # Architecture
 
-State: milestone 1 done (undo/redo, project save/open, PNG export) on top of the milestone 0
-prototype. Everything under "Current" exists in the code; anything else is labelled *planned*.
+State: milestone 2 done (crash recovery) on top of milestone 1 (undo/redo, project save/open,
+PNG export) and the milestone 0 prototype. Everything under "Current" exists in the code; anything else is labelled *planned*.
 
 ## Stack
 
@@ -26,12 +26,14 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
   TileSnapshot     copies of the 64x64 tiles an edit touched; swap = undo/redo
   UndoHistory      linear undo/redo stacks under one byte budget; state ids for "unsaved"
   ProjectFile      .drawapp encode/decode, safe file writes, PNG export
+  RecoveryFile     .drawrecovery encode/decode (metadata + embedded .drawapp)
+  RecoveryManager  session lock, orphan discovery, one-at-a-time worker writes with stale checks
   ViewRenderer     paints an exposed view rect: workspace, checkerboard, document through the view
 src/app/
   CanvasItem       QQuickPaintedItem; input, stroke state, history, file commands, partial repaints
   Main.qml         window, toolbar, File menu, dialogs, unsaved-changes prompt, shortcuts
   main.cpp         application setup
-tests/             tst_core, tst_document (headless), tst_canvas (real window), bench_core
+tests/             tst_core, tst_document, tst_recovery (headless), tst_canvas (real window), bench_core
 ```
 
 ## Drawing data flow
@@ -99,6 +101,43 @@ document holds them, so save/open is lossless, including partial alpha.
   Only a fully decoded image replaces the open document.
 - Opened documents keep their stored size (not necessarily 2048×1536).
 
+## Crash recovery
+
+Components: `RecoveryFile` (format), `RecoveryManager` (files, lock, worker thread) in `src/core`;
+the policy (when to snapshot, when to clean up, restore) lives in `CanvasItem`.
+
+- **Where**: `QStandardPaths::AppDataLocation/recovery` (on Windows
+  `%APPDATA%\DrawApp\recovery`), overridable with `DRAWAPP_RECOVERY_DIR`. Never the project path.
+- **Sessions**: each running app holds `session-<uuid>.lock` (`QLockFile`) and writes only
+  `session-<uuid>.drawrecovery`. On start, recovery files whose lock is not held by a live process
+  are orphans from sessions that ended abnormally. Leftover temporary files and lock files of dead
+  sessions are removed. An unreadable lock older than a minute counts as abandoned.
+- **Format** (`.drawrecovery` v1): magic, version, SHA-256-checked JSON metadata (document id,
+  pixel revision, UTC time, original project path/URL), then a complete embedded `.drawapp` file
+  with its own checksum. Decoding validates everything before use.
+- **When**: a coarse timer (default 10 s, `autosaveInterval`, `DRAWAPP_AUTOSAVE_MS`) checks whether
+  the document needs recovery: unsaved changes, or a stroke in progress that has changed pixels.
+  A pixel revision counter increments on every pixel change (including mid-stroke), so unchanged
+  states are not rewritten. If a write is still running at a tick, the next write starts as soon
+  as it ends.
+- **Snapshot and worker**: the UI thread copies the image (`QImage::copy`, 2–4 ms at 2048×1536)
+  and hands that private copy plus metadata to a one-thread `QThreadPool`. The worker encodes,
+  writes a `QSaveFile` temporary file, then takes a mutex and commits (atomic replace) only if no
+  discard happened since the request (generation check) and the write is newer than the last
+  commit. Workers never touch the canvas or the document.
+- **Cleanup**: successful Save, undo back to the saved state, New, Open (after the user saved or
+  discarded), and choosing Discard while closing all delete the recovery file; the generation bump
+  makes any in-flight write stale so it cannot recreate the file. A failed save, a failed open, or
+  cancelling a prompt leaves recovery data in place.
+- **Exit**: a normal close (saved or discarded) removes the recovery file and the lock. If the app
+  quits while still modified without the close prompt (for example the OS ending the session),
+  the latest state is written synchronously and kept for the next start.
+- **Restore**: on start the newest valid orphan is offered (Restore / Discard; Escape keeps it for
+  the next start). Restore replaces the empty start document, keeps the original project path for
+  Save, stays marked unsaved, and the orphan is renamed to the new session's recovery file.
+  Discard deletes it and offers the next orphan, if any. Damaged orphans are renamed to
+  `*.damaged`, reported once, and never block startup.
+
 ## PNG export
 
 `ProjectFile::exportPng` writes the document pixels at their own resolution as straight-alpha
@@ -125,13 +164,20 @@ Pictures location. Android and iOS file flows are not verified.
 | SHA-256 of payload | Detects truncation and corruption before decoding |
 | `QSaveFile` | Atomic replace with Qt's tested implementation |
 | Clear without a confirmation dialog | It is undoable now |
+| Recovery: UI-thread image copy + one worker thread | Worker never sees mutable canvas data; copy measured at 2–4 ms |
+| Recovery commit gated by a mutex-protected generation | Stale writes can neither replace newer data nor recreate cleaned-up files |
+| Per-session recovery files with `QLockFile` | Distinguishes crashed sessions from other running instances |
 | Mouse ignored for 400 ms after any pen event | Windows can send OS-synthesized mouse events for pen input |
 | MinGW 15.1 from MinGW-Builds (GitHub), SHA-256 pinned | Qt's repository metadata points at 13.1 but Qt was built with 15.1 |
 
 ## Limitations (known)
 
-- **No crash recovery.** Unsaved work is lost if the app or OS dies; atomic saving only protects
-  the last saved file. See ROADMAP.
+- **Crash recovery has a loss window.** Work since the last committed recovery write is lost on a
+  crash; measured windows are in BENCHMARKS.md. Only process kills were tested: an OS crash or
+  power loss may also lose data the OS had not yet flushed to disk (no explicit fsync).
+- Recovery covers one document per running instance. Only the newest orphan is offered per start;
+  restoring it leaves other orphans for later starts. Two instances started at the same moment
+  could both offer the same orphan; the second restore then fails with a message.
 - Save, open and export run on the UI thread: 87 ms / 33 ms / 150 ms for typical artwork, up to
   0.44 s / 0.14 s / 0.5 s worst case at 2048×1536 (BENCHMARKS.md). The UI pauses meanwhile.
 - `QSaveFile` commit does not guarantee the data reached the disk before a power loss on every
@@ -143,7 +189,7 @@ Pictures location. Android and iOS file flows are not verified.
 
 ## Future requirements (noted, not built)
 
-Crash recovery; layers and blend modes; tiled storage and partial texture uploads; background
+Layers and blend modes; tiled storage and partial texture uploads; background
 saving; the document model may hold both raster layers and editable strokes.
 
 ## Licensing notes

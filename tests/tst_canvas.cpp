@@ -3,10 +3,14 @@
 
 #include "CanvasItem.h"
 #include "ProjectFile.h"
+#include "RecoveryFile.h"
+#include "RecoveryManager.h"
 #include "ViewRenderer.h"
 
 #include <QDir>
 #include <QFile>
+#include <QSemaphore>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QPointingDevice>
 #include <QQuickWindow>
@@ -19,8 +23,38 @@ class TestCanvas : public QObject
     Q_OBJECT
 
 private:
+    std::unique_ptr<QTemporaryDir> m_recoveryDir;
+    std::unique_ptr<RecoveryManager> m_recovery;
     std::unique_ptr<QQuickWindow> m_window;
     CanvasItem *m_canvas = nullptr;
+
+    // Attaches crash recovery with a manual autosave (the timer is set far apart; tests call
+    // autosaveNow() and wait for the write).
+    void attachRecovery(const QString &dir)
+    {
+        m_recovery = std::make_unique<RecoveryManager>(dir);
+        m_canvas->setAutosaveInterval(3600 * 1000);
+        m_canvas->setRecoveryManager(m_recovery.get());
+    }
+
+    bool autosaveAndWait()
+    {
+        QSignalSpy spy(m_recovery.get(), &RecoveryManager::writeFinished);
+        m_canvas->autosaveNow();
+        if (!m_recovery->isWriting())
+            return true; // nothing to write
+        return QTest::qWaitFor([&] { return spy.count() > 0; }, 10000);
+    }
+
+    QImage recoveredImage() const { return RecoveryFile::load(m_recovery->recoveryFilePath()).image; }
+
+    // A fresh window and canvas, as after restarting the app.
+    void restartCanvas()
+    {
+        m_window.reset();
+        m_recovery.reset();
+        init();
+    }
     std::unique_ptr<QPointingDevice> m_pen;
     std::unique_ptr<QPointingDevice> m_penNoPressure;
     std::unique_ptr<QPointingDevice> m_eraserTip;
@@ -105,8 +139,10 @@ private slots:
 
     void cleanup()
     {
-        m_window.reset();
+        m_window.reset(); // the canvas goes before the recovery manager it points to
         m_canvas = nullptr;
+        m_recovery.reset();
+        m_recoveryDir.reset();
     }
 
     void mouseStrokeIsContinuous()
@@ -500,6 +536,218 @@ private slots:
         QCOMPARE(qAlpha(exported.pixel(0, 0)), 0); // transparency kept, no checkerboard
         QVERIFY(m_canvas->isModified());           // exporting is not saving
         QVERIFY(!m_canvas->hasFile());
+    }
+
+    // --- crash recovery ---
+    void autosaveFollowsUnsavedChanges()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        const QString rec = m_recovery->recoveryFilePath();
+
+        QVERIFY(autosaveAndWait());
+        QVERIFY(!QFile::exists(rec)); // nothing unsaved, nothing written
+
+        mouseStroke({{100, 300}, {600, 300}});
+        QVERIFY(autosaveAndWait());
+        QVERIFY(QFile::exists(rec));
+        QCOMPARE(recoveredImage(), doc());
+
+        QTemporaryDir projects;
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(projects.filePath("art.drawapp"))), QString());
+        QVERIFY(!QFile::exists(rec)); // saved: recovery data removed at once
+
+        mouseStroke({{100, 450}, {600, 450}});
+        QVERIFY(autosaveAndWait());
+        QVERIFY(QFile::exists(rec));
+        m_canvas->undo(); // back at the saved state
+        QVERIFY(autosaveAndWait());
+        QVERIFY(!QFile::exists(rec));
+        m_canvas->redo();
+        QVERIFY(autosaveAndWait());
+        QCOMPARE(recoveredImage(), doc());
+        QCOMPARE(RecoveryFile::load(rec).metadata.originalPath, projects.filePath("art.drawapp"));
+    }
+
+    void projectFileIsNeverTouchedByAutosave()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QTemporaryDir projects;
+        const QString project = projects.filePath("keep.drawapp");
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(project)), QString());
+        QFile f(project);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QByteArray original = f.readAll();
+        f.close();
+        const QDateTime modified = QFileInfo(project).lastModified();
+
+        for (int i = 0; i < 3; ++i) {
+            mouseStroke({{100, 350 + 40 * i}, {600, 350 + 40 * i}});
+            QVERIFY(autosaveAndWait());
+        }
+        QVERIFY(QFile::exists(m_recovery->recoveryFilePath()));
+        QVERIFY(QFileInfo(m_recovery->recoveryFilePath()).absolutePath() != QFileInfo(project).absolutePath());
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), original);
+        QCOMPARE(QFileInfo(project).lastModified(), modified);
+    }
+
+    void newOpenAndFailedSaveHandleRecovery()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        const QString rec = m_recovery->recoveryFilePath();
+        QTemporaryDir projects;
+
+        mouseStroke({{100, 300}, {600, 300}});
+        QVERIFY(autosaveAndWait());
+        // A failed save keeps the work recoverable.
+        QVERIFY(!m_canvas->saveFileAs(QUrl::fromLocalFile(projects.filePath("no/such/dir/x.drawapp"))).isEmpty());
+        QVERIFY(QFile::exists(rec));
+        // A failed open changes nothing.
+        QVERIFY(!m_canvas->openFile(QUrl::fromLocalFile(projects.filePath("missing.drawapp"))).isEmpty());
+        QVERIFY(QFile::exists(rec));
+        // New (after the user discarded) removes it.
+        m_canvas->newDocument();
+        QVERIFY(!QFile::exists(rec));
+
+        mouseStroke({{100, 300}, {600, 300}});
+        QVERIFY(autosaveAndWait());
+        QVERIFY(QFile::exists(rec));
+        RasterDocument other(QSize(200, 100));
+        QCOMPARE(ProjectFile::save(other.image(), projects.filePath("other.drawapp")), QString());
+        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(projects.filePath("other.drawapp"))), QString());
+        QVERIFY(!QFile::exists(rec));
+    }
+
+    void strokeInProgressIsAutosaved()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(100, 300));
+        QTest::mouseMove(m_window.get(), QPoint(400, 300));
+        QVERIFY(autosaveAndWait());
+        QCOMPARE(recoveredImage(), doc()); // includes the unfinished stroke
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(400, 300));
+    }
+
+    void writeStillRunningWhenDocumentIsReplacedIsDropped()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QSemaphore gate;
+        m_recovery->setBeforeCommitHookForTesting([&] { gate.acquire(); });
+        QSignalSpy spy(m_recovery.get(), &RecoveryManager::writeFinished);
+        mouseStroke({{100, 300}, {600, 300}});
+        m_canvas->autosaveNow();
+        QVERIFY(m_recovery->isWriting());
+        m_canvas->newDocument(); // user discarded the drawing while its recovery write runs
+        gate.release();
+        QVERIFY(QTest::qWaitFor([&] { return spy.count() > 0; }, 10000));
+        QVERIFY(spy.first().at(1).toBool()); // stale
+        QVERIFY(!QFile::exists(m_recovery->recoveryFilePath()));
+    }
+
+    void restoreAfterCrash()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        const QString dir = m_recoveryDir->path();
+        QTemporaryDir projects;
+        const QString project = projects.filePath("piece.drawapp");
+        attachRecovery(dir);
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(project)), QString());
+        mouseStroke({{100, 450}, {600, 450}});
+        QVERIFY(autosaveAndWait());
+        const QImage before = doc().copy();
+        m_recovery->releaseKeepingFile(); // the session ends without cleaning up, like a crash
+
+        restartCanvas();
+        attachRecovery(dir);
+        QVERIFY(m_canvas->recoveryOffered());
+        QVERIFY(m_canvas->recoveryDescription().contains("piece.drawapp"));
+        QVERIFY(m_canvas->recoveryWarning().isEmpty());
+        m_canvas->restoreRecovery();
+        QVERIFY(!m_canvas->recoveryOffered());
+        QCOMPARE(doc(), before);
+        QVERIFY(m_canvas->isModified()); // restored work is not saved work
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("piece.drawapp"));
+        QVERIFY(QFile::exists(m_recovery->recoveryFilePath())); // adopted by the new session
+        QCOMPARE(QDir(dir).entryList({"*.drawrecovery"}, QDir::Files).size(), 1);
+
+        // The project file still holds the last explicit save, not the recovered strokes.
+        QVERIFY(ProjectFile::load(project).image != before);
+        // Saving clears the unsaved state and the recovery data.
+        QCOMPARE(m_canvas->saveFile(), QString());
+        QVERIFY(!m_canvas->isModified());
+        QVERIFY(!QFile::exists(m_recovery->recoveryFilePath()));
+        QCOMPARE(ProjectFile::load(project).image, before);
+    }
+
+    void discardRecoveryAfterCrash()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        const QString dir = m_recoveryDir->path();
+        attachRecovery(dir);
+        mouseStroke({{100, 300}, {600, 300}});
+        QVERIFY(autosaveAndWait());
+        m_recovery->releaseKeepingFile();
+
+        restartCanvas();
+        attachRecovery(dir);
+        QVERIFY(m_canvas->recoveryOffered());
+        m_canvas->discardRecovery();
+        QVERIFY(!m_canvas->recoveryOffered());
+        QVERIFY(QDir(dir).entryList({"*.drawrecovery"}, QDir::Files).isEmpty());
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(alphaAt(toDoc(QPointF(300, 300))), 0);
+    }
+
+    void corruptRecoveryDoesNotBlockStartup()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        const QString dir = m_recoveryDir->path();
+        {
+            QFile f(QDir(dir).filePath("session-dead.drawrecovery"));
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("DRAWRCV\nthis is not valid recovery data");
+        }
+        attachRecovery(dir);
+        QVERIFY(!m_canvas->recoveryOffered());
+        QVERIFY(m_canvas->recoveryWarning().contains("damaged"));
+        mouseStroke({{100, 300}, {600, 300}}); // the app works normally
+        QCOMPARE(alphaAt(toDoc(QPointF(300, 300))), 255);
+        QVERIFY(autosaveAndWait());
+        QVERIFY(QFile::exists(m_recovery->recoveryFilePath()));
+    }
+
+    void shutdownKeepsOrRemovesRecovery()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        const QString dir = m_recoveryDir->path();
+        // Quit without the close prompt while modified: the latest state stays recoverable,
+        // even strokes made after the last autosave.
+        attachRecovery(dir);
+        mouseStroke({{100, 300}, {600, 300}});
+        QVERIFY(autosaveAndWait());
+        mouseStroke({{100, 450}, {600, 450}});
+        const QImage latest = doc().copy();
+        m_canvas->shutdownRecovery();
+        QCOMPARE(QDir(dir).entryList({"*.drawrecovery"}, QDir::Files).size(), 1);
+        QVERIFY(QDir(dir).entryList({"*.lock"}, QDir::Files).isEmpty());
+
+        restartCanvas();
+        attachRecovery(dir);
+        QVERIFY(m_canvas->recoveryOffered());
+        m_canvas->restoreRecovery();
+        QCOMPARE(doc(), latest);
+
+        // Discard at close, then exit: nothing left behind.
+        m_canvas->discardForClose();
+        m_canvas->shutdownRecovery();
+        QVERIFY(QDir(dir).entryList(QDir::Files).isEmpty());
     }
 };
 

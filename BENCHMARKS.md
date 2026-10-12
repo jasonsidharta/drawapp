@@ -65,6 +65,35 @@ Stroke events with undo capture cost the same as without it within run-to-run no
 numbers are visible pauses. The undo budget is a fixed 128 MiB; actual history memory depends on
 what is drawn and was not measured in the running app.
 
+## Milestone 2: crash recovery, 2026-10-11, same machine
+
+Measured in the deployed app with `DRAWAPP_STATS=1` (log lines `[recovery]` and `[stats]`),
+driven by real OS mouse/keyboard input and killed with `taskkill /F`. "Change → recovery" is the
+age of the oldest change not yet in a committed recovery file at the moment a write commits.
+"UI loop lag" is how late a 5 ms timer fired, the worst value per 2 s window.
+
+| Run | Interval | Document | Snapshot copy (UI thread) | Worker encode + write | Change → recovery | UI loop lag while drawing |
+|---|---|---|---|---|---|---|
+| A: 14 strokes over 32 s, then kill | 10 s (default) | `manual1.drawapp`, light artwork (23 KB recovery file) | 3.0–3.7 ms | 38–40 ms | 1.5–9.3 s (4 commits) | ≤ 4 ms |
+| B: 8 rounds of restore → draw 1.5–4 s → kill | 400 ms | random-noise worst case (11.2–11.6 MB recovery file) | 2.1–3.5 ms (n = 61) | 344–388 ms (55 commits) | median 751 ms, max 784 ms | ≤ 5 ms |
+
+Timer accuracy: ticks were 10 000–10 001 ms apart in run A and 403–410 ms apart in run B. The only
+larger UI lag seen (24–26 ms) was the first full repaint after opening or restoring a document.
+
+**Loss window.** In run A the last commit before the kill was at 21:01:56.09; stroke 14 (ended
+21:01:57.52) was lost and strokes 1–13 were restored exactly. The 10 s timer does **not** mean
+"at most 10 s lost". From these measurements the exposure is roughly *interval + worker time*,
+plus up to one more worker time if a write is still running at a tick: about 10.1 s for light
+artwork and about 10.8 s for worst-case 2048×1536 content at the default interval (the latter is
+an estimate from run B's worker times, not a measurement at 10 s). It grows if the UI thread is
+blocked (saving or opening runs on the UI thread, up to 0.44 s worst case), and it does not cover
+OS crashes or power loss, which were not tested.
+
+Every forced kill (1 in run A, 8 in run B) left a valid recovery file, as checked by an
+independent Python decoder (header, metadata checksum, project checksum, decompressed size).
+One kill in run B landed during the file-write phase and left a temporary file, which the next
+start removed. The original project files had identical SHA-256 hashes before and after.
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera).

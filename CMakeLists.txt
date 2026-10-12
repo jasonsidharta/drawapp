@@ -16,6 +16,8 @@ add_library(drawcore STATIC
     src/core/Pressure.h
     src/core/ProjectFile.cpp src/core/ProjectFile.h
     src/core/RasterDocument.cpp src/core/RasterDocument.h
+    src/core/RecoveryFile.cpp src/core/RecoveryFile.h
+    src/core/RecoveryManager.cpp src/core/RecoveryManager.h
     src/core/StrokeSpacer.cpp src/core/StrokeSpacer.h
     src/core/TileSnapshot.cpp src/core/TileSnapshot.h
     src/core/UndoHistory.cpp src/core/UndoHistory.h
