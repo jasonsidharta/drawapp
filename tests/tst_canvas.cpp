@@ -3128,6 +3128,39 @@ private slots:
         MemoryBudget::setLimit(limit == MemoryBudget::defaultLimit() ? 0 : limit);
         QCOMPARE(doc(), drawing);
     }
+
+    void hopelessRequestsKeepTheUndoHistory()
+    {
+        // Found on the Android emulator: starting a transform far beyond the memory limit dropped
+        // every undo step and was refused anyway. Requests that cannot fit give up nothing.
+        m_canvas->setBrushSize(120);
+        for (int i = 0; i < 4; ++i) {
+            m_canvas->setBrushColor(QColor::fromHsv(70 * i, 200, 200));
+            QVERIFY(m_canvas->drawStroke(docCurve({100, 300}, {900, 320}, 10 * i)));
+        }
+        const int steps = m_canvas->history().undoCount();
+        QVERIFY(m_canvas->history().bytesUsed() > 0);
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        // Larger than the whole limit.
+        QVERIFY(!MemoryBudget::tryReserve(MemoryBudget::limit() + 1, MemoryBudget::Category::Temporary));
+        // Fits under the limit only if more were freed than the history holds.
+        const qint64 limit = MemoryBudget::limit();
+        const auto restore = qScopeGuard([&] { MemoryBudget::setLimit(limit == MemoryBudget::defaultLimit() ? 0 : limit); });
+        MemoryBudget::setLimit(MemoryBudget::usedTotal() + 1024 * 1024);
+        QVERIFY(!MemoryBudget::tryReserve(m_canvas->history().bytesUsed() + 64 * 1024 * 1024, MemoryBudget::Category::Temporary));
+        QCoreApplication::processEvents();
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        for (const QList<QVariant> &n : notices)
+            QVERIFY2(!n.at(0).toString().contains("undo step"), qPrintable(n.at(0).toString()));
+        // A request the history can make room for still gets it.
+        // (More than the view caches can free, so old undo steps are needed.)
+        MemoryBudget::setLimit(MemoryBudget::usedTotal() + 1024 * 1024);
+        const qint64 wanted = 1024 * 1024 + MemoryBudget::used(MemoryBudget::Category::Cache)
+                              + m_canvas->history().bytesUsed() / 2;
+        QVERIFY(MemoryBudget::tryReserve(wanted, MemoryBudget::Category::Temporary));
+        MemoryBudget::release(wanted, MemoryBudget::Category::Temporary);
+        QVERIFY(m_canvas->history().undoCount() < steps);
+    }
 };
 
 QTEST_MAIN(TestCanvas)

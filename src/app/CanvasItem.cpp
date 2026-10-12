@@ -76,6 +76,9 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     m_history = UndoHistory(UndoHistory::budgetForLimit(MemoryBudget::limit()));
     m_undoEvictor = MemoryBudget::addEvictor(
         [this](qint64 wanted) {
+            // Old steps go only if that can make room; otherwise the history stays whole.
+            if (m_history.bytesUsed() < wanted)
+                return qint64(0);
             int dropped = 0;
             const qsizetype freed = m_history.shed(qsizetype(wanted), &dropped);
             if (dropped > 0)
@@ -1131,6 +1134,10 @@ void CanvasItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeom
         m_view.fit(QSizeF(m_document.size()), newGeometry.size());
         emit viewChanged();
     }
+    // A new size needs a whole new picture: on Android the area uncovered when the toolbar wrapped
+    // onto fewer lines stayed black (found on the emulator, milestone 10).
+    if (newGeometry.size() != oldGeometry.size())
+        updateAll();
 }
 
 void CanvasItem::itemChange(ItemChange change, const ItemChangeData &value)

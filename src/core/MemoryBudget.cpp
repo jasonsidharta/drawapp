@@ -113,9 +113,17 @@ bool MemoryBudget::tryReserve(qint64 bytes, Category category)
         s_lastRefusalSystem = false;
         return false;
     }
+    // More than the whole limit can never fit: refused without giving anything up (evicting
+    // caches and undo steps for a request that fails anyway would only lose them).
+    if (bytes > limit()) {
+        s_lastRefusalSystem = false;
+        return false;
+    }
     if (!deviceHasRoom(bytes)) {
-        // The device is low on memory (other programs count too): give up caches, look again.
-        evict(bytes);
+        // The device is low on memory (other programs count too): give up what is needed of the
+        // caches and old undo steps, look again.
+        const qint64 shortfall = std::max<qint64>(bytes, physicalFloor() + bytes - std::max<qint64>(0, s_lastAvailable.load()));
+        evict(shortfall);
         s_nextCheck.store(0);
         if (!deviceHasRoom(bytes)) {
             s_lastRefusalSystem = true;
@@ -125,8 +133,9 @@ bool MemoryBudget::tryReserve(qint64 bytes, Category category)
     }
     if (reserve(bytes, category))
         return true;
-    // Over the limit: free reconstructible caches owned by this thread, then try again.
-    if (evict(bytes) > 0 && reserve(bytes, category))
+    // Over the limit: ask this thread's evictors for exactly the shortfall, then try again.
+    const qint64 shortfall = s_total.load() + bytes - limit();
+    if (shortfall > 0 && evict(shortfall) > 0 && reserve(bytes, category))
         return true;
     s_lastRefusalSystem = false;
     return false;

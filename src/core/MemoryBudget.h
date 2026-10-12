@@ -54,7 +54,10 @@ void setPhysicalFloorForTesting(qint64 bytes); // <= 0 restores the default; che
 // free memory (412 MiB left)".
 QString shortageText();
 
-// Frees reconstructible memory: called with the number of bytes wanted, returns bytes freed.
+// Frees memory: called with the number of bytes still wanted (the shortfall, after the evictors
+// before it), returns bytes freed. An evictor whose loss would not cover `wanted` together with
+// what it can free should free nothing (undo history: it keeps its steps rather than losing them
+// for an allocation that fails anyway).
 // Evictors run only on the thread that registered them (the UI thread), never from a worker.
 using Evictor = std::function<qint64(qint64 wanted)>;
 // Lower `order` runs first: reconstructible caches (0) before undo history (10).
