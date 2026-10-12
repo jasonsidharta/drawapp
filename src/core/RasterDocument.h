@@ -1,6 +1,7 @@
 #pragma once
 
 #include "StrokeSpacer.h"
+#include "TiledImage.h"
 
 #include <QColor>
 #include <QImage>
@@ -42,6 +43,13 @@ public:
                            TileSnapshot *before = nullptr);
     // Makes every pixel transparent, capturing painted tiles into before if given.
     static QRect clear(QImage &image, TileSnapshot *before = nullptr);
+
+    // The same on a tiled layer. Painting allocates the tiles the dabs touch (erasing allocates
+    // none); every tile is made writable before any pixel changes, so if the memory budget
+    // refuses one, nothing changes and the result is an empty rect.
+    static QRect stampDabs(TiledImage &image, const std::vector<Dab> &dabs, const QColor &color, BrushMode mode,
+                           TileSnapshot *before = nullptr);
+    static QRect clear(TiledImage &image, TileSnapshot *before = nullptr);
 
 private:
     QImage m_image;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TiledImage.h"
+
 #include <QImage>
 #include <QPainterPath>
 #include <QRect>
@@ -59,6 +61,7 @@ public:
     // antialias, neighbours of the region up to 16 levels beyond the tolerance get partial
     // coverage. Returns a document-size mask (all zero if the seed is outside the image).
     static QImage magicWand(const QImage &image, QPoint seed, int tolerance, bool contiguous, bool antialias = true);
+    static QImage magicWand(const TiledImage &image, QPoint seed, int tolerance, bool contiguous, bool antialias = true);
     // The selection enlarged or reduced by radius pixels (Euclidean distance from the 50 %
     // boundary), with an anti-aliased edge. Radius 0 changes nothing; none stays none.
     Selection grown(double radius) const;

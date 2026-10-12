@@ -62,8 +62,121 @@ void TileSnapshot::captureTile(const QImage &image, int column, int row)
 
 const QImage *TileSnapshot::storedTile(int column, int row) const
 {
+    if (!m_refs.empty())
+        return nullptr;
     const auto it = m_index.find(tileKey(column, row));
     return it == m_index.end() ? nullptr : &m_tiles[it->second].pixels;
+}
+
+const QRgb *TileSnapshot::storedRow(int x, int y) const
+{
+    static const QRgb zeros[256] = {};
+    if (m_refTileSize > 0) {
+        const int shift = m_refTileSize == 64 ? 6 : (m_refTileSize == 128 ? 7 : 8);
+        const auto it = m_index.find(tileKey(x >> shift, y >> shift));
+        if (it == m_index.end())
+            return nullptr;
+        const TileBlock *b = m_refs[it->second].tile.get();
+        if (!b)
+            return zeros;
+        const int mask = m_refTileSize - 1;
+        return reinterpret_cast<const QRgb *>(b->data() + (y & mask) * m_refTileSize * 4) + (x & mask);
+    }
+    const auto it = m_index.find(tileKey(x / TileSize, y / TileSize));
+    if (it == m_index.end())
+        return nullptr;
+    const Tile &t = m_tiles[it->second];
+    return reinterpret_cast<const QRgb *>(t.pixels.constScanLine(y - t.origin.y())) + (x - t.origin.x());
+}
+
+QRect TileSnapshot::bounds() const
+{
+    QRect r;
+    for (const Tile &t : m_tiles)
+        r |= QRect(t.origin, t.pixels.size());
+    for (const Ref &ref : m_refs)
+        r |= QRect(ref.column * m_refTileSize, ref.row * m_refTileSize, m_refTileSize, m_refTileSize);
+    return r;
+}
+
+void TileSnapshot::capture(const TiledImage &image, const QRect &rect)
+{
+    Q_ASSERT(m_tiles.empty());
+    const QRect area = rect & image.rect();
+    if (area.isEmpty())
+        return;
+    m_refTileSize = image.tileSize();
+    for (int row = image.rowOf(area.top()); row <= image.rowOf(area.bottom()); ++row)
+        for (int column = image.columnOf(area.left()); column <= image.columnOf(area.right()); ++column) {
+            if (!m_index.emplace(tileKey(column, row), m_refs.size()).second)
+                continue;
+            const TileRef &t = image.tileRef(column, row);
+            if (t)
+                m_bytes += t.get()->bytes();
+            m_refs.push_back({column, row, t});
+        }
+}
+
+void TileSnapshot::captureAllocated(const TiledImage &image)
+{
+    Q_ASSERT(m_tiles.empty());
+    m_refTileSize = image.tileSize();
+    for (int row = 0; row < image.rows(); ++row)
+        for (int column = 0; column < image.columns(); ++column) {
+            const TileRef &t = image.tileRef(column, row);
+            if (!t || !m_index.emplace(tileKey(column, row), m_refs.size()).second)
+                continue;
+            m_bytes += t.get()->bytes();
+            m_refs.push_back({column, row, t});
+        }
+}
+
+void TileSnapshot::dropUnchanged(const TiledImage &image)
+{
+    std::vector<Ref> kept;
+    kept.reserve(m_refs.size());
+    m_index.clear();
+    m_bytes = 0;
+    const int bytes = image.tileBytes();
+    for (Ref &r : m_refs) {
+        const TileRef &now = image.tileRef(r.column, r.row);
+        bool same = now == r.tile;
+        if (!same) {
+            const uchar *a = r.tile ? r.tile.get()->data() : nullptr;
+            const uchar *b = now ? now.get()->data() : nullptr;
+            if (a && b) {
+                same = std::memcmp(a, b, size_t(bytes)) == 0;
+            } else {
+                const uchar *p = a ? a : b;
+                same = true;
+                for (int i = 0; i < bytes && same; ++i)
+                    same = p[i] == 0;
+            }
+        }
+        if (same)
+            continue;
+        m_index.emplace(tileKey(r.column, r.row), kept.size());
+        if (r.tile)
+            m_bytes += r.tile.get()->bytes();
+        kept.push_back(std::move(r));
+    }
+    m_refs = std::move(kept);
+}
+
+QRect TileSnapshot::swapWith(TiledImage &image)
+{
+    QRect changed;
+    for (Ref &r : m_refs) {
+        TileRef current = image.tileRef(r.column, r.row);
+        image.setTileRef(r.column, r.row, r.tile);
+        r.tile = std::move(current);
+        changed |= image.tileRect(r.column, r.row);
+    }
+    m_bytes = 0;
+    for (const Ref &r : m_refs)
+        if (r.tile)
+            m_bytes += r.tile.get()->bytes();
+    return changed;
 }
 
 void TileSnapshot::dropUnchanged(const QImage &image)

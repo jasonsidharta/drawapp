@@ -1,23 +1,20 @@
 #include "LayeredDocument.h"
 
-#include "RasterDocument.h"
-
 #include <algorithm>
 
-int LayeredDocument::maxLayersFor(QSize size)
+int LayeredDocument::maxLayersFor(QSize)
 {
-    const qint64 layerBytes = qint64(std::max(1, size.width())) * std::max(1, size.height()) * 4;
-    return int(std::clamp<qint64>(MaxPixelBytes / layerBytes, 1, MaxLayers));
+    return MaxLayers;
 }
 
 LayeredDocument::LayeredDocument(QSize size)
     : m_size(size)
-    , m_composite(RasterDocument::blank(size))
+    , m_composite(size, TiledImage::DefaultTileSize, MemoryBudget::Category::Composite)
 {
     LayerData layer;
     layer.id = allocateId();
     layer.name = QStringLiteral("Layer 1");
-    layer.image = RasterDocument::blank(size);
+    layer.image = TiledImage(size);
     m_layers.push_back(layer);
     m_activeId = layer.id;
 }
@@ -25,7 +22,7 @@ LayeredDocument::LayeredDocument(QSize size)
 LayeredDocument::LayeredDocument(const DocumentData &data)
     : m_size(data.size)
     , m_layers(data.layers)
-    , m_composite(data.size, QImage::Format_ARGB32_Premultiplied)
+    , m_composite(data.size, TiledImage::DefaultTileSize, MemoryBudget::Category::Composite)
 {
     for (const LayerData &layer : m_layers)
         m_nextId = std::max(m_nextId, layer.id + 1);
@@ -48,9 +45,9 @@ void LayeredDocument::setActiveLayer(quint64 id)
         m_activeId = id;
 }
 
-void LayeredDocument::refreshComposite(const QRect &rect)
+bool LayeredDocument::refreshComposite(const QRect &rect)
 {
-    compositeLayers(m_composite, rect, m_layers);
+    return compositeLayers(m_composite, rect, m_layers);
 }
 
 DocumentData LayeredDocument::snapshot() const

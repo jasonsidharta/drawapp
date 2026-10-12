@@ -101,7 +101,7 @@ RecoveryFile::Contents RecoveryFile::decode(const QByteArray &data)
     if (projectSize != quint64(data.size() - projectOffset))
         return failure(damaged(QStringLiteral("unexpected file length")));
 
-    ProjectFile::LoadResult project = ProjectFile::decode(data.mid(projectOffset));
+    ProjectFile::LoadResult project = ProjectFile::decode(QByteArrayView(data).sliced(projectOffset));
     if (!project.ok())
         return failure(damaged(project.error));
     // Version 1 containers come from the single-layer milestone and must embed a version 1 project.

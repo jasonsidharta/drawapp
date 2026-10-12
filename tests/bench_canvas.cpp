@@ -45,9 +45,9 @@ DocumentData makeDocument(int layers)
         LayerData layer;
         layer.id = quint64(n + 1);
         layer.name = n == 0 ? QStringLiteral("Background") : QStringLiteral("Layer %1").arg(n + 1);
-        layer.image = RasterDocument::blank(doc.size);
+        layer.image = TiledImage(doc.size);
         if (n == 0) {
-            layer.image.fill(Qt::white);
+            layer.image.fillRect(layer.image.rect(), 0xffffffff);
         } else {
             std::vector<Dab> dabs;
             for (int i = 0; i < 2500; ++i)

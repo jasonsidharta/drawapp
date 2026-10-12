@@ -98,14 +98,14 @@ void row(const char *label, const Stats &s, int decimals = 2)
 LayeredDocument makeDocument(QSize size, int layers)
 {
     LayeredDocument doc(size);
-    doc.pixels(0).fill(Qt::white);
+    doc.pixels(0).fillRect(doc.pixels(0).rect(), 0xffffffff);
     doc.layerRef(0).name = QStringLiteral("Background");
     const int dabsPerLayer = std::max(200, int(qint64(size.width()) * size.height() / 1250));
     for (int n = 1; n < layers; ++n) {
         LayerData layer;
         layer.id = doc.allocateId();
         layer.name = QStringLiteral("Layer %1").arg(n + 1);
-        layer.image = RasterDocument::blank(doc.size());
+        layer.image = TiledImage(doc.size());
         layer.opacity = n % 3 == 0 ? 0.7 : 1.0;
         std::vector<Dab> dabs;
         const int w = size.width() - 80, h = size.height() - 80;
@@ -197,9 +197,7 @@ void documentBench(QSize size, int wantedLayers, int reps)
     const int layers = std::min(wantedLayers, maxLayers);
     std::printf("\n### %d x %d, %d layer(s)\n\n", size.width(), size.height(), wantedLayers);
     if (layers < wantedLayers)
-        std::printf("Refused by design: %d layers of this size exceed the %d MiB document limit (at most %d layers). "
-                    "Measured with %d layers instead.\n\n",
-                    wantedLayers, int(LayeredDocument::MaxPixelBytes / qint64(MiB)), maxLayers, layers);
+        std::printf("Refused by design: at most %d layers. Measured with %d layers instead.\n\n", maxLayers, layers);
     const Memory start = memory();
     QElapsedTimer t;
     t.start();
@@ -383,7 +381,7 @@ void transformBench(QSize size, int wantedLayers, int reps)
 {
     const int layers = std::min(wantedLayers, LayeredDocument::maxLayersFor(size));
     LayeredDocument doc = makeDocument(size, layers);
-    std::vector<QImage> images;
+    std::vector<TiledImage> images;
     std::vector<quint64> ids;
     for (int i = 1; i < doc.count(); ++i) { // every layer except the background, as when all are selected
         images.push_back(doc.layer(i).image);
@@ -404,7 +402,7 @@ void transformBench(QSize size, int wantedLayers, int reps)
     // A preview frame as CanvasItem draws it: every part rendered (fast) into its preview layer,
     // then the preview composite over the changed area.
     std::vector<LayerData> preview = doc.layers();
-    QImage composite = doc.composite();
+    TiledImage composite = doc.composite();
     const Stats frame = measure(std::max(3, reps / 3), [&] {
         for (int p = 0; p < t.partCount(); ++p)
             t.render(p, preview[size_t(p) + 1].image, area, TransformSession::Quality::Fast);
@@ -415,10 +413,10 @@ void transformBench(QSize size, int wantedLayers, int reps)
         // The milestone 9 preview of adjacent layers without a selection: one merged copy.
         QElapsedTimer mt;
         mt.start();
-        QImage flat(size, QImage::Format_ARGB32_Premultiplied);
+        TiledImage flat(size, TiledImage::DefaultTileSize, MemoryBudget::Category::Preview);
         std::vector<LayerData> stack(doc.layers().begin() + 1, doc.layers().end());
         compositeLayers(flat, flat.rect(), stack);
-        std::vector<QImage> withMerged = images;
+        std::vector<TiledImage> withMerged = images;
         withMerged.push_back(flat);
         TransformSession m;
         m.begin(withMerged, Selection());
@@ -426,7 +424,7 @@ void transformBench(QSize size, int wantedLayers, int reps)
         m.setSize(m.sourceRect().width() * 1.2, m.sourceRect().height() * 1.2);
         m.setRotation(15);
         std::vector<LayerData> mergedStack = doc.layers();
-        QImage mergedPreview = flat;
+        TiledImage mergedPreview = flat;
         const int mergedPart = m.partCount() - 1;
         const Stats mergedFrame = measure(std::max(3, reps / 3), [&] {
             m.render(mergedPart, mergedPreview, area, TransformSession::Quality::Fast);
@@ -444,12 +442,16 @@ void transformBench(QSize size, int wantedLayers, int reps)
         row("preview after release, merged copy (bicubic)", mergedFinal, 1);
         std::printf("| begin with the merged copy (merge + cache, once per transform) | %.1f | - | - |\n", setupMs);
     }
-    // Apply: prepare every layer's final result (the transaction), then commit as one undo step.
-    std::vector<QImage> results;
+    // Apply as CanvasItem does: each layer's final result rendered into a copy of the layer (sharing
+    // its tiles), then committed as one undo step by exchanging tile references.
+    std::vector<TiledImage> results;
     const Stats prepare = measure(std::max(2, reps / 10), [&] {
         results.clear();
-        for (int p = 0; p < t.partCount(); ++p)
-            results.push_back(t.renderRegion(p, area, TransformSession::Quality::Final));
+        for (int p = 0; p < t.partCount(); ++p) {
+            results.push_back(doc.layer(doc.indexOf(ids[size_t(p)])).image);
+            t.render(p, results.back(), area, TransformSession::Quality::Final);
+            results.back().pruneTransparent(area);
+        }
     });
     row("apply: prepare all layers (bicubic)", prepare, 1);
     UndoHistory history;
@@ -459,11 +461,8 @@ void transformBench(QSize size, int wantedLayers, int reps)
     for (int p = 0; p < t.partCount(); ++p) {
         const int index = doc.indexOf(ids[size_t(p)]);
         TileSnapshot snap;
-        snap.capture(doc.pixels(index), area);
-        QPainter painter(&doc.pixels(index));
-        painter.setCompositionMode(QPainter::CompositionMode_Source);
-        painter.drawImage(area.topLeft(), results[size_t(p)]);
-        painter.end();
+        snap.capture(doc.layer(index).image, area);
+        doc.pixels(index) = results[size_t(p)];
         snap.dropUnchanged(doc.layer(index).image);
         commands.push_back(UndoCommand::pixels(ids[size_t(p)], std::move(snap), QStringLiteral("Transform")));
     }

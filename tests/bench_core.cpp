@@ -85,13 +85,13 @@ std::vector<StrokeSample> zigZag()
 LayeredDocument makeDocument(int layers)
 {
     LayeredDocument doc;
-    doc.pixels(0).fill(Qt::white);
+    doc.pixels(0).fillRect(doc.pixels(0).rect(), 0xffffffff);
     doc.layerRef(0).name = QStringLiteral("Background");
     for (int n = 1; n < layers; ++n) {
         LayerData layer;
         layer.id = doc.allocateId();
         layer.name = QStringLiteral("Layer %1").arg(n + 1);
-        layer.image = RasterDocument::blank(doc.size());
+        layer.image = TiledImage(doc.size());
         layer.opacity = n % 3 == 0 ? 0.7 : 1.0;
         layer.visible = n != 4;
         std::vector<Dab> dabs;
@@ -277,7 +277,7 @@ void brushEngineBench(int reps)
     std::printf("| Variant | median ms | p95 ms | max ms | coverage tiles |\n|---|---|---|---|---|\n");
     for (const Variant &v : variants) {
         LayeredDocument doc;
-        doc.pixels(0).fill(Qt::white);
+        doc.pixels(0).fillRect(doc.pixels(0).rect(), 0xffffffff);
         doc.refreshComposite();
         std::vector<double> events;
         int maskTiles = 0;
@@ -451,7 +451,7 @@ void selectionTransformBench(int reps)
 
     std::printf("\n### Transforms (one layer of representative artwork)\n\n| Source | Operation | median ms | p95 ms | max ms |\n|---|---|---|---|---|\n");
     LayeredDocument doc = makeDocument(5);
-    const QImage layer = doc.layer(doc.activeIndex()).image;
+    const std::vector<TiledImage> layer{doc.layer(doc.activeIndex()).image};
     struct Case { const char *label; QRect sel; };
     const Case cases[] = {{"512 x 512 selection", QRect(700, 500, 512, 512)},
                           {"1024 x 1024 selection", QRect(500, 250, 1024, 1024)},
@@ -488,13 +488,13 @@ void selectionTransformBench(int reps)
     for (int layers : {1, 5, 10}) {
         LayeredDocument d = makeDocument(layers);
         std::vector<LayerData> copy = d.layers();
-        QImage composite = d.composite();
+        TiledImage composite = d.composite();
         const Stats st = measure(std::max(3, reps / 3), [&] { compositeLayers(composite, composite.rect(), copy); });
         std::printf("| %d | %.2f | %.2f | %.2f |\n", layers, st.medianMs, st.p95Ms, st.maxMs);
     }
-    std::printf("\nPreview memory while transforming: a copy of the layer and of the composite (12 + 12 MiB at "
-                "2048 x 1536), the session's base layer when there is a selection (12 MiB) and the source with "
-                "its reductions (about 1.33 x the source).\n");
+    std::printf("\nPreview memory while transforming: the preview layers and composite share tiles with the "
+                "document except where the preview differs; the session's base and source are dense over the "
+                "source rectangle (with the source's reductions, about 2.33 x the rectangle per layer).\n");
 }
 
 void renderBench(const char *label, qreal zoom, const QRect &exposed, int reps)

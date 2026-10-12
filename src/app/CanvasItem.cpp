@@ -261,7 +261,10 @@ bool CanvasItem::commitPixels(quint64 layerId, TileSnapshot before, const QStrin
     const int index = m_document.indexOf(layerId);
     if (index < 0)
         return false;
-    // Tiles touched but left identical (for example erasing transparent pixels) are not history.
+    // Tiles erased to transparent are released, and tiles touched but left identical (for
+    // example erasing transparent pixels) are not history.
+    if (!before.isEmpty())
+        m_document.pixels(index).pruneTransparent(before.bounds());
     before.dropUnchanged(m_document.layer(index).image);
     if (before.isEmpty())
         return false;
@@ -382,7 +385,7 @@ void CanvasItem::addLayer()
     LayerData layer;
     layer.id = m_document.allocateId();
     layer.name = m_document.nextLayerName();
-    layer.image = RasterDocument::blank(m_document.size());
+    layer.image = TiledImage(m_document.size());
     const int index = m_document.activeIndex() + 1; // above the active layer
     const quint64 id = layer.id;
     m_document.insertLayer(index, std::move(layer));
@@ -1338,10 +1341,12 @@ bool CanvasItem::startStroke(const StrokeSample &sample, PointerKind kind, bool 
                                               StrokeEngine::smoothingRadius(settings, m_view.zoom()));
     if (selected.isActive())
         m_engine->setClipMask(selected.mask()); // applied once, when each pixel is composited
-    QImage &layer = m_document.pixels(index);
+    TiledImage &layer = m_document.pixels(index);
     const qint64 dabs = m_engine->dabCount();
     const QRect changed = m_engine->begin(layer, sample, m_strokeBefore);
     strokePixelsChanged(changed, m_engine->dabCount() - dabs);
+    if (strokeOutOfMemory())
+        return false;
     if (m_engine->usesTime())
         m_airbrushTimer.start();
     return true;
@@ -1381,10 +1386,11 @@ void CanvasItem::extendStroke(const StrokeSample &sample)
     const int index = m_document.indexOf(m_strokeLayerId);
     if (!m_engine || index < 0)
         return;
-    QImage &layer = m_document.pixels(index);
+    TiledImage &layer = m_document.pixels(index);
     const qint64 dabs = m_engine->dabCount();
     const QRect changed = m_engine->moveTo(layer, sample, m_strokeBefore);
     strokePixelsChanged(changed, m_engine->dabCount() - dabs);
+    strokeOutOfMemory();
 }
 
 bool CanvasItem::drawStroke(const std::vector<StrokeSample> &samples, bool erase)
@@ -1409,10 +1415,11 @@ void CanvasItem::advanceAirbrush()
     const int index = m_document.indexOf(m_strokeLayerId);
     if (index < 0)
         return;
-    QImage &layer = m_document.pixels(index);
+    TiledImage &layer = m_document.pixels(index);
     const qint64 dabs = m_engine->dabCount();
     const QRect changed = m_engine->advanceTime(layer, double(m_strokeClock.nsecsElapsed()) / 1e6, m_strokeBefore);
     strokePixelsChanged(changed, m_engine->dabCount() - dabs);
+    strokeOutOfMemory();
 }
 
 void CanvasItem::endStroke()
@@ -1433,10 +1440,15 @@ void CanvasItem::endStroke()
     if (m_gesture == Gesture::Stroke) {
         const int index = m_document.indexOf(m_strokeLayerId);
         if (m_engine && index >= 0) {
-            QImage &layer = m_document.pixels(index);
+            TiledImage &layer = m_document.pixels(index);
             const qint64 dabs = m_engine->dabCount();
             const QRect changed = m_engine->finish(layer, m_strokeBefore);
             strokePixelsChanged(changed, m_engine->dabCount() - dabs);
+            if (strokeOutOfMemory()) {
+                m_engine.reset();
+                m_gesture = Gesture::None;
+                return;
+            }
         }
         commitPixels(m_strokeLayerId, std::move(m_strokeBefore),
                      m_strokeBlend == BrushBlend::Erase    ? QStringLiteral("Eraser stroke")
@@ -1446,6 +1458,25 @@ void CanvasItem::endStroke()
     }
     m_engine.reset();
     m_gesture = Gesture::None;
+}
+
+bool CanvasItem::strokeOutOfMemory()
+{
+    if (!m_engine || !m_engine->allocationFailed() || m_gesture != Gesture::Stroke)
+        return false;
+    // A tile could not be allocated within the memory budget. The stroke is taken back whole
+    // (a half-drawn stroke would be a surprise), and the artist is told why.
+    m_airbrushTimer.stop();
+    const int index = m_document.indexOf(m_strokeLayerId);
+    if (index >= 0 && !m_strokeBefore.isEmpty())
+        strokePixelsChanged(m_strokeBefore.swapWith(m_document.pixels(index)), 0);
+    m_strokeBefore = TileSnapshot();
+    m_engine.reset();
+    m_gesture = Gesture::None;
+    emit notice(QStringLiteral("Not enough memory to continue this stroke (memory limit %1 MiB), so it was undone. "
+                               "Undo history, hidden layers or a smaller canvas free memory.")
+                    .arg(MemoryBudget::limit() / (1024 * 1024)));
+    return true;
 }
 
 void CanvasItem::cancelStroke()

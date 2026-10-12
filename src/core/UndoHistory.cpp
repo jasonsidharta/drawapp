@@ -104,7 +104,7 @@ qsizetype UndoCommand::byteSize() const
         return m_tiles.byteSize() + selectionBytes;
     case Kind::Presence:
         // Counted in full even if the pixels are still shared with another layer (duplicate).
-        return m_stored ? m_stored->image.sizeInBytes() : 0;
+        return m_stored ? m_stored->image.allocatedBytes() : 0;
     default:
         return 0;
     }

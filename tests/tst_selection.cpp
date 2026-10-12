@@ -228,7 +228,7 @@ private slots:
         // Artwork changes still count, and a selection change after them does not hide them.
         TileSnapshot tiles;
         tiles.capture(doc.pixels(0), QRect(0, 0, 10, 10));
-        doc.pixels(0).fill(Qt::red);
+        doc.pixels(0).fillRect(QRect(0, 0, 10, 10), 0xffff0000);
         history.push(UndoCommand::pixels(doc.layer(0).id, std::move(tiles), "Fill"));
         const quint64 afterFill = history.stateId();
         QVERIFY(afterFill != saved);
@@ -240,9 +240,9 @@ private slots:
     void selectionChangesNeverTouchArtwork()
     {
         LayeredDocument doc(DocSize);
-        doc.pixels(0) = artwork();
+        doc.pixels(0) = TiledImage::fromImage(artwork());
         doc.refreshComposite();
-        const QImage pixels = doc.layer(0).image.copy();
+        const QImage pixels = doc.layer(0).image.toImage();
         doc.setSelection(Selection::all(DocSize).inverted());
         doc.setSelection(Selection().combined(shape(ellipsePath(QRectF(0, 0, 200, 200))), SelectionMode::Replace));
         QCOMPARE(doc.layer(0).image, pixels);
@@ -688,15 +688,14 @@ private slots:
         LayerData second;
         second.id = doc.allocateId();
         second.name = "Two";
-        second.image = QImage(DocSize, QImage::Format_ARGB32_Premultiplied);
-        second.image.fill(Qt::transparent);
+        second.image = TiledImage(DocSize);
         doc.insertLayer(1, second);
-        const QImage a0 = doc.layer(0).image.copy(), b0 = doc.layer(1).image.copy();
+        const QImage a0 = doc.layer(0).image.toImage(), b0 = doc.layer(1).image.toImage();
         std::vector<UndoCommand> children;
         for (int i = 0; i < 2; ++i) {
             TileSnapshot tiles;
             tiles.capture(doc.pixels(i), QRect(0, 0, 100, 100));
-            doc.pixels(i).fill(i ? Qt::blue : Qt::red);
+            doc.pixels(i).fillRect(QRect(0, 0, 100, 100), i ? 0xff0000ff : 0xffff0000);
             children.push_back(UndoCommand::pixels(doc.layer(i).id, std::move(tiles), "Fill"));
         }
         const Selection before = doc.selection();
@@ -704,11 +703,11 @@ private slots:
         UndoHistory history;
         history.push(UndoCommand::group(std::move(children), "Transform").withSelection(before));
         QCOMPARE(history.undoCount(), 1);
-        const QImage a1 = doc.layer(0).image.copy(), b1 = doc.layer(1).image.copy();
+        const QImage a1 = doc.layer(0).image.toImage(), b1 = doc.layer(1).image.toImage();
         const UndoCommand::Result r = history.undo(doc);
         QVERIFY(r.selection);
-        QCOMPARE(doc.layer(0).image.copy(0, 0, 100, 100), a0.copy(0, 0, 100, 100));
-        QCOMPARE(doc.layer(1).image.copy(0, 0, 100, 100), b0.copy(0, 0, 100, 100));
+        QCOMPARE(doc.layer(0).image.copy(QRect(0, 0, 100, 100)), a0.copy(0, 0, 100, 100));
+        QCOMPARE(doc.layer(1).image.copy(QRect(0, 0, 100, 100)), b0.copy(0, 0, 100, 100));
         QVERIFY(!doc.selection().isActive());
         history.redo(doc);
         QCOMPARE(doc.layer(0).image, a1);

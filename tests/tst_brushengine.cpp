@@ -10,6 +10,7 @@
 #include "BrushProperties.h"
 #include "BrushTips.h"
 #include "StrokeEngine.h"
+#include "TiledImage.h"
 #include "TileSnapshot.h"
 
 #include <QFile>
@@ -112,6 +113,35 @@ QImage render(const BrushSettings &settings, const std::vector<StrokeSample> &sa
     if (dabs)
         *dabs = engine.dabCount();
     return image;
+}
+
+// The same stroke on a tiled layer (milestone 10), as the canvas paints document layers.
+TiledImage renderTiled(const BrushSettings &settings, const std::vector<StrokeSample> &samples, const QImage &background,
+                       TileSnapshot *snapshot, quint64 seed = 7, const QColor &color = Paint, const QImage &clip = QImage())
+{
+    TiledImage image = TiledImage::fromImage(background);
+    StrokeEngine engine(settings, color, seed, StrokeEngine::smoothingRadius(settings));
+    if (!clip.isNull())
+        engine.setClipMask(clip);
+    engine.begin(image, samples.front(), *snapshot);
+    for (size_t i = 1; i < samples.size(); ++i)
+        engine.moveTo(image, samples[i], *snapshot);
+    engine.finish(image, *snapshot);
+    return engine.allocationFailed() ? TiledImage() : image;
+}
+
+// A stroke along tile seams and through tile corners (64-pixel tiles).
+std::vector<StrokeSample> seamStroke()
+{
+    std::vector<StrokeSample> v;
+    for (int i = 0; i <= 60; ++i) {
+        StrokeSample s = sample(20 + i * 6.0, i < 30 ? 64.0 + (i % 3) * 0.5 : 128.0 - (i - 30) * 2.1,
+                                0.3 + 0.7 * (i % 10) / 10.0, i * 4.0);
+        v.push_back(s);
+    }
+    v.push_back(sample(128, 128, 1.0, 260)); // a dab centred on a tile corner
+    v.push_back(sample(192, 64, 0.5, 270));
+    return v;
 }
 
 bool validPremultiplied(const QImage &image)
@@ -1299,6 +1329,79 @@ private slots:
             QVERIFY2(!ref.isNull(), qPrintable("missing " + path + " (run with DRAWAPP_WRITE_GOLDEN=1)"));
             QString why;
             QVERIFY2(closeImages(img, ref, 3, 0.01, &why), qPrintable(name + ": " + why));
+        }
+    }
+
+    void tiledLayersPaintExactlyLikeDenseImages()
+    {
+        // Zero regression for milestone 10: every brush paints the same pixels on a tiled layer as
+        // on one dense image, across tile seams and corners, on paint and on transparency, with
+        // and without a soft selection; undo restores the layer exactly; and on transparency only
+        // the tiles the stroke reaches are allocated.
+        std::vector<std::pair<QString, BrushSettings>> cases;
+        for (const BrushPreset &p : BrushPresets::builtIns())
+            cases.emplace_back(p.id, p.settings);
+        BrushSettings spray = baseSettings();
+        spray.stamp = BrushStamp::Spray;
+        spray.size = 40;
+        cases.emplace_back(QStringLiteral("spray"), spray);
+        BrushSettings hatch = baseSettings();
+        hatch.stamp = BrushStamp::Hatching;
+        hatch.size = 50;
+        cases.emplace_back(QStringLiteral("hatching"), hatch);
+        cases.emplace_back(QStringLiteral("golden wet ink"), goldenBrush());
+        QImage clip(400, 200, QImage::Format_Grayscale8);
+        clip.fill(0);
+        {
+            QPainter p(&clip);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(255, 255, 255));
+            p.drawEllipse(QRectF(60, 30, 230, 140));
+        }
+        const QImage transparent = transparentCanvas(QSize(400, 200));
+        for (const auto &[name, settings] : cases) {
+            for (const auto &stroke : {standardStroke(), seamStroke()}) {
+                for (const QImage &background : {stripes(), transparent}) {
+                    for (const QImage &mask : {QImage(), clip}) {
+                        const QString what = QStringLiteral("%1, %2 background%3")
+                                                 .arg(name, background.pixel(10, 10) ? "striped" : "transparent",
+                                                      mask.isNull() ? "" : ", soft selection");
+                        const QImage dense = render(settings, stroke, background, 7, Paint, mask);
+                        TileSnapshot before;
+                        TiledImage tiled = renderTiled(settings, stroke, background, &before, 7, Paint, mask);
+                        QVERIFY2(!tiled.isNull(), qPrintable(what));
+                        QVERIFY2(tiled == dense, qPrintable(what));
+                        if (!background.pixel(10, 10))
+                            QVERIFY2(tiled.allocatedTileCount() < tiled.columns() * tiled.rows(), qPrintable(what));
+                        before.swapWith(tiled);
+                        QVERIFY2(tiled == background, qPrintable(what + " (undo)"));
+                    }
+                }
+            }
+        }
+    }
+
+    void tileSeamGoldenImages()
+    {
+        // Strokes along tile seams and through tile corners, painted on tiled layers, against
+        // committed references (milestone 10). Same tolerance as goldenImages().
+        for (const BrushPreset &p : BrushPresets::builtIns()) {
+            for (const bool onTransparency : {false, true}) {
+                const QImage background = onTransparency ? transparentCanvas(QSize(400, 200)) : stripes();
+                TileSnapshot before;
+                const TiledImage tiled = renderTiled(p.settings, seamStroke(), background, &before);
+                QVERIFY2(!tiled.isNull(), qPrintable(p.id));
+                const QImage img = tiled.toImage();
+                const QString name = QStringLiteral("m10-seam-%1%2").arg(p.id.mid(8), onTransparency ? "-transparent" : "");
+                const QString path = goldenPath(QStringLiteral("stroke-%1.png").arg(name));
+                if (writeGolden())
+                    QVERIFY(img.save(path));
+                const QImage ref = QImage(path).convertToFormat(QImage::Format_ARGB32_Premultiplied);
+                QVERIFY2(!ref.isNull(), qPrintable("missing " + path + " (run with DRAWAPP_WRITE_GOLDEN=1)"));
+                QString why;
+                QVERIFY2(closeImages(img, ref, 3, 0.01, &why), qPrintable(name + ": " + why));
+            }
         }
     }
 

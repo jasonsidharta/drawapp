@@ -7,8 +7,9 @@
 #include <QImage>
 #include <QString>
 
-// Crash-recovery file. Never written to the user's project path. Version 2 embeds a layered (v2)
-// project; version 1 (milestone 2) embedded a single-layer (v1) project and is still read.
+// Crash-recovery file. Never written to the user's project path. Version 2 embeds a layered
+// project (format 3 since milestone 10; format 2 from milestones 3–9 is still read); version 1
+// (milestone 2) embedded a single-layer (v1) project and is still read.
 //
 //   offset size  field (integers little-endian)
 //   0      8     magic "DRAWRCV\n"
@@ -45,7 +46,7 @@ struct Contents
 };
 
 QByteArray encode(const DocumentData &document, const Metadata &metadata);
-// The same container around an already encoded version 2 project (ProjectFile::encode output).
+// The same container around an already encoded project (ProjectFile::encode output).
 QByteArray encodeProject(const QByteArray &project, const Metadata &metadata);
 // Writes the version 1 container with a single-layer project (kept to test reading older files).
 QByteArray encodeVersion1(const QImage &image, const Metadata &metadata);

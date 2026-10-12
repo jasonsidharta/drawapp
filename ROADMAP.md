@@ -158,6 +158,16 @@ on the offscreen platform), Android at runtime.
 | Physical pen, palm rejection, tablet performance | **Not done** (no hardware) | milestone 7 |
 | Krita and PhotoCraft comparison | **Not run** (not installed / no Rust toolchain); manual procedure written | `docs/milestone9-performance.md` |
 
+## Milestone 10: sparse tiled storage, memory budget and asynchronous rendering (in progress)
+
+Plan and order in the milestone 10 specification; research in `research/m10-*.md`. Done so far
+(local commits): baseline reproduced; research; `MemoryBudget` and `TiledImage` (64-pixel
+copy-on-write tiles, chosen by measurement); layers, composite, brushes, undo records, selection
+edits, transforms, clipboard and recovery snapshots on tiled storage; project format 3 (sparse
+tiles; versions 1 and 2 still read). Remaining: incremental view rendering (pyramid), Apply on a
+worker thread with cancellation, memory-aware undo and refusal messages, recovery and fuzzing,
+benchmarks of all workloads, Android validation, the artist workflows and the reports.
+
 ## Milestone 7: hardware validation (outstanding: no pen hardware yet)
 
 - Run the short Windows on-screen checklist with real mouse input (and a pen if available).
@@ -176,8 +186,6 @@ on the offscreen platform), Android at runtime.
 
 Folder-based saving with sibling-and-rename on providers that allow it; incremental recovery
 writes (only changed layers); the 26 planned brush properties (`docs/brush-settings-specification.md`);
-bristle, clone and sketch engines; a real wet-media model; tiled or sparse layers (would lift the
-512 MiB document limit and speed up large transforms); transform Apply off the UI thread;
-more layer blend modes, groups, clipping, masks; drag-and-drop layer reordering; canvas rotation
+bristle, clone and sketch engines; a real wet-media model; more layer blend modes, groups, clipping, masks; drag-and-drop layer reordering; canvas rotation
 and mirroring; perspective/warp transforms; iOS build (needs macOS and a licensing decision);
 Play Store AAB with an upload key and release pipeline.

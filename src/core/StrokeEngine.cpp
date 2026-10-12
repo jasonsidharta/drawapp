@@ -387,9 +387,8 @@ void StrokeEngine::annotate(StrokeSample &s)
     s.hasDirection = m_hasDirection;
 }
 
-QRect StrokeEngine::begin(QImage &image, const StrokeSample &sample, TileSnapshot &before)
+QRect StrokeEngine::begin(StrokeSurface &image, const StrokeSample &sample, TileSnapshot &before)
 {
-    Q_ASSERT(image.format() == QImage::Format_ARGB32_Premultiplied);
     QRect dirty;
     m_started = false;
     m_smoothed.clear();
@@ -399,7 +398,7 @@ QRect StrokeEngine::begin(QImage &image, const StrokeSample &sample, TileSnapsho
     return dirty;
 }
 
-QRect StrokeEngine::moveTo(QImage &image, const StrokeSample &sample, TileSnapshot &before)
+QRect StrokeEngine::moveTo(StrokeSurface &image, const StrokeSample &sample, TileSnapshot &before)
 {
     QRect dirty;
     if (!m_started)
@@ -419,7 +418,7 @@ QRect StrokeEngine::moveTo(QImage &image, const StrokeSample &sample, TileSnapsh
     return dirty;
 }
 
-QRect StrokeEngine::advanceTime(QImage &image, double timeMs, TileSnapshot &before)
+QRect StrokeEngine::advanceTime(StrokeSurface &image, double timeMs, TileSnapshot &before)
 {
     QRect dirty;
     if (!m_started || !usesTime())
@@ -430,7 +429,7 @@ QRect StrokeEngine::advanceTime(QImage &image, double timeMs, TileSnapshot &befo
     return dirty;
 }
 
-QRect StrokeEngine::finish(QImage &image, TileSnapshot &before)
+QRect StrokeEngine::finish(StrokeSurface &image, TileSnapshot &before)
 {
     QRect dirty;
     if (!m_started)
@@ -463,7 +462,7 @@ QRect StrokeEngine::finish(QImage &image, TileSnapshot &before)
     return dirty;
 }
 
-QRect StrokeEngine::render(QImage &image, const BrushSettings &settings, const QColor &color,
+QRect StrokeEngine::render(StrokeSurface &image, const BrushSettings &settings, const QColor &color,
                            const std::vector<StrokeSample> &samples, quint64 seed, TileSnapshot *before)
 {
     if (samples.empty())
@@ -480,7 +479,7 @@ QRect StrokeEngine::render(QImage &image, const BrushSettings &settings, const Q
 
 // --- dabs ---
 
-void StrokeEngine::process(QImage &image, TileSnapshot &before, double nowMs, QRect &dirty)
+void StrokeEngine::process(StrokeSurface &image, TileSnapshot &before, double nowMs, QRect &dirty)
 {
     m_dabs.clear();
     for (StrokeSample &s : m_smoothed) {
@@ -766,7 +765,7 @@ QRgb StrokeEngine::dabColor(const SensorReadings &r, qint64 index) const
     return qRgb(c.red(), c.green(), c.blue());
 }
 
-QRect StrokeEngine::dabRect(const DabParams &dab, const QImage &image) const
+QRect StrokeEngine::dabRect(const DabParams &dab, const StrokeSurface &image) const
 {
     // A sampled tip is a square that may be rotated; a round tip never extends past its radius.
     double r = dab.diameter / 2.0 * (m_tip ? 1.4143 : 1.0) + 1.0;
@@ -775,7 +774,7 @@ QRect StrokeEngine::dabRect(const DabParams &dab, const QImage &image) const
     return QRectF(dab.center.x() - r, dab.center.y() - r, 2 * r, 2 * r).toAlignedRect() & image.rect();
 }
 
-void StrokeEngine::renderDab(QImage &image, const DabParams &dab, TileSnapshot &before, QRect &dirty)
+void StrokeEngine::renderDab(StrokeSurface &image, const DabParams &dab, TileSnapshot &before, QRect &dirty)
 {
     if (m_dabCount == 0)
         m_firstParams = dab;
@@ -787,7 +786,7 @@ void StrokeEngine::renderDab(QImage &image, const DabParams &dab, TileSnapshot &
         // Smudge: the first dab only loads the patch; after that each dab changes pixels. Wet
         // paint deposits from the first dab on.
         if (m_patchLoaded || m_settings.blend == BrushBlend::WetPaint)
-            before.capture(image, rect);
+            image.capture(before, rect);
         carry(image, dab, rect, before);
         dirty |= rect;
         return;
@@ -795,7 +794,7 @@ void StrokeEngine::renderDab(QImage &image, const DabParams &dab, TileSnapshot &
     if (dab.ceiling <= 0 || dab.flow <= 0)
         return;
     // Per dab, not the union: a long diagonal segment must not capture its whole bounding box.
-    before.capture(image, rect);
+    image.capture(before, rect);
     if (m_settings.stamp == BrushStamp::Spray)
         rasterizeSpray(dab, rect);
     else
@@ -1014,7 +1013,7 @@ void StrokeEngine::rasterizeSpray(const DabParams &dab, const QRect &rect)
     }
 }
 
-void StrokeEngine::compositeTouched(QImage &image, const TileSnapshot &before)
+void StrokeEngine::compositeTouched(StrokeSurface &image, const TileSnapshot &before)
 {
     // Each pixel is recomputed once per call, however many dabs covered it.
     for (const auto &[key, area] : m_touched)
@@ -1022,13 +1021,13 @@ void StrokeEngine::compositeTouched(QImage &image, const TileSnapshot &before)
     m_touched.clear();
 }
 
-void StrokeEngine::composite(QImage &image, const QRect &rect, const TileSnapshot &before)
+void StrokeEngine::composite(StrokeSurface &image, const QRect &rect, const TileSnapshot &before)
 {
     const int column = rect.left() / Tile, row = rect.top() / Tile;
-    const QImage *original = before.storedTile(column, row);
-    Q_ASSERT(original); // renderDab captured every tile it touches
-    if (!original)
+    Q_ASSERT(before.storedRow(rect.left(), rect.top())); // renderDab captured every tile it touches
+    if (!before.storedRow(rect.left(), rect.top()) || m_allocationFailed)
         return;
+    const int x0 = rect.left();
     const auto found = m_coverage.find(tileKey(column, row));
     if (found == m_coverage.end())
         return; // a spray dab may touch a tile without any particle landing in it
@@ -1052,8 +1051,12 @@ void StrokeEngine::composite(QImage &image, const QRect &rect, const TileSnapsho
                           && st.textureBrightness == 0.0;
     const QImage *grainImage = strokeTexture ? &m_texture->image : nullptr;
     for (int y = rect.top(); y <= rect.bottom(); ++y) {
-        QRgb *out = reinterpret_cast<QRgb *>(image.scanLine(y));
-        const QRgb *src = reinterpret_cast<const QRgb *>(original->constScanLine(y - oy));
+        QRgb *out = image.writableRow(x0, y); // indexed from x0
+        if (!out) {
+            m_allocationFailed = true;
+            return;
+        }
+        const QRgb *src = before.storedRow(x0, y);
         const quint16 *cov = tile.data() + (y - oy) * Tile;
         const uchar *grainRow = nullptr;
         int grainWidth = 0;
@@ -1065,10 +1068,10 @@ void StrokeEngine::composite(QImage &image, const QRect &rect, const TileSnapsho
         const quint32 *col = colors ? colors->data() + (y - oy) * Tile : nullptr;
         const uchar *clip = m_clip.isNull() ? nullptr : m_clip.constScanLine(y);
         for (int x = rect.left(); x <= rect.right(); ++x) {
-            const QRgb p = src[x - ox];
+            const QRgb p = src[x - x0];
             const quint32 coverage = cov[x - ox];
             if (coverage == 0) {
-                out[x] = p;
+                out[x - x0] = p;
                 continue;
             }
             double k; // 8-bit units
@@ -1095,12 +1098,12 @@ void StrokeEngine::composite(QImage &image, const QRect &rect, const TileSnapsho
             }
             const quint32 a = quint32(std::clamp(int(k + threshold(x, y)), 0, 255));
             if (a == 0) {
-                out[x] = p;
+                out[x - x0] = p;
                 continue;
             }
             const quint32 keep = 255 - a;
             if (erase) {
-                out[x] = qRgba(int(mul255(qRed(p), keep)), int(mul255(qGreen(p), keep)), int(mul255(qBlue(p), keep)),
+                out[x - x0] = qRgba(int(mul255(qRed(p), keep)), int(mul255(qGreen(p), keep)), int(mul255(qBlue(p), keep)),
                                int(mul255(qAlpha(p), keep)));
                 continue;
             }
@@ -1147,22 +1150,22 @@ void StrokeEngine::composite(QImage &image, const QRect &rect, const TileSnapsho
                 break;
             }
             alpha = std::min<quint32>(alpha, 255);
-            out[x] = qRgba(int(std::min(r, alpha)), int(std::min(g, alpha)), int(std::min(b, alpha)), int(alpha));
+            out[x - x0] = qRgba(int(std::min(r, alpha)), int(std::min(g, alpha)), int(std::min(b, alpha)), int(alpha));
         }
     }
 }
 
 // --- smudge and wet paint ---
 
-QRgb StrokeEngine::workPixel(const QImage &image, int x, int y) const
+QRgb StrokeEngine::workPixel(const StrokeSurface &image, int x, int y) const
 {
     const auto it = m_work.find(tileKey(x / Tile, y / Tile));
     if (it == m_work.end())
-        return reinterpret_cast<const QRgb *>(image.constScanLine(y))[x];
+        return image.pixel(x, y);
     return reinterpret_cast<const QRgb *>(it->second.constScanLine(y % Tile))[x % Tile];
 }
 
-void StrokeEngine::loadPatch(const QImage &image, const DabParams &dab)
+void StrokeEngine::loadPatch(const StrokeSurface &image, const DabParams &dab)
 {
     const int n = m_patchSize;
     if (m_settings.blend == BrushBlend::WetPaint) {
@@ -1176,7 +1179,7 @@ void StrokeEngine::loadPatch(const QImage &image, const DabParams &dab)
     }
     // Smudge: pick up what is under the first dab; beyond the layer edge, the nearest edge pixel.
     const int ox = int(std::floor(dab.center.x())) - n / 2, oy = int(std::floor(dab.center.y())) - n / 2;
-    const int w = image.width(), h = image.height();
+    const int w = image.rect().width(), h = image.rect().height();
     double sum[4] = {0, 0, 0, 0};
     for (int j = 0; j < n; ++j) {
         const int py = std::clamp(oy + j, 0, h - 1);
@@ -1199,7 +1202,7 @@ void StrokeEngine::loadPatch(const QImage &image, const DabParams &dab)
     }
 }
 
-void StrokeEngine::carry(QImage &image, const DabParams &dab, const QRect &rect, const TileSnapshot &before)
+void StrokeEngine::carry(StrokeSurface &image, const DabParams &dab, const QRect &rect, const TileSnapshot &before)
 {
     if (m_patch.empty()) {
         // Large enough for the biggest dab this stroke can make (every other size factor is ≤ 1).
@@ -1214,20 +1217,37 @@ void StrokeEngine::carry(QImage &image, const DabParams &dab, const QRect &rect,
             return;
     }
 
-    if (m_clip.isNull()) {
-        carryInto(image, QPoint(0, 0), dab, rect);
+    // The dab works on a copy of its area; without a selection the copy is written back as is.
+    // With a selection: the copy is unclipped (so the carried colour is not weakened dab after
+    // dab at soft edges), and  before + (work − before) × selection  is written once. The brush
+    // may pick up colour from outside the selection; it writes only inside.
+    QImage region(rect.size(), QImage::Format_ARGB32_Premultiplied);
+    if (region.isNull()) {
+        m_allocationFailed = true;
         return;
     }
-    // With a selection: work on an unclipped working copy (so the carried colour is not weakened
-    // dab after dab at soft edges), then write  before + (work − before) × selection  once.
-    // The brush may pick up colour from outside the selection; it writes only inside.
-    QImage region(rect.size(), QImage::Format_ARGB32_Premultiplied);
     for (int y = rect.top(); y <= rect.bottom(); ++y) {
         QRgb *line = reinterpret_cast<QRgb *>(region.scanLine(y - rect.top()));
         for (int x = rect.left(); x <= rect.right(); ++x)
             line[x - rect.left()] = workPixel(image, x, y);
     }
     carryInto(region, rect.topLeft(), dab, rect);
+    if (m_clip.isNull()) {
+        for (int y = rect.top(); y <= rect.bottom(); ++y) {
+            const QRgb *line = reinterpret_cast<const QRgb *>(region.constScanLine(y - rect.top()));
+            for (int x = rect.left(); x <= rect.right();) {
+                const int end = std::min(rect.right(), (x / Tile + 1) * Tile - 1);
+                QRgb *out = image.writableRow(x, y);
+                if (!out) {
+                    m_allocationFailed = true;
+                    return;
+                }
+                std::memcpy(out, line + (x - rect.left()), size_t(end - x + 1) * 4);
+                x = end + 1;
+            }
+        }
+        return;
+    }
     for (int row = rect.top() / Tile; row <= rect.bottom() / Tile; ++row) {
         for (int column = rect.left() / Tile; column <= rect.right() / Tile; ++column) {
             const QRect tileRect = QRect(column * Tile, row * Tile, Tile, Tile) & image.rect();
@@ -1235,30 +1255,35 @@ void StrokeEngine::carry(QImage &image, const DabParams &dab, const QRect &rect,
             if (inserted) {
                 it->second = QImage(Tile, Tile, QImage::Format_ARGB32_Premultiplied);
                 it->second.fill(Qt::transparent);
-                for (int y = tileRect.top(); y <= tileRect.bottom(); ++y)
-                    std::memcpy(it->second.scanLine(y - row * Tile),
-                                image.constScanLine(y) + tileRect.left() * 4, size_t(tileRect.width()) * 4);
+                for (int y = tileRect.top(); y <= tileRect.bottom(); ++y) {
+                    const QRgb *src = image.constRow(tileRect.left(), y);
+                    if (src)
+                        std::memcpy(it->second.scanLine(y - row * Tile), src, size_t(tileRect.width()) * 4);
+                }
             }
             const QRect part = rect & tileRect;
             for (int y = part.top(); y <= part.bottom(); ++y)
                 std::memcpy(it->second.scanLine(y - row * Tile) + (part.left() - column * Tile) * 4,
                             region.constScanLine(y - rect.top()) + (part.left() - rect.left()) * 4,
                             size_t(part.width()) * 4);
-            const QImage *original = before.storedTile(column, row);
-            if (!original)
+            if (!before.storedRow(part.left(), part.top()))
                 continue;
             for (int y = part.top(); y <= part.bottom(); ++y) {
-                QRgb *out = reinterpret_cast<QRgb *>(image.scanLine(y));
-                const QRgb *b = reinterpret_cast<const QRgb *>(original->constScanLine(y - row * Tile));
-                const QRgb *wk = reinterpret_cast<const QRgb *>(it->second.constScanLine(y - row * Tile));
+                QRgb *out = image.writableRow(part.left(), y); // indexed from part.left()
+                if (!out) {
+                    m_allocationFailed = true;
+                    return;
+                }
+                const QRgb *b = before.storedRow(part.left(), y);
+                const QRgb *wk = reinterpret_cast<const QRgb *>(it->second.constScanLine(y - row * Tile)) + (part.left() - column * Tile);
                 const uchar *clip = m_clip.constScanLine(y);
                 for (int x = part.left(); x <= part.right(); ++x) {
-                    const QRgb bp = b[x - column * Tile], wp = wk[x - column * Tile];
+                    const QRgb bp = b[x - part.left()], wp = wk[x - part.left()];
                     const int c = clip[x];
                     auto mix = [&](int from, int to) { return from + (to - from) * c / 255; };
                     const int a = std::clamp(mix(qAlpha(bp), qAlpha(wp)), 0, 255);
-                    out[x] = qRgba(std::min(a, mix(qRed(bp), qRed(wp))), std::min(a, mix(qGreen(bp), qGreen(wp))),
-                                   std::min(a, mix(qBlue(bp), qBlue(wp))), a);
+                    out[x - part.left()] = qRgba(std::min(a, mix(qRed(bp), qRed(wp))), std::min(a, mix(qGreen(bp), qGreen(wp))),
+                                                 std::min(a, mix(qBlue(bp), qBlue(wp))), a);
                 }
             }
         }

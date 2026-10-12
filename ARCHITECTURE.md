@@ -23,11 +23,16 @@ scene graph, pen/touch input and native file dialogs on all four. No blocker fou
 
 ```
 src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
-  DocumentData     plain values: LayerData {id, name, image, visible, opacity, locked},
-                   DocumentData {size, layers, activeLayerId}; compositeLayers(); shared limits
+  MemoryBudget     process-wide byte accounting by category (document, cache, composite,
+                   preview, temporary) against one limit; evictors for reconstructible memory
+  TiledImage       a sparse image of 64x64 copy-on-write tiles (missing tile = transparent);
+                   copies share tiles until written (milestone 10)
+  DocumentData     plain values: LayerData {id, name, image (TiledImage), visible, opacity,
+                   locked}, DocumentData {size, layers, activeLayerId}; compositeLayers()
+                   (dense and tiled); shared limits
   LayeredDocument  the open document: ordered layers (index 0 = bottom), active layer, id
                    allocation, cached composite of the visible layers
-  RasterDocument   raster operations on one image: stampDabs (test fixtures), clear
+  RasterDocument   raster operations on one image or tiled layer: stampDabs (test fixtures), clear
   BrushSettings    brush and preset data (plain values); PressureMapping; settings version 2
   BrushDynamics    sensors, response curves, ParameterDynamics, CompiledDynamics (milestone 9)
   BrushProperties  the property registry: every brush property's metadata and accessors; drives
@@ -42,15 +47,18 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
   StrokeEngine     the one brush renderer: input filters, smoothing, path sensors, taper,
                    spacing, airbrush timing, dynamics, dab parameters, stamps (tip, spray,
                    hatching), coverage with blend modes (paint, erase) or a carried patch (smudge,
-                   wet paint), texture, selection mask; undo tiles
+                   wet paint), texture, selection mask; undo tiles. Paints a StrokeSurface
+                   (StrokeSurface.h): a dense QImage or a tiled layer, 64-pixel row segments
   Selection        document-space selection coverage (none / active / empty), shapes, modes,
                    invert, magic wand, grow/shrink/feather, outline
   TransformSession move/scale/rotate/flip of one or several layers' (selected) pixels with one
                    geometry: cached sources and bases, previews, handles, the selection after Apply
-  TileSnapshot     copies of the 64x64 tiles an edit touched; swap = undo/redo
+  TileSnapshot     the 64x64 tiles an edit touched, as they were: copies (dense images) or
+                   shared tile references (tiled layers); swap = undo/redo
   UndoHistory      UndoCommand (pixels / layer presence / properties / move) + linear history
                    under one byte budget; state ids for "unsaved"
-  ProjectFile      .drawapp v2 (layered) encode/decode/verify, v1 reader, local safe writes
+  ProjectFile      .drawapp v3 (layered, sparse tiles) encode/decode/verify, v1 and v2 readers,
+                   local safe writes
   SafeSave         writing projects and exports: local files atomically, provider documents
                    with a local copy, probing, space reservation and read-back
   DocumentProvider destination access for content:// documents (Android: ContentResolver via
@@ -70,10 +78,10 @@ src/app/    (static QML module "drawapp_ui", URI DrawApp, used by the app and ts
   BrushPanel.qml   preset list, scratchpad, basic and advanced brush settings
   BrushStudioPage.qml, CurveEditor.qml   the Brush Studio (loaded when first opened)
   main.cpp         application setup (in the drawapp executable)
-tests/             tst_core, tst_brush, tst_brushengine, tst_selection, tst_document, tst_recovery
+tests/             tst_core, tst_brush, tst_brushengine, tst_tiles, tst_selection, tst_document, tst_recovery
                    (headless); tst_canvas, tst_ui (window, offscreen under ctest); FakeProvider.h;
                    golden/ (reference strokes and preset files); bench_core, bench_canvas,
-                   bench_m9; brush_sheet (renders the brush test sheet)
+                   bench_m9, bench_tiles; brush_sheet (renders the brush test sheet)
 ```
 
 ## Layers
@@ -82,9 +90,17 @@ tests/             tst_core, tst_brush, tst_brushengine, tst_selection, tst_docu
   full-canvas premultiplied ARGB32 image, visibility, opacity (0–1) and a lock. The document has
   an ordered layer list and an active layer. All layers have the canvas size; canvas sizes are
   unchanged from earlier milestones (new documents 2048 × 1536).
-- **Compositing**: Normal (source-over) only. `compositeLayers` clears a rect and draws each
-  visible layer bottom to top with `QPainter::setOpacity`. `LayeredDocument` keeps a composite
-  cache (one more canvas-sized image). Brush/eraser events refresh only the dabs' rect;
+- **Storage** (milestone 10): each layer is a `TiledImage` of the canvas size made of 64 x 64
+  tiles; a tile that was never painted (or was erased to transparent and pruned) does not exist
+  and reads as transparent. A copy of a layer (recovery snapshot, transform preview, undo
+  record) shares its tiles; whoever writes to a shared tile copies that tile first. Every tile
+  is allocated through `MemoryBudget`; an operation that cannot get a tile fails cleanly (see
+  `docs/m10-tile-storage.md`).
+- **Compositing**: Normal (source-over) only. `compositeLayers` works tile by tile on the
+  composite: for each tile, the visible layers' tiles are drawn bottom to top with
+  `QPainter::setOpacity` (as before, so pixels are unchanged); where no visible layer has a tile
+  the composite tile is released. `LayeredDocument` keeps the composite as a tiled image too.
+  Brush/eraser events refresh only the dabs' rect;
   visibility, opacity, order, add/delete/duplicate refresh the whole canvas. The view draws the
   cache exactly as before (renderer unchanged), so the checkerboard appears behind the whole
   stack, and erasing an upper layer shows the layers below.
@@ -94,8 +110,9 @@ tests/             tst_core, tst_brush, tst_brushengine, tst_selection, tst_docu
   hiding, reordering and deleting a locked layer are allowed.
 - **Panel** (Main.qml): list (top layer first) with visibility check box, name, opacity and lock;
   Add (above the active layer), Duplicate, Delete, Up, Down, Rename (also double-click), and an
-  opacity slider for the active layer. At least one layer is always kept. Layer count is limited
-  to `min(64, 512 MiB / layer size)` (42 at 2048 × 1536), the same limit the file reader enforces.
+  opacity slider for the active layer. At least one layer is always kept. At most 64 layers at
+  any canvas size (up to 16384 x 16384): since milestone 10 memory depends on what is painted and
+  is checked when tiles are allocated, not estimated from the canvas size.
 - **Active layer rules**: selecting a layer is not an edit (no history entry, not "modified").
   New and duplicated layers become active. Deleting the active layer selects the layer below
   (or, for the bottom layer, the new bottom). Undo/redo that re-inserts a layer selects it; other
@@ -467,27 +484,36 @@ so it reads on light and dark artwork at any zoom. It is not animated.
 - **Unit of undo**: one stroke however it ends; one panel action; one opacity-slider drag (the
   slider previews live without history, the release records one command from the drag's start
   value; a drag that ends at its start value records nothing).
-- **Budget**: 128 MiB for undo and redo together, counting tile copies and the images of removed
-  layers held by history (a deleted layer counts 12 MiB at 2048 × 1536; undoing Add or Duplicate
-  moves that layer's image into the redo entry, which is counted too). The count is recomputed
-  after every push, undo and redo; when over budget the oldest undo entries go first, then the
-  farthest redo entries. A duplicated layer shares pixels with its source until either is edited,
-  but history counts it in full (conservative).
+- **Budget**: 128 MiB for undo and redo together, counting the tiles history keeps alive and the
+  painted tiles of removed layers (undoing Add or Duplicate moves that layer into the redo entry,
+  which is counted too). Since milestone 10 an undo record refers to the old tiles instead of
+  copying them: a stroke over unpainted tiles records "was transparent" and costs nothing, and a
+  tile the layer still shares is not counted. The count is recomputed after every push, undo and
+  redo; when over budget the oldest undo entries go first, then the farthest redo entries. A
+  duplicated layer shares tiles with its source until either is edited, but history counts its
+  tiles in full (conservative).
 - **Not in history**: active-layer selection, zoom, pan, window size, tool/size/color.
 - **Unsaved state**: `stateId()` compared with the id recorded at save/open/new, as before.
 
 ## Project files (.drawapp)
 
 Defined in `src/core/ProjectFile.h`.
-- **Version 2** (written): 68-byte header (magic, version, width, height, layer count, metadata
-  length, payload size, SHA-256 of the payload), then JSON metadata (active layer id; per layer:
-  id, name, visibility, opacity, lock, compressed size) and one zlib block per layer (8-bit RGBA
-  premultiplied, exact). Layers are never flattened when saving.
-- **Version 1** (milestone 1, read only): opens as a one-layer document; saving writes version 2.
-- **Validation before allocation**: dimensions (≤ 16384 per side, ≤ 64 Mpx per layer), layer
-  count (1–64) and total layer pixels (≤ 512 MiB) are checked from the header; then exact length,
-  checksum, metadata (unique non-zero ids, names ≤ 256 characters, opacity 0–1, block sizes that
-  add up), each block's declared raw size before decompressing, and premultiplied validity.
+- **Version 3** (written since milestone 10): the version 2 header and metadata plus the tile
+  size (64) and each layer's tile count; each layer block lists only its painted tiles
+  (column, row, zlib block of the tile's pixels, BGRA premultiplied, exact), in row-major order.
+  Layers are never flattened when saving. Byte layout in `ProjectFile.h`; compatibility in
+  `docs/m10-file-compatibility.md`.
+- **Version 2** (milestones 3–9, read): one zlib block per dense layer (8-bit RGBA premultiplied);
+  opens into tiled layers, fully transparent tiles not allocated. Saving writes version 3.
+- **Version 1** (milestone 1, read only): opens as a one-layer document; saving writes version 3.
+- **Validation before allocation**: dimensions (≤ 16384 per side, ≤ 256 Mpx per layer) and layer
+  count (1–64) from the header, plus, for the dense versions 1 and 2, total layer pixels
+  (≤ 512 MiB); then exact length, checksum, metadata (unique non-zero ids, names ≤ 256
+  characters, opacity 0–1, block sizes that add up, tile size a power of two from 16 to 1024),
+  every tile's position (inside the canvas, increasing order, no repeats) and declared raw size
+  before decompressing, and premultiplied validity. Version 3 tiles are allocated against
+  `MemoryBudget`; a project that does not fit is refused with a message and nothing is kept.
+  The file itself is read whole, so its size is reserved against the budget before reading.
   An unknown active layer id falls back to the top layer.
 - **Saving**: see "Save guarantees" below. **Opening** decodes into a separate `DocumentData`;
   only a fully valid document replaces the open one.
@@ -495,8 +521,8 @@ Defined in `src/core/ProjectFile.h`.
 ## Save guarantees: local files vs Android document providers (milestone 5)
 
 Every save first encodes the project in memory and checks the bytes with
-`ProjectFile::verify`: structure, SHA-256, and every layer block decompressed to the right
-size, one layer at a time. Bytes that fail the check are never written. Then:
+`ProjectFile::verify`: structure, SHA-256, and every tile decompressed to the right size and
+checked, one at a time. Bytes that fail the check are never written. Then:
 
 | | Local file (desktop path) | Android storage-provider document (`content://`) |
 |---|---|---|
@@ -562,12 +588,14 @@ blocked the UI thread for 79–350 ms). It does not change the project path or t
 
 As in milestone 2 (per-session `QLockFile`, orphan discovery, one worker thread, generation-gated
 atomic commits, cleanup on save/new/open/discard), with these changes:
-- **Snapshot**: `LayeredDocument::snapshot()` copies the layer list as plain values. Layer images
-  are `QImage`s shared copy-on-write: the copy takes under 0.01 ms whatever the layer count, and
-  any later write on the UI thread (dab, undo swap, clear) detaches that one layer first (about
-  2.3–3.2 ms for a 2048 × 1536 layer, once per snapshot and edited layer). The worker therefore
-  reads pixels that can no longer change and never touches the live document.
-- **Format v2** embeds a version 2 project, so the whole layer structure is recovered. Version 1
+- **Snapshot**: `LayeredDocument::snapshot()` copies the layer list as plain values. Since
+  milestone 10 layers share tiles copy-on-write, so a later write on the UI thread copies only
+  the tiles it touches (one 16 KiB tile each, once per snapshot), not the whole layer as the
+  milestone 9 `QImage` layers did. The worker therefore reads pixels that can no longer change
+  and never touches the live document.
+- **Format v2** embeds a layered project (version 3 since milestone 10; version 2 recovery files
+  from earlier milestones embed version 2 projects and are still read), so the whole layer
+  structure is recovered. Version 1
   recovery files (single image) are still read and offered as one-layer documents, and the
   Restore prompt says so.
 - Opacity drags in progress count as unsaved changes for recovery.
@@ -622,6 +650,9 @@ physical device. iOS is unverified.
 
 ## Limitations (known)
 
+Timings below were measured on the milestone 9 (dense) storage; milestone 10 re-measures them
+on tiled storage (`docs/m10-performance.md`) and this list is updated with those numbers.
+
 - **Crash recovery has a loss window** (interval + write time; it grows with layer count because
   the worker re-encodes every layer: about 0.37 s per write at 5 layers and 0.8 s at 10, measured).
   Only process kills were tested; OS crash or power loss may lose unflushed data.
@@ -650,10 +681,16 @@ physical device. iOS is unverified.
   next frame is lost; the stroke ends at the last move that arrived.
 - A full composite rebuild (visibility, opacity, order) takes about 5.6 ms at 5 layers and 12 ms
   at 10; an opacity drag recomposites on every slider move.
-- Memory: 12 MiB per layer plus the 12 MiB composite, plus up to 128 MiB of history.
+- Memory: 16 KiB per painted 64 x 64 tile in each layer and in the composite (a fully painted
+  2048 x 1536 layer is still 12 MiB), plus up to 128 MiB of history, all within the
+  `MemoryBudget` limit. The selection mask is still one dense byte per canvas pixel (256 MiB at
+  16384 x 16384).
+- The view still assembles the visible part of the composite into one dense image per repaint;
+  zoomed far out on a very large canvas that image can be refused by the memory budget (the view
+  then shows the checkerboard). A reduced-resolution view pyramid is milestone 10 stage 6.
 - Normal blending only; no groups, clipping, masks, vector layers or other blend modes.
 - Layer drag-and-drop reordering is not implemented (Up/Down buttons only).
-- Not a final painting engine: no tiled storage, no GPU brush; input-to-display latency unmeasured.
+- Not a final painting engine: no GPU brush; input-to-display latency unmeasured.
 - High-DPI checked only at 200 % scaling. Pen buttons and palm rejection untested on hardware.
 
 ## Future requirements (noted, not built)

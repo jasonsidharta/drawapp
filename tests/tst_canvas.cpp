@@ -100,22 +100,28 @@ private:
     QString save() { return waitFor([&] { return m_canvas->saveFile(); }, true); }
     QString open(const QUrl &url) { return waitFor([&] { return m_canvas->openFile(url); }, false); }
     // What the layers composite to (with one opaque layer, exactly that layer's pixels).
-    const QImage &doc() const { return m_canvas->document().composite(); }
-    QImage layerImage(int index) const { return m_canvas->document().layer(index).image; }
+    // A dense copy: tests compare it with QImage expectations (pixel reads go to tiledDoc()).
+    QImage doc() const { return tiledDoc().toImage(); }
+    const TiledImage &tiledDoc() const { return m_canvas->document().composite(); }
+    QImage layerImage(int index) const { return m_canvas->document().layer(index).image.toImage(); }
     int layerIndex(int id) const { return m_canvas->document().indexOf(quint64(id)); }
     QPointF toView(const QPointF &docPt) const { return m_canvas->viewTransform().docToView(docPt); }
     QPointF toDoc(const QPointF &viewPt) const { return m_canvas->viewTransform().viewToDoc(viewPt); }
-    int alphaAt(const QPointF &docPt) const { return qAlpha(doc().pixel(docPt.toPoint())); }
+    int alphaAt(const QPointF &docPt) const
+    {
+        const QPoint p = docPt.toPoint();
+        return qAlpha(tiledDoc().pixel(p.x(), p.y()));
+    }
 
     // Opaque run length through docPt along the y axis.
     int verticalExtent(const QPointF &docPt) const
     {
         const int x = int(docPt.x());
-        if (qAlpha(doc().pixel(x, int(docPt.y()))) <= 127)
+        if (qAlpha(tiledDoc().pixel(x, int(docPt.y()))) <= 127)
             return 0;
         int top = int(docPt.y()), bottom = int(docPt.y());
-        while (top > 0 && qAlpha(doc().pixel(x, top - 1)) > 127) --top;
-        while (bottom < doc().height() - 1 && qAlpha(doc().pixel(x, bottom + 1)) > 127) ++bottom;
+        while (top > 0 && qAlpha(tiledDoc().pixel(x, top - 1)) > 127) --top;
+        while (bottom < tiledDoc().height() - 1 && qAlpha(tiledDoc().pixel(x, bottom + 1)) > 127) ++bottom;
         return bottom - top + 1;
     }
 
@@ -221,10 +227,10 @@ private slots:
         mouseStroke({{100, 300}, {300, 300}});
 
         const QPointF first = toDoc(QPointF(200, 100)), second = toDoc(QPointF(200, 300));
-        QCOMPARE(doc().pixel(first.toPoint()), qRgb(20, 20, 20));
-        QCOMPARE(doc().pixel(second.toPoint()), qRgb(220, 0, 0));
-        QCOMPARE(doc().pixel((second + QPointF(0, 15)).toPoint()), qRgb(220, 0, 0));
-        QCOMPARE(qAlpha(doc().pixel((first + QPointF(0, 15)).toPoint())), 0);
+        QCOMPARE(tiledDoc().pixel(first.toPoint()), qRgb(20, 20, 20));
+        QCOMPARE(tiledDoc().pixel(second.toPoint()), qRgb(220, 0, 0));
+        QCOMPARE(tiledDoc().pixel((second + QPointF(0, 15)).toPoint()), qRgb(220, 0, 0));
+        QCOMPARE(qAlpha(tiledDoc().pixel((first + QPointF(0, 15)).toPoint())), 0);
         const int wide = verticalExtent(second);
         QVERIFY2(wide >= 39 && wide <= 42, qPrintable(QString::number(wide)));
     }
@@ -273,7 +279,7 @@ private slots:
         // Drawing after zoom + pan lands where the user sees the cursor.
         m_canvas->setBrushColor(QColor(0, 0, 230));
         mouseStroke({{200, 450}, {260, 450}});
-        QCOMPARE(doc().pixel(toDoc(QPointF(230, 450)).toPoint()), qRgb(0, 0, 230));
+        QCOMPARE(tiledDoc().pixel(toDoc(QPointF(230, 450)).toPoint()), qRgb(0, 0, 230));
         const QImage shot = screenshot("zoom_pan");
         QCOMPARE(shot.pixel(QPoint(230, 450) * shot.devicePixelRatio()), qRgb(0, 0, 230));
     }
@@ -819,12 +825,12 @@ private slots:
         mouseStroke({{300, 150}, {300, 450}}); // crosses the top layer's stroke, on the bottom layer
         QCOMPARE(layerImage(layerIndex(bottom)).pixel(p.toPoint()), qRgb(0, 160, 0));
         QCOMPARE(layerImage(layerIndex(top)).pixel(p.toPoint()), qRgb(20, 20, 20)); // untouched
-        QCOMPARE(doc().pixel(p.toPoint()), qRgb(20, 20, 20)); // top layer still covers it
+        QCOMPARE(tiledDoc().pixel(p.toPoint()), qRgb(20, 20, 20)); // top layer still covers it
 
         m_canvas->setActiveLayer(top);
         m_canvas->setTool(CanvasItem::Eraser);
         mouseStroke({{300, 280}, {300, 320}});
-        QCOMPARE(doc().pixel(p.toPoint()), qRgb(0, 160, 0)); // erasing the top layer reveals the bottom
+        QCOMPARE(tiledDoc().pixel(p.toPoint()), qRgb(0, 160, 0)); // erasing the top layer reveals the bottom
         QCOMPARE(layerImage(layerIndex(bottom)).pixel(p.toPoint()), qRgb(0, 160, 0));
         screenshot("layers_erase_reveals");
     }
@@ -956,10 +962,19 @@ private slots:
 
     void deletedLayerIsCountedInHistory()
     {
+        // The history keeps the deleted layer's painted tiles (a blank layer costs nothing).
         m_canvas->addLayer();
+        const int id = m_canvas->activeLayerId();
+        const qsizetype blank = m_canvas->history().bytesUsed();
+        m_canvas->deleteLayer(id);
+        QCOMPARE(m_canvas->history().bytesUsed(), blank);
+        m_canvas->undo();
+        QVERIFY(m_canvas->drawStroke(docCurve({100, 100}, {300, 120}, 0)));
+        const qsizetype tiles = m_canvas->document().layer(layerIndex(id)).image.allocatedBytes();
+        QVERIFY(tiles > 0);
         const qsizetype before = m_canvas->history().bytesUsed();
-        m_canvas->deleteLayer(m_canvas->activeLayerId());
-        QCOMPARE(m_canvas->history().bytesUsed() - before, qsizetype(2048) * 1536 * 4);
+        m_canvas->deleteLayer(id);
+        QCOMPARE(m_canvas->history().bytesUsed() - before, tiles);
     }
 
     void layeredSaveAndOpenPreserveStructure()
@@ -1014,7 +1029,7 @@ private slots:
         QCOMPARE(doc(), old.image());
         // Saving writes the layered format, which opens to the same pixels.
         QCOMPARE(save(), QString());
-        QCOMPARE(ProjectFile::load(path).version, 2);
+        QCOMPARE(ProjectFile::load(path).version, int(ProjectFile::CurrentVersion));
         QCOMPARE(ProjectFile::load(path).document.composite(), old.image());
     }
 
@@ -1324,16 +1339,16 @@ private slots:
         m_canvas->setBrushOpacity(0.25);
         m_canvas->setBrushSize(20);
         mouseStroke({{400, 200}, {400, 400}});
-        const QRgb over = doc().pixel(toDoc(QPointF(400, 300)).toPoint());
+        const QRgb over = tiledDoc().pixel(toDoc(QPointF(400, 300)).toPoint());
         QCOMPARE(qAlpha(over), 255);
         QVERIFY2(qRed(over) >= 190 && qRed(over) <= 192 && qBlue(over) >= 240, qPrintable(QString::number(over, 16)));
-        QCOMPARE(qAlpha(doc().pixel(toDoc(QPointF(400, 220)).toPoint())), 64); // on transparency: 25 %
+        QCOMPARE(qAlpha(tiledDoc().pixel(toDoc(QPointF(400, 220)).toPoint())), 64); // on transparency: 25 %
 
         // A translucent eraser takes away a share, the same everywhere in the stroke.
         m_canvas->setTool(CanvasItem::Eraser);
         m_canvas->setBrushOpacity(0.5);
         mouseStroke({{200, 280}, {300, 300}, {200, 320}});
-        QCOMPARE(qAlpha(doc().pixel(toDoc(QPointF(250, 300)).toPoint())), 127);
+        QCOMPARE(qAlpha(tiledDoc().pixel(toDoc(QPointF(250, 300)).toPoint())), 127);
     }
 
     void brushSettingsAreCapturedAtStrokeStart()
@@ -1876,7 +1891,7 @@ private slots:
         mouseStroke({{250, 300}, {300, 302}, {350, 300}, {400, 298}, {450, 300}});
         QCOMPARE(m_canvas->history().undoCount(), steps + 1);
         QCOMPARE(m_canvas->undoText(), QStringLiteral("Smudge stroke"));
-        const QRgb mixed = doc().pixel(toDoc(QPointF(380, 300)).toPoint());
+        const QRgb mixed = tiledDoc().pixel(toDoc(QPointF(380, 300)).toPoint());
         QVERIFY2(qRed(mixed) > 0 || qGreen(mixed) > 120, qPrintable(QString::number(mixed, 16))); // dark paint pushed into blue
         QVERIFY(doc() != before);
         m_canvas->undo();
@@ -2043,9 +2058,9 @@ private slots:
             QVERIFY(m_canvas->drawStroke(docCurve({200, y}, {1900, y + 120})));
             y += 30;
             QVERIFY2(doc() != before, qPrintable(p.id));
-            for (int y = 0; y < doc().height(); y += 7)
-                for (int x = 1024; x < doc().width(); x += 7)
-                    QVERIFY2(doc().pixel(x, y) == before.pixel(x, y), qPrintable(p.id));
+            for (int y = 0; y < tiledDoc().height(); y += 7)
+                for (int x = 1024; x < tiledDoc().width(); x += 7)
+                    QVERIFY2(tiledDoc().pixel(x, y) == before.pixel(x, y), qPrintable(p.id));
         }
         m_canvas->deselect();
         QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.solid-round")));
@@ -2180,9 +2195,9 @@ private slots:
             mouseStroke({{300, 240}, {700, 360}, {300, 330}});
         }
         const int edgeX = int(toDoc(QPointF(450, 0)).x());
-        for (int y = 0; y < doc().height(); y += 5)
-            for (int x = edgeX; x < doc().width(); x += 5)
-                QVERIFY2(doc().pixel(x, y) == before.pixel(x, y), qPrintable(QString("%1,%2").arg(x).arg(y)));
+        for (int y = 0; y < tiledDoc().height(); y += 5)
+            for (int x = edgeX; x < tiledDoc().width(); x += 5)
+                QVERIFY2(tiledDoc().pixel(x, y) == before.pixel(x, y), qPrintable(QString("%1,%2").arg(x).arg(y)));
         QVERIFY(doc() != before);
     }
 
@@ -2310,7 +2325,7 @@ private slots:
         m_canvas->newDocument();
         QVERIFY(!m_canvas->isTransforming());
         QVERIFY(!m_canvas->hasSelection());
-        QCOMPARE(qAlpha(doc().pixel(300, 300)), 0);
+        QCOMPARE(qAlpha(tiledDoc().pixel(300, 300)), 0);
     }
 
     // --- advanced selection tools ---
@@ -2393,9 +2408,9 @@ private slots:
         m_canvas->setBrushSize(60);
         mouseStroke({{200, 320}, {520, 320}, {200, 330}});
         int changedOutside = 0, changedInside = 0;
-        for (int y = 0; y < doc().height(); y += 3)
-            for (int x = 0; x < doc().width(); x += 3) {
-                if (doc().pixel(x, y) == before.pixel(x, y))
+        for (int y = 0; y < tiledDoc().height(); y += 3)
+            for (int x = 0; x < tiledDoc().width(); x += 3) {
+                if (tiledDoc().pixel(x, y) == before.pixel(x, y))
                     continue;
                 if (soft.coverageAt(x, y) == 0)
                     ++changedOutside;
@@ -2480,12 +2495,12 @@ private slots:
         m_canvas->setTransformValue("rotation", 20);
         QCOMPARE(layerImage(layerIndex(colour)), colour0); // preview only
         QCOMPARE(layerImage(layerIndex(ink)), ink0);
-        const QImage preview = m_canvas->displayedComposite().copy();
+        const QImage preview = m_canvas->displayedComposite().toImage();
         m_canvas->applyTransform();
         // The merged preview matches the exact per-layer result except at a few overlapping
         // anti-aliased edge pixels.
         int differ = 0, worst = 0;
-        const QImage applied = m_canvas->displayedComposite();
+        const QImage applied = m_canvas->displayedComposite().toImage();
         for (int y = 0; y < applied.height(); y += 2)
             for (int x = 0; x < applied.width(); x += 2) {
                 const QRgb a = applied.pixel(x, y), b = preview.pixel(x, y);

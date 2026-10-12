@@ -62,7 +62,7 @@ quint64 addLayer(LayeredDocument &doc, UndoHistory &history, const QString &name
     LayerData layer;
     layer.id = doc.allocateId();
     layer.name = name;
-    layer.image = RasterDocument::blank(doc.size());
+    layer.image = TiledImage(doc.size());
     const int index = doc.activeIndex() + 1;
     const quint64 id = layer.id;
     doc.insertLayer(index, layer);
@@ -87,11 +87,11 @@ void moveLayer(LayeredDocument &doc, UndoHistory &history, quint64 id, int to)
     history.push(UndoCommand::moved(id, from, QStringLiteral("Move layer")));
 }
 
-QImage solid(QSize size, QColor color)
+TiledImage solid(QSize size, QColor color)
 {
     QImage image(size, QImage::Format_ARGB32_Premultiplied);
     image.fill(color);
-    return image;
+    return TiledImage::fromImage(image);
 }
 
 // Random image with valid premultiplied pixels, including transparent and partly transparent ones.
@@ -124,7 +124,7 @@ DocumentData threeLayerDocument(QSize size)
         LayerData layer;
         layer.id = quint64(10 + i * 7); // non-contiguous ids must survive
         layer.name = QString::fromUtf8(names[i]);
-        layer.image = randomPremultiplied(size.width(), size.height(), quint32(i + 1));
+        layer.image = TiledImage::fromImage(randomPremultiplied(size.width(), size.height(), quint32(i + 1)));
         layer.visible = i != 1;
         layer.opacity = i == 2 ? 0.37 : 1.0;
         layer.locked = i == 0;
@@ -151,8 +151,9 @@ QByteArray makeV1(quint32 version, quint32 w, quint32 h, quint32 format, quint32
     return out;
 }
 
-// Version 2 file from a header, metadata JSON and layer blocks (checksum recomputed).
-QByteArray makeV2(quint32 w, quint32 h, quint32 count, const QJsonObject &meta, const QList<QByteArray> &blocks)
+// Version 2 (or 3) file from a header, metadata JSON and layer blocks (checksum recomputed).
+QByteArray makeV2(quint32 w, quint32 h, quint32 count, const QJsonObject &meta, const QList<QByteArray> &blocks,
+                  quint32 version = 2)
 {
     QByteArray payload = QJsonDocument(meta).toJson(QJsonDocument::Compact);
     const quint32 metaSize = quint32(payload.size());
@@ -162,7 +163,7 @@ QByteArray makeV2(quint32 w, quint32 h, quint32 count, const QJsonObject &meta, 
     QDataStream s(&out, QIODevice::WriteOnly);
     s.setByteOrder(QDataStream::LittleEndian);
     s.writeRawData("DRAWAPP\n", 8);
-    s << quint32(2) << w << h << count << metaSize << quint64(payload.size());
+    s << version << w << h << count << metaSize << quint64(payload.size());
     const QByteArray digest = QCryptographicHash::hash(payload, QCryptographicHash::Sha256);
     s.writeRawData(digest.constData(), 32);
     out.append(payload);
@@ -184,6 +185,44 @@ QJsonObject layerMeta(const QString &id, qint64 blockSize, double opacity = 1.0)
 QByteArray block(int w, int h)
 {
     return qCompress(QByteArray(w * h * 4, '\0'));
+}
+
+// Version 3: one tile entry (column, row, data) and a layer's tile stream.
+struct TileEntry
+{
+    quint32 column, row;
+    QByteArray data;
+};
+
+QByteArray tileStream(const QList<TileEntry> &tiles, qint64 declaredCount = -1)
+{
+    QByteArray out(4, '\0');
+    qToLittleEndian(quint32(declaredCount < 0 ? tiles.size() : declaredCount), out.data());
+    for (const TileEntry &t : tiles) {
+        char entry[12];
+        qToLittleEndian(t.column, entry);
+        qToLittleEndian(t.row, entry + 4);
+        qToLittleEndian(quint32(t.data.size()), entry + 8);
+        out.append(entry, 12);
+        out.append(t.data);
+    }
+    return out;
+}
+
+QJsonObject tiledLayerMeta(const QString &id, qint64 blockSize, int tiles)
+{
+    QJsonObject o = layerMeta(id, blockSize);
+    o["tiles"] = tiles;
+    return o;
+}
+
+// An opaque grey tile of w x h pixels (B, G, R, A bytes).
+QByteArray greyTile(int w, int h)
+{
+    QByteArray raw;
+    for (int i = 0; i < w * h; ++i)
+        raw.append(QByteArray::fromHex("808080ff"));
+    return qCompress(raw);
 }
 
 QByteArray readAll(const QString &path)
@@ -208,7 +247,10 @@ private slots:
         QCOMPARE(doc.layer(0).name, QStringLiteral("Layer 1"));
         QCOMPARE(doc.activeLayerId(), doc.layer(0).id);
         QCOMPARE(qAlpha(doc.composite().pixel(100, 100)), 0);
-        QCOMPARE(LayeredDocument::maxLayersFor(doc.size()), 42); // 512 MiB / 12 MiB per layer
+        // Layers are sparse (milestone 10): the count is fixed; memory is checked when pixels are made.
+        QCOMPARE(LayeredDocument::maxLayersFor(doc.size()), DocumentLimits::MaxLayers);
+        QCOMPARE(LayeredDocument::maxLayersFor(QSize(16384, 16384)), DocumentLimits::MaxLayers);
+        QCOMPARE(doc.layer(0).image.allocatedTileCount(), 0); // a blank layer holds no pixels
     }
 
     void compositeOrderOpacityAndVisibility()
@@ -312,10 +354,10 @@ private slots:
     {
         LayeredDocument doc(QSize(300, 200));
         UndoHistory history;
-        const QImage empty = doc.composite().copy();
+        const QImage empty = doc.composite().toImage();
         const quint64 id = doc.layer(0).id;
         QVERIFY(paintStep(doc, history, id, QPointF(50, 50), 20, Qt::red));
-        const QImage painted = doc.composite().copy();
+        const QImage painted = doc.composite().toImage();
         undo(doc, history);
         QCOMPARE(doc.composite(), empty);
         QVERIFY(history.canRedo());
@@ -329,7 +371,7 @@ private slots:
         UndoHistory history;
         const quint64 id = doc.layer(0).id;
         paintStep(doc, history, id, QPointF(100, 100), 80, Qt::blue);
-        const QImage painted = doc.composite().copy();
+        const QImage painted = doc.composite().toImage();
         paintStep(doc, history, id, QPointF(100, 100), 30, Qt::black, BrushMode::Erase);
         QCOMPARE(qAlpha(doc.composite().pixel(100, 100)), 0);
         undo(doc, history);
@@ -350,7 +392,7 @@ private slots:
         UndoHistory history;
         const quint64 id = doc.layer(0).id;
         paintStep(doc, history, id, QPointF(30, 30), 20, Qt::red);
-        const QImage afterFirst = doc.composite().copy();
+        const QImage afterFirst = doc.composite().toImage();
         paintStep(doc, history, id, QPointF(150, 150), 20, Qt::red);
         undo(doc, history);
         paintStep(doc, history, id, QPointF(150, 30), 20, Qt::blue);
@@ -393,7 +435,7 @@ private slots:
         const quint64 a = doc.layer(0).id;
         const quint64 b = addLayer(doc, history, "b");
         paintStep(doc, history, b, QPointF(100, 100), 60, Qt::green);
-        const QImage before = doc.composite().copy();
+        const QImage before = doc.composite().toImage();
         deleteLayer(doc, history, b);
         QCOMPARE(doc.count(), 1);
         QCOMPARE(qAlpha(doc.composite().pixel(100, 100)), 0);
@@ -455,9 +497,31 @@ private slots:
         QVERIFY(before.isEmpty());
     }
 
+    void paintingOnBlankTilesCostsNoUndoMemory()
+    {
+        // The undo record of a stroke over unallocated tiles holds "was transparent" for them:
+        // no pixels. It still undoes and redoes exactly.
+        LayeredDocument doc(QSize(640, 64));
+        UndoHistory history(64 * TileBytes);
+        const quint64 id = doc.layer(0).id;
+        for (int i = 0; i < 5; ++i)
+            QVERIFY(paintStep(doc, history, id, QPointF(32 + 128 * i, 32), 10, Qt::red));
+        QCOMPARE(history.undoCount(), 5);
+        QCOMPARE(history.bytesUsed(), 0);
+        QCOMPARE(doc.layer(0).image.allocatedTileCount(), 5);
+        for (int i = 0; i < 5; ++i)
+            undo(doc, history);
+        QCOMPARE(doc.layer(0).image.allocatedTileCount(), 0);
+        QCOMPARE(history.bytesUsed(), 5 * TileBytes); // the redo entries hold the painted tiles
+        redo(doc, history);
+        QCOMPARE(qAlpha(doc.composite().pixel(32, 32)), 255);
+    }
+
     void budgetEvictsOldestUndoEntries()
     {
         LayeredDocument doc(QSize(640, 64));
+        doc.pixels(0).fillRect(doc.pixels(0).rect(), 0xffffffff); // white paper (not history)
+        doc.refreshComposite();
         UndoHistory history(3 * TileBytes);
         const quint64 id = doc.layer(0).id;
         for (int i = 0; i < 5; ++i)
@@ -467,13 +531,15 @@ private slots:
         for (int i = 0; i < 3; ++i)
             undo(doc, history);
         QVERIFY(!history.canUndo());
-        QCOMPARE(qAlpha(doc.composite().pixel(32, 32)), 255); // evicted edits stay
-        QCOMPARE(qAlpha(doc.composite().pixel(544, 32)), 0);
+        QCOMPARE(doc.composite().pixel(32, 32), qRgb(255, 0, 0)); // evicted edits stay
+        QCOMPARE(doc.composite().pixel(544, 32), qRgb(255, 255, 255));
     }
 
     void budgetCountsRedoEntries()
     {
         LayeredDocument doc(QSize(640, 64));
+        doc.pixels(0).fillRect(doc.pixels(0).rect(), 0xffffffff);
+        doc.refreshComposite();
         UndoHistory history(3 * TileBytes);
         const quint64 id = doc.layer(0).id;
         for (int i = 0; i < 3; ++i)
@@ -495,6 +561,8 @@ private slots:
         const quint64 a = addLayer(doc, history, "a");
         const quint64 b = addLayer(doc, history, "b");
         const quint64 c = addLayer(doc, history, "c");
+        for (const quint64 id : {a, b, c}) // painted all over: every tile allocated
+            doc.pixels(doc.indexOf(id)).fillRect(QRect(QPoint(0, 0), size), 0xff102030);
         QCOMPARE(history.bytesUsed(), 0); // inserted layers live in the document
         deleteLayer(doc, history, a);
         deleteLayer(doc, history, b);
@@ -506,7 +574,8 @@ private slots:
         // Undoing an insert moves the layer into the redo entry, which is counted too.
         LayeredDocument doc2(size);
         UndoHistory history2(10 * layerBytes);
-        addLayer(doc2, history2, "x");
+        const quint64 x = addLayer(doc2, history2, "x");
+        doc2.pixels(doc2.indexOf(x)).fillRect(QRect(QPoint(0, 0), size), 0xff102030);
         QCOMPARE(history2.bytesUsed(), 0);
         undo(doc2, history2);
         QCOMPARE(history2.bytesUsed(), layerBytes);
@@ -517,6 +586,8 @@ private slots:
     void editLargerThanBudgetIsNotUndoable()
     {
         LayeredDocument doc(QSize(256, 256));
+        doc.pixels(0).fillRect(doc.pixels(0).rect(), 0xffffffff);
+        doc.refreshComposite();
         UndoHistory history(TileBytes);
         const quint64 start = history.stateId();
         QVERIFY(paintStep(doc, history, doc.layer(0).id, QPointF(128, 128), 200, Qt::red));
@@ -532,7 +603,7 @@ private slots:
         const quint64 id = doc.layer(0).id;
         paintStep(doc, history, id, QPointF(32, 32), 10, Qt::red);
         const quint64 saved = history.stateId();
-        const QImage savedPixels = doc.composite().copy();
+        const QImage savedPixels = doc.composite().toImage();
         paintStep(doc, history, id, QPointF(160, 32), 10, Qt::red);
         paintStep(doc, history, id, QPointF(288, 32), 10, Qt::red);
         undo(doc, history);
@@ -547,7 +618,7 @@ private slots:
         const DocumentData original = threeLayerDocument(QSize(37, 23));
         const ProjectFile::LoadResult r = ProjectFile::decode(ProjectFile::encode(original));
         QVERIFY2(r.ok(), qPrintable(r.error));
-        QCOMPARE(r.version, 2);
+        QCOMPARE(r.version, 3);
         QCOMPARE(r.document.size, original.size);
         QCOMPARE(r.document.activeLayerId, original.activeLayerId);
         QCOMPARE(r.document.layers.size(), original.layers.size());
@@ -604,7 +675,7 @@ private slots:
         QByteArray flipped = good;
         flipped[ProjectFile::HeaderSize + 10] = char(flipped[ProjectFile::HeaderSize + 10] ^ 0x55);
         QTest::newRow("payload byte flipped") << flipped << "checksum";
-        QTest::newRow("newer version") << makeV1(3, 16, 8, 1, 1, payload) << "newer version";
+        QTest::newRow("newer version") << makeV1(ProjectFile::CurrentVersion + 1, 16, 8, 1, 1, payload) << "newer version";
         QTest::newRow("version zero") << makeV1(0, 16, 8, 1, 1, payload) << "damaged";
         QTest::newRow("zero width") << makeV1(1, 0, 8, 1, 1, payload) << "damaged";
         QTest::newRow("huge dimensions") << makeV1(1, 100000, 100000, 1, 1, payload) << "too large";
@@ -648,6 +719,8 @@ private slots:
             return o;
         };
         QTest::newRow("truncated") << good.left(good.size() - 7) << "damaged";
+        QTest::newRow("version 2 truncated") << ProjectFile::encodeVersion2(threeLayerDocument(QSize(8, 8))).chopped(7)
+                                             << "damaged";
         QByteArray flipped = good;
         flipped[flipped.size() - 20] = char(flipped[flipped.size() - 20] ^ 0x40);
         QTest::newRow("byte flipped") << flipped << "checksum";
@@ -677,6 +750,129 @@ private slots:
         QVERIFY(!r.ok());
         QVERIFY(r.document.layers.empty());
         QVERIFY2(r.error.contains(expected, Qt::CaseInsensitive), qPrintable(r.error));
+    }
+
+    void rejectsDamagedTiledFiles_data()
+    {
+        QTest::addColumn<QByteArray>("data");
+        QTest::addColumn<QString>("expected");
+        // 100 x 70 canvas, 64-pixel tiles: 2 x 2 tiles; the right and bottom ones are clipped.
+        auto file = [](const QByteArray &stream, int tiles, QJsonValue tileSize = 64, quint32 w = 100, quint32 h = 70) {
+            QJsonObject o;
+            o["activeLayerId"] = "1";
+            o["tileSize"] = tileSize;
+            o["layers"] = QJsonArray{tiledLayerMeta("1", stream.size(), tiles)};
+            return makeV2(w, h, 1, o, {stream}, 3);
+        };
+        const QByteArray full = greyTile(64, 64), clipped = greyTile(36, 64);
+        const QByteArray good = tileStream({{0, 0, full}, {1, 0, clipped}});
+        QTest::newRow("good file (control)") << file(good, 2) << QString();
+        QTest::newRow("tile outside the canvas") << file(tileStream({{2, 0, full}}), 1) << "outside the canvas";
+        QTest::newRow("tile row outside") << file(tileStream({{0, 5, full}}), 1) << "outside the canvas";
+        QTest::newRow("tile repeated") << file(tileStream({{0, 0, full}, {0, 0, full}}), 2) << "repeated";
+        QTest::newRow("tiles out of order") << file(tileStream({{1, 0, clipped}, {0, 0, full}}), 2) << "out of order";
+        QTest::newRow("count differs from metadata") << file(good, 3) << "tile count";
+        QTest::newRow("declared count too large") << file(tileStream({}, 1000000), 1000000) << "tile count";
+        QTest::newRow("edge tile stored unclipped") << file(tileStream({{1, 0, full}}), 1) << "does not match";
+        QTest::newRow("tile cut short") << file(good.chopped(10), 2) << "size";
+        QTest::newRow("entry header cut short") << file(tileStream({{0, 0, full}}).append("abc"), 1) << "after the last tile";
+        QByteArray liar = full;
+        qToBigEndian<quint32>(0x7fffffff, liar.data());
+        QTest::newRow("claims huge raw size") << file(tileStream({{0, 0, liar}}), 1) << "does not match";
+        QByteArray notZlib(4, '\0');
+        qToBigEndian<quint32>(64 * 64 * 4, notZlib.data());
+        notZlib.append("not zlib data");
+        QTest::newRow("corrupt zlib") << file(tileStream({{0, 0, notZlib}}), 1) << "decompressed";
+        QByteArray bad;
+        for (int i = 0; i < 64 * 64; ++i)
+            bad.append(QByteArray::fromHex("c80000" "0a"));
+        QTest::newRow("invalid premultiplied pixels") << file(tileStream({{0, 0, qCompress(bad)}}), 1) << "invalid pixel";
+        QTest::newRow("tile size not a power of two") << file(good, 2, 48) << "tile size";
+        QTest::newRow("tile size too small") << file(good, 2, 8) << "tile size";
+        QTest::newRow("tile size missing") << file(good, 2, QJsonValue()) << "tile size";
+        QTest::newRow("too many layers") << makeV2(8, 8, 100, QJsonObject(), {}, 3) << "too large";
+        QTest::newRow("side too long") << makeV2(20000, 8, 1, QJsonObject(), {}, 3) << "too large";
+    }
+
+    void rejectsDamagedTiledFiles()
+    {
+        QFETCH(QByteArray, data);
+        QFETCH(QString, expected);
+        const ProjectFile::LoadResult r = ProjectFile::decode(data);
+        if (expected.isEmpty()) {
+            QVERIFY2(r.ok(), qPrintable(r.error));
+            QCOMPARE(r.document.layers.front().image.allocatedTileCount(), 2);
+            QCOMPARE(r.document.layers.front().image.pixel(99, 63), qRgba(128, 128, 128, 255));
+            QCOMPARE(r.document.layers.front().image.pixel(10, 66), 0u);
+            QCOMPARE(ProjectFile::verify(data), QString());
+            return;
+        }
+        QVERIFY(!r.ok());
+        QVERIFY(r.document.layers.empty());
+        QVERIFY2(r.error.contains(expected, Qt::CaseInsensitive), qPrintable(r.error));
+    }
+
+    void version2FilesStillOpen()
+    {
+        // Projects saved by milestones 3 to 9 (dense layers) open into sparse layers with the same
+        // pixels; fully transparent tiles are not allocated.
+        DocumentData original = threeLayerDocument(QSize(200, 150));
+        original.layers[1].image.fillRect(QRect(0, 0, 200, 150), 0);
+        original.layers[1].image.fillRect(QRect(70, 70, 10, 10), 0xff00ff00);
+        const QByteArray v2 = ProjectFile::encodeVersion2(original);
+        QCOMPARE(qFromLittleEndian<quint32>(v2.constData() + 8), 2u);
+        const ProjectFile::LoadResult r = ProjectFile::decode(v2);
+        QVERIFY2(r.ok(), qPrintable(r.error));
+        QCOMPARE(r.version, 2);
+        for (size_t i = 0; i < original.layers.size(); ++i)
+            QVERIFY(r.document.layers[i].image == original.layers[i].image);
+        QCOMPARE(r.document.layers[1].image.allocatedTileCount(), 1);
+        // Saved again, it is version 3, sparse, and still the same pixels.
+        const QByteArray v3 = ProjectFile::encode(r.document);
+        QCOMPARE(qFromLittleEndian<quint32>(v3.constData() + 8), 3u);
+        const ProjectFile::LoadResult again = ProjectFile::decode(v3);
+        QVERIFY2(again.ok(), qPrintable(again.error));
+        for (size_t i = 0; i < original.layers.size(); ++i)
+            QVERIFY(again.document.layers[i].image == original.layers[i].image);
+    }
+
+    void sparseFilesStaySmall()
+    {
+        // A 16384 x 16384 canvas with one small mark: the file stores one tile, and opening it
+        // allocates one tile (the dense formats could not hold this canvas at all).
+        DocumentData doc;
+        doc.size = QSize(16384, 16384);
+        LayerData layer;
+        layer.id = 1;
+        layer.name = "Mark";
+        layer.image = TiledImage(doc.size);
+        layer.image.fillRect(QRect(10000, 9000, 20, 20), 0xff000000);
+        doc.layers.push_back(layer);
+        doc.activeLayerId = 1;
+        const QByteArray bytes = ProjectFile::encode(doc);
+        QVERIFY2(bytes.size() < 4096, qPrintable(QString::number(bytes.size())));
+        QCOMPARE(ProjectFile::verify(bytes), QString());
+        const ProjectFile::LoadResult r = ProjectFile::decode(bytes);
+        QVERIFY2(r.ok(), qPrintable(r.error));
+        QCOMPARE(r.document.size, doc.size);
+        QCOMPARE(r.document.layers.front().image.allocatedTileCount(), 1);
+        QCOMPARE(r.document.layers.front().image.pixel(10010, 9010), 0xff000000u);
+    }
+
+    void openingRespectsTheMemoryBudget()
+    {
+        // Tiles are allocated against MemoryBudget while decoding: a project that does not fit is
+        // refused with a message, and nothing stays allocated.
+        DocumentData doc = threeLayerDocument(QSize(300, 300));
+        const QByteArray bytes = ProjectFile::encode(doc);
+        const qint64 before = MemoryBudget::used(MemoryBudget::Category::Document);
+        MemoryBudget::failReservationsForTesting(5, 1000);
+        const ProjectFile::LoadResult r = ProjectFile::decode(bytes);
+        MemoryBudget::failReservationsForTesting(-1, 0);
+        QVERIFY(!r.ok());
+        QVERIFY2(r.error.contains("memory"), qPrintable(r.error));
+        QCOMPARE(MemoryBudget::used(MemoryBudget::Category::Document), before);
+        QVERIFY(ProjectFile::decode(bytes).ok());
     }
 
     void unknownActiveLayerFallsBackToTop()

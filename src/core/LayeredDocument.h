@@ -18,8 +18,8 @@ public:
     static constexpr int DefaultWidth = 2048;
     static constexpr int DefaultHeight = 1536;
     static constexpr int MaxLayers = DocumentLimits::MaxLayers;
-    // Layer pixels a document may hold in total; also the limit for opening files.
-    static constexpr qint64 MaxPixelBytes = DocumentLimits::MaxPixelBytes;
+    // Layers are sparse, so the count no longer depends on the canvas size; memory is checked by
+    // MemoryBudget when pixels are allocated (milestone 10).
     static int maxLayersFor(QSize size);
 
     // One transparent layer named "Layer 1".
@@ -37,9 +37,11 @@ public:
     int activeIndex() const { return indexOf(m_activeId); }
     void setActiveLayer(quint64 id);
 
-    const QImage &composite() const { return m_composite; }
-    void refreshComposite(const QRect &rect);
-    void refreshComposite() { refreshComposite(m_composite.rect()); }
+    // The composite of the visible layers (tiled, sparse: tiles where nothing is visible stay
+    // unallocated). Refreshing returns false if the memory budget refused composite tiles.
+    const TiledImage &composite() const { return m_composite; }
+    bool refreshComposite(const QRect &rect);
+    bool refreshComposite() { return refreshComposite(m_composite.rect()); }
 
     // Shallow copy for saving and recovery: images are shared until either side writes. The
     // selection is not part of it: selections are not saved in project or recovery files.
@@ -51,7 +53,7 @@ public:
     void setSelection(const Selection &selection) { m_selection = selection; }
 
     // --- mutations (no history; callers record undo commands) ---
-    QImage &pixels(int index) { return m_layers[size_t(index)].image; }
+    TiledImage &pixels(int index) { return m_layers[size_t(index)].image; }
     LayerData &layerRef(int index) { return m_layers[size_t(index)]; }
     quint64 allocateId() { return m_nextId++; }
     QString nextLayerName() const;
@@ -66,6 +68,6 @@ private:
     std::vector<LayerData> m_layers;
     quint64 m_activeId = 0;
     quint64 m_nextId = 1;
-    QImage m_composite;
+    TiledImage m_composite;
     Selection m_selection;
 };

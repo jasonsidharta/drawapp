@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Selection.h"
+#include "TiledImage.h"
 
 #include <QImage>
 #include <QPointF>
@@ -44,11 +45,18 @@ public:
     // leaving the session inactive, if there is nothing to transform or memory runs out. With no
     // layers it transforms the selection's outline only (it needs a non-empty selection).
     bool begin(const std::vector<QImage> &layers, const Selection &selection);
+    // The document's tiled layers (milestone 10): each is kept as a copy-on-write snapshot (no
+    // pixels copied), and dense buffers are made only over the source rectangle. Those buffers
+    // are reserved against MemoryBudget; begin() fails if the budget refuses them.
+    bool begin(const std::vector<TiledImage> &layers, const Selection &selection);
     int partCount() const { return int(m_parts.size()); }
     // Memory held by the session's caches.
     qsizetype byteSize() const;
     void end();
     bool isActive() const { return !m_sourceRect.isEmpty(); }
+    // The last begin() failed because memory for its caches could not be had (not because there
+    // was nothing to transform).
+    bool lastBeginOutOfMemory() const { return m_beginOutOfMemory; }
 
     QSize documentSize() const { return m_docSize; }
     QRect sourceRect() const { return m_sourceRect; }
@@ -99,9 +107,12 @@ public:
     // (document size) within area.
     void render(QImage &out, const QRect &area, Quality quality) const; // part 0
     void render(int part, QImage &out, const QRect &area, Quality quality) const;
+    // Into a tiled image of the document's size, band by band (only the area's tiles change).
+    // False if the memory budget refused a tile (out then partly updated: previews only).
+    bool render(int part, TiledImage &out, const QRect &area, Quality quality) const;
     // The transformed layer within area, as a new image of area's size (null if out of memory).
     QImage renderRegion(int part, const QRect &area, Quality quality) const;
-    // Tests: renderRegion for this part behaves as if memory ran out (-1 = off).
+    // Tests: renderRegion and the tiled render for this part behave as if memory ran out (-1 = off).
     void failRenderRegionForTesting(int part) { m_failRegionPart = part; }
     // The selection after Apply: the source's mask, transformed. "None" when there was none.
     Selection transformedSelection() const;
@@ -114,13 +125,14 @@ private:
     void keepPivotAt(const QPointF &pivotDoc);
     struct Part
     {
-        QImage original;              // the layer as it was (shared)
+        TiledImage original;          // the layer as it was (a copy-on-write snapshot)
         QImage base;                  // layer − source over the source rectangle
         std::vector<QImage> source;   // source pixels and 2× reductions (premultiplied ARGB32)
     };
     template <typename RowFn>
     void renderRows(const Part &part, const QRect &area, Quality quality, RowFn rowAt) const;
     void sampleRow(const Part &part, int y, int x0, int x1, QRgb *out, Quality quality) const;
+    static void readOriginal(const TiledImage &image, int y, int x0, int x1, QRgb *dst);
     void clampScales();
     void snapUnscaledMove();
 
@@ -130,6 +142,8 @@ private:
     std::vector<Part> m_parts;
     int m_failRegionPart = -1;
     QImage m_sourceMask;           // the selection over m_sourceRect (Grayscale8), when selected
+    qint64 m_reserved = 0;         // MemoryBudget bytes held for the dense caches
+    bool m_beginOutOfMemory = false;
 
     QPointF m_center;
     double m_sx = 1, m_sy = 1;

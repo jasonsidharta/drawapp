@@ -238,7 +238,7 @@ private slots:
         click("layerRow_Line art");
         QCOMPARE(activeLayer().name, QStringLiteral("Line art"));
         QVERIFY(activeLayer().locked);
-        const QImage lineBefore = activeLayer().image;
+        const QImage lineBefore = activeLayer().image.toImage();
         draw({{300, 1000}, {500, 1000}});
         QCOMPARE(activeLayer().image, lineBefore);
         QTRY_VERIFY(find("noticeLabel")->property("text").toString().contains("locked"));
@@ -274,7 +274,7 @@ private slots:
     {
         QTemporaryDir dir;
         const DocumentData before = m_canvas->document().snapshot();
-        const QImage composite = m_canvas->document().composite().copy();
+        const QImage composite = m_canvas->document().composite().toImage();
         QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("house.drawapp"))); }, true), QString());
         QSignalSpy exported(m_canvas, &CanvasItem::exportFinished);
         QCOMPARE(m_canvas->exportPng(QUrl::fromLocalFile(dir.filePath("house.png"))), QString());
@@ -765,7 +765,7 @@ private slots:
         QVERIFY2(m_canvas->transformWidth() > w0 * 1.15, qPrintable(QString::number(m_canvas->transformWidth() / w0)));
         QVERIFY(std::abs(m_canvas->transformWidth() / m_canvas->transformHeight() - w0 / h0) < 1e-6); // proportional
         snap("m8_1_head_preview");
-        const QImage inkBefore = m_canvas->document().layer(m_canvas->document().indexOf(inkLayer)).image.copy();
+        const QImage inkBefore = m_canvas->document().layer(m_canvas->document().indexOf(inkLayer)).image.toImage();
         click("applyTransformButton");
         QVERIFY(!m_canvas->isTransforming());
         QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
@@ -800,7 +800,7 @@ private slots:
         const Selection shadeArea = m_canvas->selection();
         QVERIFY(shadeArea.coverageAt(600, 530) == 255 && shadeArea.coverageAt(800, 530) == 255);
         QCOMPARE(shadeArea.coverageAt(700, 515), 0); // the subtracted middle
-        const QImage colourBefore = m_canvas->document().layer(0).image.copy();
+        const QImage colourBefore = m_canvas->document().layer(0).image.toImage();
         click("brushSettingsButton");
         click("preset_builtin.soft-airbrush");
         QMetaObject::invokeMethod(m_window->findChild<QObject *>("brushPopup"), "close");
@@ -808,7 +808,7 @@ private slots:
         m_canvas->setBrushColor(QColor(200, 120, 110));
         click("brushToolButton");
         draw({{520, 520}, {880, 540}, {520, 600}});
-        const QImage colourAfter = m_canvas->document().layer(0).image;
+        const QImage colourAfter = m_canvas->document().layer(0).image.toImage();
         QVERIFY(colourAfter != colourBefore);
         for (int y = 380; y < 700; y += 4)
             for (int x = 480; x < 900; x += 4)
@@ -838,7 +838,7 @@ private slots:
         snap("m8_4_eye_flip_preview");
         click("applyTransformButton");
         QCOMPARE(m_canvas->layerCount(), layersBefore + 1);
-        const QImage beforeTask5 = m_canvas->document().composite().copy();
+        const QImage beforeTask5 = m_canvas->document().composite().toImage();
 
         // 5. Cancel a transform: nothing changes.
         const int steps = m_canvas->history().undoCount();
@@ -863,7 +863,7 @@ private slots:
         QTemporaryDir dir;
         const QString path = dir.filePath("character.drawapp");
         QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(path)); }, true), QString());
-        const QImage saved = m_canvas->document().composite().copy();
+        const QImage saved = m_canvas->document().composite().toImage();
         const int layers = m_canvas->layerCount();
         m_canvas->newDocument();
         QCOMPARE(waitFor([&] { return m_canvas->openFile(QUrl::fromLocalFile(path)); }, false), QString());
@@ -897,7 +897,7 @@ private slots:
         });
         const LayeredDocument &doc = m_canvas->document();
         const quint64 colourId = doc.layer(0).id, inkId = doc.layer(1).id;
-        auto layerImage = [&](quint64 id) { return doc.layer(doc.indexOf(id)).image; };
+        auto layerImage = [&](quint64 id) { return doc.layer(doc.indexOf(id)).image.toImage(); };
         auto layerRow = [&](const QString &name) { return waitFor("layerRow_" + name); };
         auto ctrlClickRow = [&](const QString &name) {
             QQuickItem *row = layerRow(name);
@@ -1160,7 +1160,7 @@ private slots:
         QCOMPARE(int(m_canvas->selectedLayerIds().size()), 3);
         std::vector<QImage> beforeCancel;
         for (int i = 0; i < doc.count(); ++i)
-            beforeCancel.push_back(doc.layer(i).image.copy());
+            beforeCancel.push_back(doc.layer(i).image.toImage());
         steps = m_canvas->history().undoCount();
         click("selectTransformButton");
         QVERIFY(m_canvas->isTransforming());
@@ -1174,8 +1174,8 @@ private slots:
         QCOMPARE(m_canvas->history().undoCount(), steps);
 
         // 11. Undo and redo a mixed sequence of transforms and strokes.
-        std::vector<QImage> states{doc.composite().copy()};
-        auto record = [&] { states.push_back(doc.composite().copy()); };
+        std::vector<QImage> states{doc.composite().toImage()};
+        auto record = [&] { states.push_back(doc.composite().toImage()); };
         click("selectTransformButton"); // the three layers, whole
         QVERIFY(m_canvas->isTransforming());
         typeInto("transformRotationField", "-8");
@@ -1222,7 +1222,7 @@ private slots:
         QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(path)); }, true), QString());
         std::vector<std::pair<QString, QImage>> layers;
         for (int i = 0; i < doc.count(); ++i)
-            layers.emplace_back(doc.layer(i).name, doc.layer(i).image.copy());
+            layers.emplace_back(doc.layer(i).name, doc.layer(i).image.toImage());
         const BrushSettings solidSaved = lib->savedSettings(QStringLiteral("builtin.solid-round"));
         m_canvas->newDocument();
         QCOMPARE(waitFor([&] { return m_canvas->openFile(QUrl::fromLocalFile(path)); }, false), QString());

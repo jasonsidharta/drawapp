@@ -143,7 +143,7 @@ private slots:
             LayerData layer;
             layer.id = quint64(100 + i);
             layer.name = QStringLiteral("L%1").arg(i);
-            layer.image = randomPremultiplied(24, 16, quint32(i + 7));
+            layer.image = TiledImage::fromImage(randomPremultiplied(24, 16, quint32(i + 7)));
             layer.visible = i != 2;
             layer.opacity = 0.25 * (i + 1);
             layer.locked = i == 3;
@@ -153,7 +153,7 @@ private slots:
         const RecoveryFile::Contents c = RecoveryFile::decode(RecoveryFile::encode(doc, meta(5, 6)));
         QVERIFY2(c.ok(), qPrintable(c.error));
         QCOMPARE(c.recoveryVersion, quint32(2));
-        QCOMPARE(c.projectVersion, 2);
+        QCOMPARE(c.projectVersion, int(ProjectFile::CurrentVersion));
         QCOMPARE(c.document.activeLayerId, quint64(102));
         QCOMPARE(c.document.layers.size(), size_t(4));
         for (size_t i = 0; i < 4; ++i) {
@@ -182,11 +182,11 @@ private slots:
     {
         LayeredDocument live(QSize(64, 64));
         const DocumentData snapshot = live.snapshot(); // shares pixels until the live side writes
-        const QImage before = snapshot.layers[0].image.copy();
+        const QImage before = snapshot.layers[0].image.toImage();
         RasterDocument::stampDabs(live.pixels(0), {{QPointF(32, 32), 40}}, Qt::red, BrushMode::Paint);
         QVERIFY(live.layer(0).image != before);
         QCOMPARE(snapshot.layers[0].image, before); // the worker's copy did not change
-        QVERIFY(snapshot.layers[0].image.constBits() != live.layer(0).image.constBits());
+        QVERIFY(!snapshot.layers[0].image.sharesTileWith(live.layer(0).image, 0, 0));
     }
 
     // --- manager writes ---

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BrushSettings.h"
+#include "StrokeSurface.h"
 #include "StrokeSmoother.h"
 #include "StrokeSpacer.h"
 
@@ -101,13 +102,30 @@ public:
     // Each call changes `image` (Format_ARGB32_Premultiplied, the stroke's layer) and captures
     // the tiles it is about to change into `before` (the stroke's undo snapshot) first. Returns
     // the changed area, clipped to the image, or an empty rect.
-    QRect begin(QImage &image, const StrokeSample &sample, TileSnapshot &before);
-    QRect moveTo(QImage &image, const StrokeSample &sample, TileSnapshot &before);
+    //
+    // The image is a StrokeSurface: a dense QImage or a tiled document layer (milestone 10). On a
+    // tiled layer a write may find no memory for a tile; the engine then stops changing pixels
+    // and allocationFailed() is true, and the caller should cancel the stroke.
+    QRect begin(StrokeSurface &image, const StrokeSample &sample, TileSnapshot &before);
+    QRect moveTo(StrokeSurface &image, const StrokeSample &sample, TileSnapshot &before);
     // Airbrush: the pen is held at the same place until timeMs. No effect for other brushes.
-    QRect advanceTime(QImage &image, double timeMs, TileSnapshot &before);
+    QRect advanceTime(StrokeSurface &image, double timeMs, TileSnapshot &before);
     // Pen up: completes the smoothed line to the last input position and draws the held-back end
     // taper. A stroke that never moved is a dot with one full pass of paint.
-    QRect finish(QImage &image, TileSnapshot &before);
+    QRect finish(StrokeSurface &image, TileSnapshot &before);
+
+    // Conveniences for the two kinds of image.
+    QRect begin(QImage &image, const StrokeSample &s, TileSnapshot &b) { DenseSurface d(image); return begin(d, s, b); }
+    QRect moveTo(QImage &image, const StrokeSample &s, TileSnapshot &b) { DenseSurface d(image); return moveTo(d, s, b); }
+    QRect advanceTime(QImage &image, double t, TileSnapshot &b) { DenseSurface d(image); return advanceTime(d, t, b); }
+    QRect finish(QImage &image, TileSnapshot &b) { DenseSurface d(image); return finish(d, b); }
+    QRect begin(TiledImage &image, const StrokeSample &s, TileSnapshot &b) { TiledSurface d(image); return begin(d, s, b); }
+    QRect moveTo(TiledImage &image, const StrokeSample &s, TileSnapshot &b) { TiledSurface d(image); return moveTo(d, s, b); }
+    QRect advanceTime(TiledImage &image, double t, TileSnapshot &b) { TiledSurface d(image); return advanceTime(d, t, b); }
+    QRect finish(TiledImage &image, TileSnapshot &b) { TiledSurface d(image); return finish(d, b); }
+
+    // A tile could not be allocated during this stroke (memory budget); pixels stopped changing.
+    bool allocationFailed() const { return m_allocationFailed; }
 
     const BrushSettings &settings() const { return m_settings; }
     bool usesTime() const;
@@ -117,8 +135,20 @@ public:
     qsizetype bufferBytes() const;
 
     // Renders a whole stroke at once; for previews, thumbnails, tests and replays.
-    static QRect render(QImage &image, const BrushSettings &settings, const QColor &color,
+    static QRect render(StrokeSurface &image, const BrushSettings &settings, const QColor &color,
                         const std::vector<StrokeSample> &samples, quint64 seed = 0, TileSnapshot *before = nullptr);
+    static QRect render(QImage &image, const BrushSettings &settings, const QColor &color,
+                        const std::vector<StrokeSample> &samples, quint64 seed = 0, TileSnapshot *before = nullptr)
+    {
+        DenseSurface surface(image);
+        return render(surface, settings, color, samples, seed, before);
+    }
+    static QRect render(TiledImage &image, const BrushSettings &settings, const QColor &color,
+                        const std::vector<StrokeSample> &samples, quint64 seed = 0, TileSnapshot *before = nullptr)
+    {
+        TiledSurface surface(image);
+        return render(surface, settings, color, samples, seed, before);
+    }
 
     // The parameters of one dab, as derived from the brush settings and the input sample.
     struct DabParams
@@ -148,7 +178,7 @@ private:
     void annotate(StrokeSample &sample);
     // Spaces the smoothed samples into dabs, adds airbrush dabs up to nowMs (< 0: none) and
     // renders them; the caller composites.
-    void process(QImage &image, TileSnapshot &before, double nowMs, QRect &dirty);
+    void process(StrokeSurface &image, TileSnapshot &before, double nowMs, QRect &dirty);
     void addTimeDabs(double nowMs);
     void updateHeading(double direction, double stepFraction);
     bool needsHeading(const StrokeSample &sample) const;
@@ -159,19 +189,19 @@ private:
     double random(qint64 index, quint64 salt) const;
     DabParams paramsFor(const Dab &dab) const;
     QRgb dabColor(const SensorReadings &readings, qint64 index) const;
-    void renderDab(QImage &image, const DabParams &dab, TileSnapshot &before, QRect &dirty);
+    void renderDab(StrokeSurface &image, const DabParams &dab, TileSnapshot &before, QRect &dirty);
     void rasterize(const DabParams &dab, const QRect &rect);
     void rasterizeSpray(const DabParams &dab, const QRect &rect);
-    void compositeTouched(QImage &image, const TileSnapshot &before);
-    void composite(QImage &image, const QRect &rect, const TileSnapshot &before);
-    void carry(QImage &image, const DabParams &dab, const QRect &rect, const TileSnapshot &before);
+    void compositeTouched(StrokeSurface &image, const TileSnapshot &before);
+    void composite(StrokeSurface &image, const QRect &rect, const TileSnapshot &before);
+    void carry(StrokeSurface &image, const DabParams &dab, const QRect &rect, const TileSnapshot &before);
     void carryInto(QImage &target, const QPoint &origin, const DabParams &dab, const QRect &rect);
-    void loadPatch(const QImage &image, const DabParams &dab);
-    QRgb workPixel(const QImage &image, int x, int y) const;
+    void loadPatch(const StrokeSurface &image, const DabParams &dab);
+    QRgb workPixel(const StrokeSurface &image, int x, int y) const;
     double grain(double x, double y) const;
     double passExponent(double stepFraction) const;
     CoverageTile &coverageTile(int column, int row);
-    QRect dabRect(const DabParams &dab, const QImage &image) const;
+    QRect dabRect(const DabParams &dab, const StrokeSurface &image) const;
 
     BrushSettings m_settings;
     quint32 m_color; // opaque RGB as ARGB32, after the per-stroke colour jitter
@@ -191,6 +221,7 @@ private:
     double m_strokeSize = 1.0; // per-stroke size factor
     double m_minimumDiameter = 1.0;
     QImage m_clip;
+    bool m_allocationFailed = false;
     CompiledDynamics m_dyn[DynamicTargetCount];
     bool m_anyDynamics = false;
 

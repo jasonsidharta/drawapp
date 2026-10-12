@@ -279,15 +279,41 @@ void boxBlur(QImage &img, const QRect &rect, int r, bool horizontal)
 
 } // namespace
 
+namespace {
+// The wand over any pixel source: at(x, y) gives premultiplied ARGB.
+template<typename At>
+QImage wandMask(QSize size, At at, QPoint seed, int tolerance, bool contiguous, bool antialias);
+}
+
 QImage Selection::magicWand(const QImage &image, QPoint seed, int tolerance, bool contiguous, bool antialias)
 {
-    QImage mask(image.size(), QImage::Format_Grayscale8);
+    if (!image.rect().contains(seed) || image.format() != QImage::Format_ARGB32_Premultiplied) {
+        QImage mask(image.size(), QImage::Format_Grayscale8);
+        mask.fill(0);
+        return mask;
+    }
+    return wandMask(
+        image.size(), [&](int x, int y) { return reinterpret_cast<const QRgb *>(image.constScanLine(y))[x]; }, seed,
+        tolerance, contiguous, antialias);
+}
+
+QImage Selection::magicWand(const TiledImage &image, QPoint seed, int tolerance, bool contiguous, bool antialias)
+{
+    return wandMask(image.size(), [&](int x, int y) { return image.pixel(x, y); }, seed, tolerance, contiguous, antialias);
+}
+
+namespace {
+template<typename At>
+QImage wandMask(QSize size, At at, QPoint seed, int tolerance, bool contiguous, bool antialias)
+{
+    QImage mask(size, QImage::Format_Grayscale8);
+    if (mask.isNull())
+        return mask;
     mask.fill(0);
-    if (!image.rect().contains(seed) || image.format() != QImage::Format_ARGB32_Premultiplied)
+    if (!QRect(QPoint(0, 0), size).contains(seed))
         return mask;
     tolerance = std::clamp(tolerance, 0, 255);
-    const int w = image.width(), h = image.height();
-    auto at = [&](int x, int y) { return reinterpret_cast<const QRgb *>(image.constScanLine(y))[x]; };
+    const int w = size.width(), h = size.height();
     const QRgb ref = at(seed.x(), seed.y());
     auto matches = [&](int x, int y) { return channelDistance(at(x, y), ref) <= tolerance; };
     if (contiguous) {
@@ -350,6 +376,7 @@ QImage Selection::magicWand(const QImage &image, QPoint seed, int tolerance, boo
     }
     return mask;
 }
+} // namespace
 
 Selection Selection::grown(double radius) const
 {

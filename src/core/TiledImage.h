@@ -150,6 +150,7 @@ public:
 
     // --- pixels ---
     QRgb pixel(int x, int y) const;
+    QRgb pixel(const QPoint &p) const { return pixel(p.x(), p.y()); }
     bool setPixel(int x, int y, QRgb value);
     // Pointer to pixel (x, y) inside its tile, valid up to the tile's right edge; nullptr when the
     // tile is missing (read) or cannot be allocated (write). (x, y) must be inside the image.
@@ -192,3 +193,6 @@ private:
     quint64 m_version = 0;
     QList<TileRef> m_tiles; // row-major, columns × rows; shared between copies until written
 };
+
+inline bool operator==(const QImage &a, const TiledImage &b) { return b == a; }
+inline bool operator!=(const QImage &a, const TiledImage &b) { return !(b == a); }

@@ -141,7 +141,7 @@ public:
         emit historyChanged();
     }
     // What the view shows: the document, or the transform preview while one is open.
-    const QImage &displayedComposite() const;
+    const TiledImage &displayedComposite() const;
 
     SelectShape selectShape() const { return m_selectShape; }
     void setSelectShape(SelectShape shape);
@@ -378,6 +378,8 @@ private:
     void continueStroke(const QPointF &viewPos, qreal pressure, const QPointF &tilt = {}, bool hasTilt = false);
     void endStroke();
     // Undoes the stroke in progress completely (Escape); nothing enters the history.
+    // After an engine call: if a tile could not be allocated, takes the stroke back. True then.
+    bool strokeOutOfMemory();
     void cancelStroke();
     // Selection and transform gestures (CanvasItemSelection.cpp).
     void beginSelectGesture(const QPointF &viewPos);
@@ -551,8 +553,10 @@ private:
     bool m_previewMerged = false; // bottom to top
     Tool m_toolBeforeTransform = Brush;
     bool m_keepAspect = true;
-    std::vector<QImage> m_previewLayers; // the transformed layers, rendered from the session's source
-    QImage m_previewComposite; // the document with the preview layer, what the view shows
+    // The transformed layers, rendered from the session's source: copies of the document's layers
+    // (sharing their tiles) in which only the transformed area's tiles are rewritten.
+    std::vector<TiledImage> m_previewLayers;
+    TiledImage m_previewComposite; // the document with the preview layers, what the view shows
     QRect m_previewRect;       // area the preview last differed from the document in
     TransformSession::Handle m_dragHandle = TransformSession::Handle::None;
     QPointF m_dragLastDoc;

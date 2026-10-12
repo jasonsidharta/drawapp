@@ -170,31 +170,6 @@ double sign(double v)
 
 } // namespace
 
-namespace {
-
-QRect contentBounds(const QImage &layer)
-{
-    int left = layer.width(), right = -1, top = layer.height(), bottom = -1;
-    for (int y = 0; y < layer.height(); ++y) {
-        const QRgb *row = reinterpret_cast<const QRgb *>(layer.constScanLine(y));
-        int x0 = 0;
-        while (x0 < layer.width() && !qAlpha(row[x0]))
-            ++x0;
-        if (x0 == layer.width())
-            continue;
-        int x1 = layer.width() - 1;
-        while (!qAlpha(row[x1]))
-            --x1;
-        left = std::min(left, x0);
-        right = std::max(right, x1);
-        top = std::min(top, y);
-        bottom = y;
-    }
-    return right < 0 ? QRect() : QRect(QPoint(left, top), QPoint(right, bottom));
-}
-
-} // namespace
-
 bool TransformSession::begin(const QImage &layer, const Selection &selection)
 {
     return begin(std::vector<QImage>{layer}, selection);
@@ -202,7 +177,23 @@ bool TransformSession::begin(const QImage &layer, const Selection &selection)
 
 bool TransformSession::begin(const std::vector<QImage> &layers, const Selection &selection)
 {
+    std::vector<TiledImage> tiled;
+    for (const QImage &layer : layers) {
+        if (layer.isNull() || layer.format() != QImage::Format_ARGB32_Premultiplied)
+            return false;
+        tiled.push_back(TiledImage::fromImage(layer));
+        if (tiled.back().isNull())
+            return false;
+    }
+    if (layers.empty())
+        return begin(std::vector<TiledImage>{}, selection);
+    return begin(tiled, selection);
+}
+
+bool TransformSession::begin(const std::vector<TiledImage> &layers, const Selection &selection)
+{
     end();
+    m_beginOutOfMemory = false;
     // No layers: the selection's outline alone (Transform Selection).
     if (layers.empty()) {
         if (!selection.isActive() || selection.isEmpty())
@@ -215,8 +206,8 @@ bool TransformSession::begin(const std::vector<QImage> &layers, const Selection 
         return true;
     }
     const QSize size = layers.front().size();
-    for (const QImage &layer : layers)
-        if (layer.isNull() || layer.size() != size || layer.format() != QImage::Format_ARGB32_Premultiplied)
+    for (const TiledImage &layer : layers)
+        if (layer.isNull() || layer.size() != size)
             return false;
     // One source rectangle for every layer, so all of them share one mapping and stay aligned.
     QRect rect;
@@ -225,24 +216,36 @@ bool TransformSession::begin(const std::vector<QImage> &layers, const Selection 
             return false;
         rect = selection.bounds() & QRect(QPoint(0, 0), size);
     } else {
-        for (const QImage &layer : layers)
-            rect |= contentBounds(layer);
+        for (const TiledImage &layer : layers)
+            rect |= layer.contentBounds();
     }
     if (rect.isEmpty())
         return false;
+    // The dense caches: base and source per layer, plus the source's reductions (about a third).
+    const qint64 perLayer = qint64(rect.width()) * rect.height() * 4;
+    const qint64 wanted = qint64(layers.size()) * (perLayer * 2 + perLayer / 3 + 64);
+    if (!MemoryBudget::tryReserve(wanted, MemoryBudget::Category::Preview)) {
+        m_beginOutOfMemory = true;
+        return false;
+    }
+    m_reserved = wanted;
     std::vector<Part> parts;
     parts.reserve(layers.size());
-    for (const QImage &layer : layers) {
+    for (const TiledImage &layer : layers) {
         Part part;
-        part.original = layer; // shared, not copied: read only
+        part.original = layer; // a snapshot: shares the layer's tiles, read only
         part.base = QImage(rect.size(), QImage::Format_ARGB32_Premultiplied);
         QImage source(rect.size(), QImage::Format_ARGB32_Premultiplied);
-        if (part.base.isNull() || source.isNull())
-            return false; // out of memory: nothing started
+        const QImage region = layer.copy(rect);
+        if (part.base.isNull() || source.isNull() || region.isNull()) {
+            end(); // out of memory: nothing started
+            m_beginOutOfMemory = true;
+            return false;
+        }
         // source = layer × s, base = layer − source (exactly complementary). Without a selection
         // everything in the rectangle is source.
         for (int y = rect.top(); y <= rect.bottom(); ++y) {
-            const QRgb *in = reinterpret_cast<const QRgb *>(layer.constScanLine(y));
+            const QRgb *in = reinterpret_cast<const QRgb *>(region.constScanLine(y - rect.top())) - rect.left();
             const uchar *s = selection.isActive() ? selection.mask().constScanLine(y) : nullptr;
             QRgb *base = reinterpret_cast<QRgb *>(part.base.scanLine(y - rect.top()));
             QRgb *src = reinterpret_cast<QRgb *>(source.scanLine(y - rect.top()));
@@ -275,6 +278,10 @@ bool TransformSession::begin(const std::vector<QImage> &layers, const Selection 
 
 void TransformSession::end()
 {
+    if (m_reserved > 0) {
+        MemoryBudget::release(m_reserved, MemoryBudget::Category::Preview);
+        m_reserved = 0;
+    }
     m_docSize = QSize();
     m_sourceRect = QRect();
     m_selection = Selection();
@@ -592,21 +599,20 @@ void TransformSession::renderRows(const Part &part, const QRect &area, Quality q
     // Base pixels: inside the source rectangle the remainder (layer − source), outside it the
     // original layer.
     auto baseRow = [&](int y, QRgb *dst, int x0, int x1) {
-        const QRgb *orig = reinterpret_cast<const QRgb *>(part.original.constScanLine(y));
-        const bool inRows = y >= m_sourceRect.top() && y <= m_sourceRect.bottom();
-        const QRgb *base = inRows ? reinterpret_cast<const QRgb *>(part.base.constScanLine(y - m_sourceRect.top())) : nullptr;
-        for (int x = x0; x < x1; ++x)
-            dst[x - x0] = (base && x >= m_sourceRect.left() && x <= m_sourceRect.right()) ? base[x - m_sourceRect.left()] : orig[x];
+        readOriginal(part.original, y, x0, x1, dst);
+        if (y < m_sourceRect.top() || y > m_sourceRect.bottom())
+            return;
+        const int b0 = std::max(x0, m_sourceRect.left()), b1 = std::min(x1, m_sourceRect.right() + 1);
+        if (b0 >= b1)
+            return;
+        const QRgb *base = reinterpret_cast<const QRgb *>(part.base.constScanLine(y - m_sourceRect.top()));
+        std::memcpy(dst + (b0 - x0), base + (b0 - m_sourceRect.left()), size_t(b1 - b0) * 4);
     };
     if (isIdentity()) {
         // Nothing moved: base + source is exactly the original layer (with a soft selection,
         // "source over base" would not be: two 50 % halves composite to 75 %).
-        for (int y = area.top(); y <= area.bottom(); ++y) {
-            QRgb *row = rowAt(y);
-            const QRgb *orig = reinterpret_cast<const QRgb *>(part.original.constScanLine(y));
-            for (int x = area.left(); x <= area.right(); ++x)
-                row[x - area.left()] = orig[x];
-        }
+        for (int y = area.top(); y <= area.bottom(); ++y)
+            readOriginal(part.original, y, area.left(), area.right() + 1, rowAt(y));
         return;
     }
     const QRect target = targetRect() & area;
@@ -617,6 +623,49 @@ void TransformSession::renderRows(const Part &part, const QRect &area, Quality q
             return;
         sampleRow(part, y, target.left(), target.right() + 1, row + (target.left() - area.left()), quality);
     });
+}
+
+void TransformSession::readOriginal(const TiledImage &image, int y, int x0, int x1, QRgb *dst)
+{
+    // Tile segment by tile segment; a missing tile is transparent. Safe on worker threads: the
+    // image is a snapshot whose tiles nobody writes.
+    for (int x = x0; x < x1;) {
+        const int end = std::min(x1, (image.columnOf(x) + 1) * image.tileSize());
+        const QRgb *src = image.constRow(x, y);
+        if (src)
+            std::memcpy(dst + (x - x0), src, size_t(end - x) * 4);
+        else
+            std::memset(dst + (x - x0), 0, size_t(end - x) * 4);
+        x = end;
+    }
+}
+
+bool TransformSession::render(int partIndex, TiledImage &out, const QRect &requested, Quality quality) const
+{
+    if (!isActive() || partIndex < 0 || partIndex >= int(m_parts.size()) || out.size() != m_docSize)
+        return false;
+    if (partIndex == m_failRegionPart)
+        return false; // simulated allocation failure (tests)
+    const QRect area = requested & out.rect();
+    if (area.isEmpty())
+        return true;
+    // One band of tile rows at a time: rendered in parallel into a dense band, then written.
+    const int band = out.tileSize();
+    QImage buffer(area.width(), band, QImage::Format_ARGB32_Premultiplied);
+    if (buffer.isNull())
+        return false;
+    bool ok = true;
+    for (int top = area.top(); top <= area.bottom();) {
+        const int bottom = std::min(area.bottom(), (out.rowOf(top) + 1) * band - 1);
+        const QRect strip(area.left(), top, area.width(), bottom - top + 1);
+        uchar *bits = buffer.bits();
+        const qsizetype bpl = buffer.bytesPerLine();
+        renderRows(m_parts[size_t(partIndex)], strip, quality,
+                   [&](int y) { return reinterpret_cast<QRgb *>(bits + (y - top) * bpl); });
+        ok = out.write(strip.topLeft(), buffer.copy(0, 0, strip.width(), strip.height())) && ok;
+        top = bottom + 1;
+    }
+    return ok;
 }
 
 void TransformSession::sampleRow(const Part &part, int y, int x0, int x1, QRgb *out, Quality quality) const
