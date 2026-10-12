@@ -1,3 +1,4 @@
+#include "BrushPresetStore.h"
 #include "BrushPresets.h"
 #include "BrushSettings.h"
 #include "BrushTips.h"
@@ -6,6 +7,7 @@
 
 #include <QJsonDocument>
 #include <QSet>
+#include <QTemporaryDir>
 #include <QtTest>
 #include <cmath>
 
@@ -684,6 +686,76 @@ private slots:
                 QVERIFY2(premultipliedValid(image), qPrintable(p.id));
             }
         }
+    }
+
+    // --- preset storage ---
+    void presetStoreRoundTrip()
+    {
+        BrushPresetStore::Data data;
+        BrushSettings mine = BrushPresets::builtIn("builtin.clean-ink")->settings;
+        mine.name = QStringLiteral("My ink");
+        mine.size = 3;
+        data.custom.push_back({QStringLiteral("custom.1"), mine, false});
+        BrushSettings changed = BrushPresets::builtIn("builtin.sketch-pencil")->settings;
+        changed.opacity = 0.5;
+        data.overrides[QStringLiteral("builtin.sketch-pencil")] = changed;
+        data.favorites = {QStringLiteral("custom.1"), QStringLiteral("builtin.soft-airbrush")};
+        data.paintId = QStringLiteral("custom.1");
+        data.eraserId = QStringLiteral("builtin.soft-eraser");
+
+        BrushPresetStore::Data back;
+        QString error;
+        QStringList warnings;
+        QVERIFY(BrushPresetStore::decode(BrushPresetStore::encode(data), &back, &error, &warnings));
+        QVERIFY(warnings.isEmpty());
+        QCOMPARE(int(back.custom.size()), 1);
+        QVERIFY(back.custom[0].settings == mine);
+        QVERIFY(back.overrides.at(QStringLiteral("builtin.sketch-pencil")) == changed);
+        QCOMPARE(back.favorites, data.favorites);
+        QCOMPARE(back.paintId, data.paintId);
+        QCOMPARE(back.eraserId, data.eraserId);
+
+        QTemporaryDir dir;
+        const QString path = dir.filePath("sub/brushes.json");
+        QCOMPARE(BrushPresetStore::save(path, data), QString());
+        QVERIFY(BrushPresetStore::load(path, &back, &error, &warnings));
+        QCOMPARE(back.favorites, data.favorites);
+        QVERIFY(BrushPresetStore::load(dir.filePath("absent.json"), &back, &error, &warnings));
+        QVERIFY(back.custom.empty());
+    }
+
+    void presetStoreValidation()
+    {
+        BrushPresetStore::Data out;
+        QString error;
+        QStringList warnings;
+        QVERIFY(!BrushPresetStore::decode("not json", &out, &error, &warnings));
+        QVERIFY(!BrushPresetStore::decode(R"({"format":"other","version":1})", &out, &error, &warnings));
+        error.clear();
+        QVERIFY(!BrushPresetStore::decode(R"({"format":"drawapp-brushes","version":2})", &out, &error, &warnings));
+        QVERIFY(error.contains("newer"));
+        QVERIFY(!BrushPresetStore::decode(R"({"format":"drawapp-brushes","version":"1"})", &out, &error, &warnings));
+
+        // One bad entry is skipped; the rest loads.
+        const QByteArray mixed = R"({"format":"drawapp-brushes","version":1,
+            "custom":[{"id":"custom.1","settings":{"name":"Good","size":20}},
+                      {"id":"custom.2","settings":{"size":"huge"}},
+                      {"id":"../evil","settings":{}},
+                      {"id":"custom.1","settings":{"name":"Again"}}],
+            "overrides":{"builtin.nope":{},"builtin.clean-ink":{"size":2,"name":"Renamed"}},
+            "favorites":["custom.1","custom.2","builtin.clean-ink",7],
+            "selected":{"paint":"custom.9","eraser":"builtin.soft-eraser"}})";
+        warnings.clear();
+        QVERIFY(BrushPresetStore::decode(mixed, &out, &error, &warnings));
+        QCOMPARE(int(out.custom.size()), 1);
+        QCOMPARE(out.custom[0].settings.name, QStringLiteral("Good"));
+        QCOMPARE(out.custom[0].settings.size, 20.0);
+        QCOMPARE(warnings.size(), 4);
+        QCOMPARE(out.overrides.size(), size_t(1));
+        QCOMPARE(out.overrides.at("builtin.clean-ink").name, QStringLiteral("Clean Ink")); // built-ins keep their names
+        QCOMPARE(out.favorites, (QStringList{"custom.1", "builtin.clean-ink"}));
+        QVERIFY(out.paintId.isEmpty()); // unknown selection: the caller falls back to the default
+        QCOMPARE(out.eraserId, QStringLiteral("builtin.soft-eraser"));
     }
 
     void dabsOutsideTheLayerAreIgnored()

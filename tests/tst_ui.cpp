@@ -2,6 +2,9 @@
 // mouse and keyboard input. Builds a small illustration with Background, Sketch, Color and
 // Line art layers and checks the document after each panel action.
 
+#include "BrushPresets.h"
+#include "BrushScratchpad.h"
+#include "BrushThumbnails.h"
 #include "CanvasItem.h"
 #include "FakeProvider.h"
 #include "ProjectFile.h"
@@ -146,6 +149,7 @@ private slots:
     {
         QQuickStyle::setStyle(QStringLiteral("Fusion"));
         m_engine = new QQmlApplicationEngine(this);
+        m_engine->addImageProvider(QStringLiteral("brushthumb"), new BrushThumbnails);
         m_engine->loadFromModule("DrawApp", "Main");
         QVERIFY(!m_engine->rootObjects().isEmpty());
         m_window = qobject_cast<QQuickWindow *>(m_engine->rootObjects().first());
@@ -340,23 +344,42 @@ private slots:
 
     // --- brush settings and overwrite confirmation (milestone 5) ---
 
-    void brushSettingsPopup()
+    void brushPanel()
     {
         m_canvas->newDocument();
         m_canvas->setTool(CanvasItem::Brush);
+        BrushLibrary *lib = m_canvas->brushes();
+        QVERIFY(lib->select(BrushPresets::defaultPaintId()));
         m_canvas->setBrushSize(30);
         const auto restore = qScopeGuard([&] {
-            if (find("brushPreview"))
-                QTest::keyClick(m_window, Qt::Key_Escape);
-            m_canvas->setBrushOpacity(1.0);
-            m_canvas->setSmoothing(0);
-            m_canvas->setPressureMinSize(0.1);
-            m_canvas->setPressureFirmness(0);
+            if (QObject *popup = m_window->findChild<QObject *>("brushPopup"))
+                QMetaObject::invokeMethod(popup, "close");
+            QTRY_VERIFY(!find("brushPanel"));
+            lib->select(BrushPresets::defaultPaintId());
+            lib->resetCurrent();
+            lib->select(QStringLiteral("builtin.clean-ink"));
+            lib->resetCurrent();
+            if (lib->currentFavorite())
+                lib->toggleFavorite(lib->currentId());
+            lib->select(BrushPresets::defaultPaintId());
+            m_canvas->setTool(CanvasItem::Brush);
         });
+        // The active brush is always visible in the toolbar.
+        QQuickItem *activeLabel = waitFor("activeBrushLabel");
+        QVERIFY(activeLabel);
+        QVERIFY(activeLabel->property("text").toString().startsWith("Solid Round"));
+
         click("brushSettingsButton");
-        QQuickItem *preview = waitFor("brushPreview");
-        QVERIFY(preview);
-        QVERIFY(preview->width() > 200 && preview->height() > 80);
+        QQuickItem *panel = waitFor("brushPanel");
+        QVERIFY(panel);
+        QVERIFY(panel->width() > 600); // two columns on a wide window
+
+        // Picking a preset by tapping its entry; its thumbnail is drawn by the brush engine.
+        click("preset_builtin.clean-ink");
+        QTRY_COMPARE(lib->currentId(), QStringLiteral("builtin.clean-ink"));
+        QTRY_VERIFY(activeLabel->property("text").toString().startsWith("Clean Ink"));
+        click("favorite_builtin.clean-ink");
+        QTRY_VERIFY(lib->currentFavorite());
 
         // Tap on the sliders' grooves, as with a finger.
         const auto tapSlider = [&](const QString &name, qreal fraction) {
@@ -369,27 +392,79 @@ private slots:
         };
         tapSlider("brushOpacitySlider", 0.4);
         QTRY_VERIFY(std::abs(m_canvas->brushOpacity() - 0.4) < 0.03);
+        QVERIFY(lib->currentModified()); // a session edit: the preset itself is unchanged
+        QCOMPARE(lib->savedSettings(lib->currentId()).opacity, 1.0);
         tapSlider("smoothingSlider", 0.5);
         QTRY_VERIFY(std::abs(m_canvas->smoothing() - 50) <= 2);
         tapSlider("pressureMinSlider", 0.0);
         QTRY_COMPARE(m_canvas->pressureMinSize(), 0.0);
+        click("advancedButton");
         tapSlider("pressureFirmnessSlider", 0.97);
         QTRY_VERIFY(m_canvas->pressureFirmness() >= 0.9); // towards "Firm"
-        QVERIFY(findButton("Brush… " + QString::number(qRound(m_canvas->brushOpacity() * 100)) + "%"));
-        snap("brush_settings");
 
-        // A tap outside closes the popup without painting.
+        // The scratchpad draws with the working brush and never touches the document.
         const int steps = m_canvas->history().undoCount();
-        const QPoint outside = docToScene(QPointF(1600, 1200));
-        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, outside);
-        QTRY_VERIFY(!find("brushPreview"));
+        QQuickItem *pad = waitFor("brushScratchpad");
+        QVERIFY(pad);
+        const QPoint a = centerOf(pad, 0.15, 0.5), b = centerOf(pad, 0.85, 0.5);
+        QTest::mousePress(m_window, Qt::LeftButton, Qt::NoModifier, a);
+        for (int i = 1; i <= 12; ++i)
+            QTest::mouseMove(m_window, a + (b - a) * i / 12);
+        QTest::mouseRelease(m_window, Qt::LeftButton, Qt::NoModifier, b);
+        const QImage scratch = qobject_cast<BrushScratchpad *>(pad)->layer();
+        QVERIFY(qAlpha(scratch.pixel(pad->mapFromScene(centerOf(pad)).toPoint())) > 0);
         QCOMPARE(m_canvas->history().undoCount(), steps);
-        QCOMPARE(alphaAtDoc(QPointF(1600, 1200)), 0);
+        snap("brush_panel");
 
-        // The next stroke uses the settings: uniform 40 % (± one slider step).
+        // A tap outside (on the canvas, left of the panel) closes the panel without painting.
+        const QPoint outside = docToScene(QPointF(300, 1300));
+        QVERIFY(!panel->contains(panel->mapFromScene(outside)));
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, outside);
+        QTRY_VERIFY(!find("brushPanel"));
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        QCOMPARE(alphaAtDoc(QPointF(300, 1300)), 0);
+
+        // The next stroke uses the working settings: uniform 40 % (± one slider step).
         draw({{300, 300}, {900, 300}, {600, 320}});
-        const int alpha = alphaAtDoc(QPointF(600, 305));
+        const int alpha = alphaAtDoc(QPointF(450, 300)); // Clean Ink is 8 px wide
         QVERIFY2(std::abs(alpha - qRound(m_canvas->brushOpacity() * 255)) <= 1, qPrintable(QString::number(alpha)));
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+
+        // Choosing an eraser preset switches to the eraser tool; its size is its own.
+        click("brushSettingsButton");
+        QVERIFY(waitFor("brushPanel"));
+        click("advancedButton"); // collapse again, so the buttons below are in view
+        click("preset_builtin.soft-eraser");
+        QTRY_COMPARE(m_canvas->tool(), CanvasItem::Eraser);
+        QCOMPARE(m_canvas->brushSize(), 70);
+        click("preset_builtin.clean-ink");
+        QTRY_COMPARE(m_canvas->tool(), CanvasItem::Brush);
+        QTRY_VERIFY(std::abs(m_canvas->brushOpacity() - 0.4) < 0.03); // the session edit is still there
+
+        // Save as a new custom brush through the name dialog.
+        click("saveAsNewButton");
+        QQuickItem *field = waitFor("brushNameField");
+        QVERIFY(field);
+        QTRY_VERIFY(field->hasActiveFocus());
+        QTest::keyClick(m_window, Qt::Key_A, Qt::ControlModifier);
+        for (const QChar ch : QStringLiteral("Light ink"))
+            QTest::keyClick(m_window, ch.toLatin1());
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QTRY_COMPARE(lib->currentName(), QStringLiteral("Light ink"));
+        QVERIFY(!lib->currentBuiltIn());
+        QVERIFY(std::abs(lib->savedSettings(lib->currentId()).opacity - 0.4) < 0.03);
+        QVERIFY(find("preset_" + lib->currentId()));
+        snap("brush_panel_custom");
+        lib->deleteCurrent();
+
+        // A narrow (phone-sized) window stacks the panel in one scrolling column.
+        const QSize wideSize = m_window->size();
+        m_window->resize(420, 860);
+        QTRY_VERIFY(panel->width() < 420);
+        QTRY_VERIFY(find("brushScratchpad"));
+        snap("brush_panel_narrow");
+        m_window->resize(wideSize);
+        QTRY_VERIFY(panel->width() > 600);
     }
 
     void overwriteOfAProviderDocumentIsConfirmed()

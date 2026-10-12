@@ -5,6 +5,7 @@
 #include "ProjectIo.h"
 #include "RasterDocument.h"
 #include "RecoveryManager.h"
+#include "BrushLibrary.h"
 #include "BrushSettings.h"
 #include "StrokeEngine.h"
 #include "TileSnapshot.h"
@@ -33,8 +34,10 @@ class CanvasItem : public QQuickPaintedItem
     QML_ELEMENT
     Q_PROPERTY(int brushSize READ brushSize WRITE setBrushSize NOTIFY brushSizeChanged)
     Q_PROPERTY(QColor brushColor READ brushColor WRITE setBrushColor NOTIFY brushColorChanged)
-    // Brush settings, captured when a stroke starts (see StrokeEngine). Pressure settings only
-    // matter for pens that report pressure.
+    // The brush presets and the paint and eraser working brushes (see BrushLibrary).
+    Q_PROPERTY(BrushLibrary *brushes READ brushes CONSTANT)
+    // Shortcuts to settings of the current tool's working brush, captured when a stroke starts
+    // (see StrokeEngine). Pressure settings only matter for pens that report pressure.
     Q_PROPERTY(qreal brushOpacity READ brushOpacity WRITE setBrushOpacity NOTIFY brushSettingsChanged)
     Q_PROPERTY(qreal pressureMinSize READ pressureMinSize WRITE setPressureMinSize NOTIFY brushSettingsChanged)
     Q_PROPERTY(qreal pressureFirmness READ pressureFirmness WRITE setPressureFirmness NOTIFY brushSettingsChanged)
@@ -82,19 +85,24 @@ public:
 
     explicit CanvasItem(QQuickItem *parent = nullptr);
 
-    int brushSize() const { return m_brushSize; }
+    BrushLibrary *brushes() { return &m_brushes; }
+    const BrushLibrary *brushes() const { return &m_brushes; }
+    // The settings a new stroke uses: the eraser's or the paint brush's working settings.
+    BrushSettings strokeSettings(bool erase) const { return m_brushes.settings(erase); }
+
+    int brushSize() const;
     void setBrushSize(int size);
     QColor brushColor() const { return m_brushColor; }
     void setBrushColor(const QColor &color);
     Tool tool() const { return m_tool; }
     void setTool(Tool tool);
-    qreal brushOpacity() const { return m_brushOpacity; }
+    qreal brushOpacity() const;
     void setBrushOpacity(qreal opacity);
-    qreal pressureMinSize() const { return m_pressureMinSize; }
+    qreal pressureMinSize() const;
     void setPressureMinSize(qreal fraction);
-    qreal pressureFirmness() const { return m_pressureFirmness; }
+    qreal pressureFirmness() const;
     void setPressureFirmness(qreal firmness);
-    int smoothing() const { return m_smoothing; }
+    int smoothing() const;
     void setSmoothing(int smoothing);
     qreal zoom() const { return m_view.zoom(); }
     QSize documentSize() const { return m_document.size(); }
@@ -249,8 +257,6 @@ private:
     void cancelStroke();
     void advanceAirbrush();
     StrokeSample strokeSample(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt) const;
-    // The settings a new stroke uses: the paint or eraser brush with the current controls applied.
-    BrushSettings strokeSettings(bool erase) const;
     void beginPan(const QPointF &viewPos);
     void continuePan(const QPointF &viewPos);
     void endPan();
@@ -353,20 +359,14 @@ private:
     ViewTransform m_view;
     bool m_viewInitialized = false;
 
-    int m_brushSize = 12;
     QColor m_brushColor = QColor(20, 20, 20);
     Tool m_tool = Brush;
-    qreal m_brushOpacity = 1.0;
-    qreal m_pressureMinSize = StrokeSpacer::MinPressureFraction;
-    qreal m_pressureFirmness = 0.0;
-    int m_smoothing = 0;
 
     Gesture m_gesture = Gesture::None;
     PointerKind m_strokeKind = PointerKind::Mouse;
     BrushMode m_strokeMode = BrushMode::Paint;
-    // The brushes strokes start from (the controls above are applied on top, see strokeSettings).
-    BrushSettings m_paintBrush;
-    BrushSettings m_eraserBrush;
+    BrushBlend m_strokeBlend = BrushBlend::Paint;
+    BrushLibrary m_brushes{this};
     // The stroke in progress, created with the settings at stroke start. Sample times come from
     // m_strokeClock; while an airbrush is held still, m_airbrushTimer advances it.
     std::unique_ptr<StrokeEngine> m_engine;

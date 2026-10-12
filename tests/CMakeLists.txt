@@ -17,7 +17,12 @@ target_link_libraries(tst_recovery PRIVATE drawcore Qt6::Test)
 add_test(NAME tst_recovery COMMAND tst_recovery)
 
 # Drives the real CanvasItem in a window with synthetic mouse, pen and touch events.
-qt_add_executable(tst_canvas tst_canvas.cpp ../src/app/CanvasItem.cpp ../src/app/CanvasItem.h)
+set(CANVAS_SOURCES
+    ../src/app/CanvasItem.cpp ../src/app/CanvasItem.h
+    ../src/app/BrushLibrary.cpp ../src/app/BrushLibrary.h
+    ../src/app/BrushScratchpad.cpp ../src/app/BrushScratchpad.h
+    ../src/app/BrushThumbnails.cpp ../src/app/BrushThumbnails.h)
+qt_add_executable(tst_canvas tst_canvas.cpp ${CANVAS_SOURCES})
 target_include_directories(tst_canvas PRIVATE ../src/app)
 target_link_libraries(tst_canvas PRIVATE drawcore Qt6::Quick Qt6::Test)
 add_test(NAME tst_canvas COMMAND tst_canvas)
@@ -28,7 +33,7 @@ target_link_libraries(tst_ui PRIVATE drawapp_ui drawapp_uiplugin Qt6::Test)
 add_test(NAME tst_ui COMMAND tst_ui)
 
 # Real CanvasItem under synthetic strokes with autosave and an async save (not part of ctest).
-qt_add_executable(bench_canvas bench_canvas.cpp ../src/app/CanvasItem.cpp ../src/app/CanvasItem.h)
+qt_add_executable(bench_canvas bench_canvas.cpp ${CANVAS_SOURCES})
 target_include_directories(bench_canvas PRIVATE ../src/app)
 target_link_libraries(bench_canvas PRIVATE drawcore Qt6::Quick Qt6::Test)
 

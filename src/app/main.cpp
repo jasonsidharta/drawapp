@@ -1,3 +1,4 @@
+#include "BrushThumbnails.h"
 #include "CanvasItem.h"
 #include "RecoveryManager.h"
 
@@ -41,6 +42,7 @@ int main(int argc, char *argv[])
     RecoveryManager recovery(recoveryDir);
 
     QQmlApplicationEngine engine;
+    engine.addImageProvider(QStringLiteral("brushthumb"), new BrushThumbnails);
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
                      [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("DrawApp", "Main");
@@ -56,6 +58,10 @@ int main(int argc, char *argv[])
         if (ok && interval > 0)
             canvas->setAutosaveInterval(interval);
         canvas->setRecoveryManager(&recovery);
+        QString brushFile = qEnvironmentVariable("DRAWAPP_BRUSH_FILE");
+        if (brushFile.isEmpty())
+            brushFile = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("brushes.json"));
+        canvas->brushes()->setStorePath(brushFile);
     }
 
     const int result = app.exec();

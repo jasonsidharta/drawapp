@@ -95,9 +95,11 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     connect(&m_io, &ProjectIo::saveFinished, this, &CanvasItem::onSaveFinished);
     connect(&m_io, &ProjectIo::openFinished, this, &CanvasItem::onOpenFinished);
     connect(&m_io, &ProjectIo::exportFinished, this, &CanvasItem::onExportFinished);
-    m_paintBrush.name = QStringLiteral("Solid Round");
-    m_eraserBrush.name = QStringLiteral("Hard Eraser");
-    m_eraserBrush.blend = BrushBlend::Erase;
+    connect(&m_brushes, &BrushLibrary::currentChanged, this, [this] {
+        emit brushSizeChanged();
+        emit brushSettingsChanged();
+    });
+    connect(&m_brushes, &BrushLibrary::toolRequested, this, [this](bool eraser) { setTool(eraser ? Eraser : Brush); });
     // About one display frame: an airbrush held still keeps spraying at its rate.
     m_airbrushTimer.setInterval(16);
     m_airbrushTimer.setTimerType(Qt::PreciseTimer);
@@ -106,49 +108,59 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     watchWindow(window());
 }
 
+int CanvasItem::brushSize() const
+{
+    return int(std::lround(strokeSettings(m_tool == Eraser).size));
+}
+
+qreal CanvasItem::brushOpacity() const
+{
+    return strokeSettings(m_tool == Eraser).opacity;
+}
+
+qreal CanvasItem::pressureMinSize() const
+{
+    const PressureMapping &m = strokeSettings(m_tool == Eraser).pressureSize;
+    return m.enabled ? m.minimum : 1.0;
+}
+
+qreal CanvasItem::pressureFirmness() const
+{
+    const PressureMapping &m = strokeSettings(m_tool == Eraser).pressureSize;
+    return std::log(std::clamp(m.gamma, PressureResponse::MinGamma, PressureResponse::MaxGamma))
+         / std::log(PressureResponse::MaxGamma);
+}
+
+int CanvasItem::smoothing() const
+{
+    return strokeSettings(m_tool == Eraser).smoothing;
+}
+
 void CanvasItem::setBrushSize(int size)
 {
-    size = std::clamp(size, MinBrushSize, MaxBrushSize);
-    if (size == m_brushSize)
-        return;
-    m_brushSize = size;
-    emit brushSizeChanged();
+    m_brushes.setValue(QStringLiteral("size"), std::clamp(size, MinBrushSize, MaxBrushSize));
 }
 
 void CanvasItem::setBrushOpacity(qreal opacity)
 {
-    opacity = std::clamp(opacity, MinBrushOpacity, 1.0);
-    if (qFuzzyCompare(opacity, m_brushOpacity))
-        return;
-    m_brushOpacity = opacity;
-    emit brushSettingsChanged();
+    m_brushes.setValue(QStringLiteral("opacity"), std::clamp(opacity, MinBrushOpacity, 1.0));
 }
 
 void CanvasItem::setPressureMinSize(qreal fraction)
 {
-    fraction = std::clamp(fraction, 0.0, 1.0);
-    if (fraction == m_pressureMinSize)
-        return;
-    m_pressureMinSize = fraction;
-    emit brushSettingsChanged();
+    m_brushes.setValue(QStringLiteral("pressureSize.enabled"), true);
+    m_brushes.setValue(QStringLiteral("pressureSize.minimum"), std::clamp(fraction, 0.0, 1.0));
 }
 
 void CanvasItem::setPressureFirmness(qreal firmness)
 {
-    firmness = std::clamp(firmness, -1.0, 1.0);
-    if (firmness == m_pressureFirmness)
-        return;
-    m_pressureFirmness = firmness;
-    emit brushSettingsChanged();
+    m_brushes.setValue(QStringLiteral("pressureSize.gamma"),
+                       PressureResponse::gammaForFirmness(std::clamp(firmness, -1.0, 1.0)));
 }
 
 void CanvasItem::setSmoothing(int smoothing)
 {
-    smoothing = std::clamp(smoothing, 0, 100);
-    if (smoothing == m_smoothing)
-        return;
-    m_smoothing = smoothing;
-    emit brushSettingsChanged();
+    m_brushes.setValue(QStringLiteral("smoothing"), std::clamp(smoothing, 0, 100));
 }
 
 void CanvasItem::setBrushColor(const QColor &color)
@@ -167,7 +179,10 @@ void CanvasItem::setTool(Tool tool)
     if (tool == m_tool)
         return;
     m_tool = tool;
+    m_brushes.setEraserSlot(tool == Eraser);
     emit toolChanged();
+    emit brushSizeChanged();
+    emit brushSettingsChanged();
 }
 
 QString CanvasItem::documentTitle() const
@@ -1122,17 +1137,6 @@ void CanvasItem::keyReleaseEvent(QKeyEvent *event)
     QQuickPaintedItem::keyReleaseEvent(event);
 }
 
-BrushSettings CanvasItem::strokeSettings(bool erase) const
-{
-    BrushSettings s = erase ? m_eraserBrush : m_paintBrush;
-    s.size = m_brushSize;
-    s.opacity = m_brushOpacity;
-    s.pressureSize.minimum = m_pressureMinSize;
-    s.pressureSize.gamma = PressureResponse::gammaForFirmness(m_pressureFirmness);
-    s.smoothing = m_smoothing;
-    return s;
-}
-
 StrokeSample CanvasItem::strokeSample(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt) const
 {
     StrokeSample sample;
@@ -1169,6 +1173,7 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
     // Every brush setting is fixed for the whole stroke here. The smoothing distance is set in view
     // pixels, so it feels the same at every zoom level.
     const BrushSettings settings = strokeSettings(m_strokeMode == BrushMode::Erase);
+    m_strokeBlend = settings.blend;
     m_engine = std::make_unique<StrokeEngine>(settings, m_brushColor, ++m_strokeCount,
                                               settings.smoothing / 100.0 * MaxSmoothingRadius / m_view.zoom());
     m_strokeClock.start();
@@ -1247,7 +1252,9 @@ void CanvasItem::endStroke()
             strokePixelsChanged(changed, m_engine->dabCount() - dabs);
         }
         commitPixels(m_strokeLayerId, std::move(m_strokeBefore),
-                     m_strokeMode == BrushMode::Erase ? QStringLiteral("Eraser stroke") : QStringLiteral("Brush stroke"));
+                     m_strokeBlend == BrushBlend::Erase    ? QStringLiteral("Eraser stroke")
+                     : m_strokeBlend == BrushBlend::Smudge ? QStringLiteral("Smudge stroke")
+                                                           : QStringLiteral("Brush stroke"));
         m_strokeBefore = TileSnapshot();
     }
     m_engine.reset();

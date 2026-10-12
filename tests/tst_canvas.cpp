@@ -1,6 +1,8 @@
 // End-to-end checks of CanvasItem in a real, rendered window. Input is synthetic: mouse and
 // touch through QTest, pen through constructed QTabletEvents. Pen hardware is not involved.
 
+#include "BrushScratchpad.h"
+#include "BrushThumbnails.h"
 #include "CanvasItem.h"
 #include "FakeProvider.h"
 #include "ProjectFile.h"
@@ -1710,6 +1712,198 @@ private slots:
         provider.revoked.insert(uri);
         QVERIFY(exportPng(QUrl(uri)).contains("permission"));
         m_canvas->projectIo().setProviderForTesting(nullptr);
+    }
+
+    // --- brush presets ---
+    void temporarySizeNeverChangesASavedPreset()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("brushes.json");
+        BrushLibrary *lib = m_canvas->brushes();
+        lib->setStorePath(path);
+        QVERIFY(lib->select(QStringLiteral("builtin.clean-ink")));
+        m_canvas->setBrushSize(40);
+        QVERIFY(!lib->currentModified());
+        QVERIFY(lib->currentSizeChanged());
+        QCOMPARE(lib->savedSettings(lib->currentId()).size, 8.0);
+        mouseStroke({{100, 300}, {600, 300}});
+        const int wide = verticalExtent(toDoc(QPointF(350, 300)));
+        QVERIFY2(wide >= 38 && wide <= 42, qPrintable(QString::number(wide)));
+        lib->toggleFavorite(lib->currentId());
+        lib->flush();
+        {
+            // Selection and favourite persist; the temporary size does not.
+            BrushLibrary reloaded;
+            reloaded.setStorePath(path);
+            QCOMPARE(reloaded.selectedId(false), QStringLiteral("builtin.clean-ink"));
+            QVERIFY(reloaded.currentFavorite());
+            QCOMPARE(reloaded.settings(false).size, 8.0);
+        }
+        // Only an explicit save stores it (as saved changes to the built-in) ...
+        lib->saveCurrent();
+        QCOMPARE(lib->savedSettings(lib->currentId()).size, 40.0);
+        QVERIFY(lib->currentHasSavedChanges());
+        {
+            BrushLibrary reloaded;
+            reloaded.setStorePath(path);
+            QCOMPARE(reloaded.settings(false).size, 40.0);
+        }
+        // ... and reset brings back the original definition.
+        lib->resetCurrent();
+        QCOMPARE(m_canvas->brushSize(), 8);
+        QVERIFY(!lib->currentHasSavedChanges());
+        BrushLibrary reloaded;
+        reloaded.setStorePath(path);
+        QCOMPARE(reloaded.settings(false).size, 8.0);
+    }
+
+    void customPresetsSaveRenameRevertDelete()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("brushes.json");
+        BrushLibrary *lib = m_canvas->brushes();
+        lib->setStorePath(path);
+        m_canvas->setBrushOpacity(0.5);
+        const QString id = lib->saveAsNew(QStringLiteral("Half"));
+        QVERIFY(id.startsWith("custom."));
+        QCOMPARE(lib->currentId(), id);
+        QVERIFY(!lib->currentBuiltIn());
+        QCOMPARE(lib->savedSettings(id).opacity, 0.5);
+        lib->renameCurrent(QStringLiteral("Half tone"));
+        m_canvas->setBrushOpacity(0.8);
+        QVERIFY(lib->currentModified());
+        lib->resetCurrent(); // a custom preset reverts to its saved settings
+        QCOMPARE(m_canvas->brushOpacity(), 0.5);
+        {
+            BrushLibrary reloaded;
+            reloaded.setStorePath(path);
+            QCOMPARE(reloaded.selectedId(false), id);
+            QCOMPARE(reloaded.currentName(), QStringLiteral("Half tone"));
+            QCOMPARE(reloaded.settings(false).opacity, 0.5);
+        }
+        QVERIFY(lib->deleteCurrent());
+        QCOMPARE(lib->currentId(), BrushPresets::defaultPaintId());
+        QVERIFY(!lib->hasPreset(id));
+        BrushLibrary reloaded;
+        reloaded.setStorePath(path);
+        QVERIFY(!reloaded.hasPreset(id));
+        QVERIFY(!lib->select(QStringLiteral("custom.404")));
+    }
+
+    void unusableBrushFilesAreLeftUntouched()
+    {
+        QTemporaryDir dir;
+        for (const QByteArray &bytes : {QByteArray("garbage"),
+                                        QByteArray(R"({"format":"drawapp-brushes","version":9})")}) {
+            const QString path = dir.filePath("brushes.json");
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            f.write(bytes);
+            f.close();
+            BrushLibrary lib;
+            lib.setStorePath(path);
+            QVERIFY(!lib.storeStatus().isEmpty());
+            QCOMPARE(lib.currentId(), BrushPresets::defaultPaintId()); // the built-ins still work
+            lib.toggleFavorite(QStringLiteral("builtin.clean-ink"));
+            lib.select(QStringLiteral("builtin.sketch-pencil"));
+            lib.flush();
+            QCOMPARE(fileBytes(path), bytes);
+        }
+    }
+
+    void eraserPresetsSelectTheEraserTool()
+    {
+        BrushLibrary *lib = m_canvas->brushes();
+        m_canvas->setBrushSize(20);
+        QVERIFY(lib->select(QStringLiteral("builtin.soft-eraser")));
+        QCOMPARE(m_canvas->tool(), CanvasItem::Eraser);
+        QCOMPARE(m_canvas->brushSize(), 70);
+        m_canvas->setTool(CanvasItem::Brush);
+        QCOMPARE(m_canvas->brushSize(), 20); // each tool keeps its own working brush
+        QCOMPARE(lib->selectedId(true), QStringLiteral("builtin.soft-eraser"));
+        QVERIFY(lib->select(QStringLiteral("builtin.sketch-pencil")));
+        QCOMPARE(m_canvas->tool(), CanvasItem::Brush);
+    }
+
+    void smudgeIsOneUndoStepOnTheActiveLayer()
+    {
+        BrushLibrary *lib = m_canvas->brushes();
+        m_canvas->setBrushSize(60);
+        mouseStroke({{150, 300}, {350, 300}});
+        m_canvas->setBrushColor(QColor(0, 120, 240));
+        mouseStroke({{350, 300}, {550, 300}});
+        const QImage before = doc().copy();
+        const int steps = m_canvas->history().undoCount();
+        QVERIFY(lib->select(QStringLiteral("builtin.blend-smudge")));
+        mouseStroke({{250, 300}, {300, 302}, {350, 300}, {400, 298}, {450, 300}});
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Smudge stroke"));
+        const QRgb mixed = doc().pixel(toDoc(QPointF(380, 300)).toPoint());
+        QVERIFY2(qRed(mixed) > 0 || qGreen(mixed) > 120, qPrintable(QString::number(mixed, 16))); // dark paint pushed into blue
+        QVERIFY(doc() != before);
+        m_canvas->undo();
+        QCOMPARE(doc(), before);
+    }
+
+    void airbrushBuildsUpWhileHeldStill()
+    {
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.soft-airbrush")));
+        const QPoint quick(200, 300), held(500, 300);
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, quick);
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, quick);
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, held);
+        QTest::qWait(500); // no input events: the airbrush timer keeps spraying
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, held);
+        const int a = alphaAt(toDoc(QPointF(quick))), b = alphaAt(toDoc(QPointF(held)));
+        QVERIFY2(b > a + 40, qPrintable(QString("%1 %2").arg(a).arg(b)));
+        QCOMPARE(m_canvas->history().undoCount(), 2);
+    }
+
+    void scratchpadNeverTouchesTheDocument()
+    {
+        auto *pad = new BrushScratchpad(m_window->contentItem());
+        pad->setSize(QSizeF(300, 120));
+        pad->setCanvas(m_canvas);
+        const QImage before = doc().copy();
+        pad->beginStroke(QPointF(20, 60), 1.0);
+        for (int x = 40; x <= 280; x += 20)
+            pad->continueStroke(QPointF(x, 60), 1.0);
+        pad->endStroke();
+        QCOMPARE(qAlpha(pad->layer().pixel(150, 60)), 255);
+        QCOMPARE(doc(), before);
+        QVERIFY(!m_canvas->canUndo());
+        QVERIFY(!m_canvas->isModified());
+        m_canvas->setTool(CanvasItem::Eraser); // erasers get something to erase
+        QCOMPARE(qAlpha(pad->layer().pixel(150, 30)), 255);
+        pad->beginStroke(QPointF(20, 30), 1.0);
+        pad->continueStroke(QPointF(280, 30), 1.0);
+        pad->endStroke();
+        QCOMPARE(qAlpha(pad->layer().pixel(150, 30)), 0);
+        QCOMPARE(doc(), before);
+        delete pad;
+    }
+
+    void thumbnailsAreDrawnByTheEngine()
+    {
+        for (const BrushPreset &p : BrushPresets::builtIns()) {
+            // The same thumbnail without a mark: plain paper, or the colour bands left untouched.
+            BrushSettings untouched;
+            if (p.settings.blend != BrushBlend::Paint) {
+                untouched.blend = BrushBlend::Smudge;
+                untouched.smudgeStrength = 0;
+            } else {
+                untouched.opacity = 0.01;
+                untouched.size = 1;
+            }
+            const QImage reference = BrushThumbnails::render(untouched, QSize(168, 52));
+            const QImage thumb = BrushThumbnails::render(p.settings, QSize(168, 52));
+            QCOMPARE(thumb.size(), QSize(168, 52));
+            int marked = 0;
+            for (int y = 0; y < 52; ++y)
+                for (int x = 0; x < 168; ++x)
+                    marked += thumb.pixel(x, y) != reference.pixel(x, y);
+            QVERIFY2(marked > 150, qPrintable(QString("%1: %2").arg(p.id).arg(marked)));
+        }
     }
 
     void shutdownKeepsOrRemovesRecovery()

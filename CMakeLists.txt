@@ -14,6 +14,7 @@ option(DRAWAPP_BUILD_TESTS "Build unit tests and benchmarks" ON)
 # Document model and raster operations: QtGui only, no Qt Quick, so they can be tested headless.
 add_library(drawcore STATIC
     src/core/AndroidDocumentProvider.cpp
+    src/core/BrushPresetStore.cpp src/core/BrushPresetStore.h
     src/core/BrushPresets.cpp src/core/BrushPresets.h
     src/core/BrushSettings.cpp src/core/BrushSettings.h
     src/core/BrushTips.cpp src/core/BrushTips.h
@@ -43,9 +44,11 @@ qt_add_library(drawapp_ui STATIC)
 qt_add_qml_module(drawapp_ui
     URI DrawApp
     VERSION 1.0
-    QML_FILES src/app/Main.qml
+    QML_FILES src/app/Main.qml src/app/BrushPanel.qml
     SOURCES src/app/CanvasItem.cpp src/app/CanvasItem.h
-            src/app/BrushPreview.cpp src/app/BrushPreview.h
+            src/app/BrushLibrary.cpp src/app/BrushLibrary.h
+            src/app/BrushScratchpad.cpp src/app/BrushScratchpad.h
+            src/app/BrushThumbnails.cpp src/app/BrushThumbnails.h
 )
 # The generated QML type registration includes <CanvasItem.h>.
 target_include_directories(drawapp_ui PUBLIC src/app)

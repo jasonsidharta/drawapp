@@ -247,15 +247,48 @@ ApplicationWindow {
                 height: sizeSlider.height
                 verticalAlignment: Text.AlignVCenter
             }
+            Label { text: "Opacity"; height: sizeSlider.height; verticalAlignment: Text.AlignVCenter }
+            Slider {
+                objectName: "toolbarOpacitySlider"
+                width: 100
+                from: 1
+                to: 100
+                stepSize: 1
+                value: Math.round(canvas.brushOpacity * 100)
+                onMoved: canvas.brushOpacity = value / 100
+            }
+            Label {
+                text: Math.round(canvas.brushOpacity * 100) + "%"
+                width: 40
+                height: sizeSlider.height
+                verticalAlignment: Text.AlignVCenter
+            }
+            // The active brush, always visible: its real stroke and name. Opens the brush panel.
             ToolButton {
                 id: brushSettingsButton
                 objectName: "brushSettingsButton"
-                text: "Brush… " + Math.round(canvas.brushOpacity * 100) + "%"
                 checkable: true
                 checked: brushPopup.visible
                 onClicked: brushPopup.visible ? brushPopup.close() : brushPopup.open()
-                ToolTip.visible: hovered
-                ToolTip.text: "Opacity, pen pressure and smoothing"
+                ToolTip.visible: hovered && !brushPopup.visible
+                ToolTip.text: "Brushes: presets, settings and scratchpad"
+                contentItem: Row {
+                    spacing: 6
+                    Image {
+                        anchors.verticalCenter: parent.verticalCenter
+                        source: canvas.brushes.currentThumbnail
+                        sourceSize: Qt.size(168, 52)
+                        width: 78
+                        height: 24
+                        fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                    }
+                    Label {
+                        objectName: "activeBrushLabel"
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: canvas.brushes.currentName + (canvas.brushes.currentModified ? " *" : "") + "  ▾"
+                    }
+                }
 
                 Popup {
                     id: brushPopup
@@ -263,8 +296,8 @@ ApplicationWindow {
                     y: parent.height
                     // Inside the window on small screens; scrolls when taller than the window.
                     margins: 8
-                    width: Math.min(window.width - 16, 380)
-                    height: Math.min(brushColumn.implicitHeight + topPadding + bottomPadding,
+                    width: Math.min(window.width - 16, 780)
+                    height: Math.min(brushPanel.implicitHeight + topPadding + bottomPadding,
                                      window.height - 24 - brushSettingsButton.height)
                     padding: 10
                     // Modal (without dimming): a tap outside closes it without painting.
@@ -273,148 +306,16 @@ ApplicationWindow {
                     onClosed: canvas.forceActiveFocus()
 
                     ScrollView {
+                        id: brushScroll
                         anchors.fill: parent
                         contentWidth: availableWidth
                         clip: true
 
-                        ColumnLayout {
-                            id: brushColumn
-                            width: parent.width
-                            spacing: 4
-
-                            BrushPreview {
-                                objectName: "brushPreview"
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 104
-                                brushSize: canvas.brushSize
-                                color: canvas.brushColor
-                                brushOpacity: canvas.brushOpacity
-                                pressureMinSize: canvas.pressureMinSize
-                                pressureFirmness: canvas.pressureFirmness
-                                smoothing: canvas.smoothing
-                                eraser: canvas.tool === CanvasItem.Eraser
-                            }
-                            Label {
-                                Layout.fillWidth: true
-                                wrapMode: Text.Wrap
-                                font.pixelSize: 11
-                                text: "Preview: pressure rises and falls along the stroke; the box shows size against pressure."
-                            }
-
-                            GridLayout {
-                                Layout.fillWidth: true
-                                columns: 3
-                                columnSpacing: 6
-                                rowSpacing: 0
-
-                                Label { text: "Opacity" }
-                                Slider {
-                                    Layout.minimumHeight: 32 // a comfortable touch target
-                                    objectName: "brushOpacitySlider"
-                                    Layout.fillWidth: true
-                                    from: 1
-                                    to: 100
-                                    stepSize: 1
-                                    value: Math.round(canvas.brushOpacity * 100)
-                                    onMoved: canvas.brushOpacity = value / 100
-                                }
-                                Label { text: Math.round(canvas.brushOpacity * 100) + "%"; Layout.preferredWidth: 44 }
-
-                                Label { text: "Size" }
-                                Slider {
-                                    Layout.minimumHeight: 32
-                                    Layout.fillWidth: true
-                                    from: 1
-                                    to: 256
-                                    stepSize: 1
-                                    value: canvas.brushSize
-                                    onMoved: canvas.brushSize = Math.round(value)
-                                }
-                                Label { text: canvas.brushSize + " px"; Layout.preferredWidth: 44 }
-
-                                Label {
-                                    Layout.columnSpan: 3
-                                    Layout.topMargin: 6
-                                    text: "Pen pressure"
-                                    font.bold: true
-                                }
-                                Label { text: "Lightest" }
-                                Slider {
-                                    Layout.minimumHeight: 32 // a comfortable touch target
-                                    objectName: "pressureMinSlider"
-                                    Layout.fillWidth: true
-                                    from: 0
-                                    to: 100
-                                    stepSize: 1
-                                    value: Math.round(canvas.pressureMinSize * 100)
-                                    onMoved: canvas.pressureMinSize = value / 100
-                                    // Delayed, so the tip does not cover the next slider while this one is used.
-                                    ToolTip.delay: 800
-                                    ToolTip.visible: hovered && !pressed
-                                    ToolTip.text: "Size at the lightest pressure, as a share of the brush size (100% = pressure does not change size)"
-                                }
-                                Label { text: Math.round(canvas.pressureMinSize * 100) + "%"; Layout.preferredWidth: 44 }
-
-                                Label { text: "Response" }
-                                Slider {
-                                    Layout.minimumHeight: 32 // a comfortable touch target
-                                    objectName: "pressureFirmnessSlider"
-                                    Layout.fillWidth: true
-                                    from: -100
-                                    to: 100
-                                    stepSize: 5
-                                    value: Math.round(canvas.pressureFirmness * 100)
-                                    onMoved: canvas.pressureFirmness = value / 100
-                                    // Delayed, so the tip does not cover the next slider while this one is used.
-                                    ToolTip.delay: 800
-                                    ToolTip.visible: hovered && !pressed
-                                    ToolTip.text: "Soft: light pressure already draws large. Firm: needs more pressure."
-                                }
-                                Label {
-                                    Layout.preferredWidth: 44
-                                    text: canvas.pressureFirmness < -0.02 ? "Soft" : (canvas.pressureFirmness > 0.02 ? "Firm" : "Linear")
-                                }
-
-                                Label {
-                                    Layout.columnSpan: 3
-                                    Layout.topMargin: 6
-                                    text: "Smoothing"
-                                    font.bold: true
-                                }
-                                Label { text: "Strength" }
-                                Slider {
-                                    Layout.minimumHeight: 32 // a comfortable touch target
-                                    objectName: "smoothingSlider"
-                                    Layout.fillWidth: true
-                                    from: 0
-                                    to: 100
-                                    stepSize: 1
-                                    value: canvas.smoothing
-                                    onMoved: canvas.smoothing = Math.round(value)
-                                    // Delayed, so the tip does not cover the next slider while this one is used.
-                                    ToolTip.delay: 800
-                                    ToolTip.visible: hovered && !pressed
-                                    ToolTip.text: "The brush trails the pen by up to " + Math.round(canvas.smoothing * 0.4)
-                                                  + " screen pixels and catches up when you lift it"
-                                }
-                                Label { text: canvas.smoothing === 0 ? "Off" : canvas.smoothing; Layout.preferredWidth: 44 }
-                            }
-                            Label {
-                                Layout.fillWidth: true
-                                wrapMode: Text.Wrap
-                                font.pixelSize: 11
-                                text: "Mouse and touch have no pressure and always draw at full size. "
-                                      + "Settings apply from the next stroke."
-                            }
-                            Button {
-                                text: "Reset brush settings"
-                                onClicked: {
-                                    canvas.brushOpacity = 1
-                                    canvas.pressureMinSize = 0.1
-                                    canvas.pressureFirmness = 0
-                                    canvas.smoothing = 0
-                                }
-                            }
+                        BrushPanel {
+                            id: brushPanel
+                            objectName: "brushPanel"
+                            canvas: canvas
+                            width: brushScroll.availableWidth
                         }
                     }
                 }
