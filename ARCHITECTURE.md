@@ -1,7 +1,8 @@
 # Architecture
 
-State: milestone 3 (raster layers) on top of milestone 2 (crash recovery), milestone 1 (undo/redo,
-project save/open, PNG export) and the milestone 0 prototype. Everything described here exists in
+State: milestone 6 (artist brush system) on top of milestones 5 (Android save safety), 4 (background
+file operations), 3 (raster layers), 2 (crash recovery), 1 (undo/redo, project save/open, PNG
+export) and the milestone 0 prototype. Everything described here exists in
 the code unless labelled *planned*.
 
 ## Stack
@@ -25,9 +26,15 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
   LayeredDocument  the open document: ordered layers (index 0 = bottom), active layer, id
                    allocation, cached composite of the visible layers
   RasterDocument   raster operations on one image: stampDabs (test fixtures), clear
+  BrushSettings    brush and preset data (plain values, JSON with validation); PressureMapping
+  BrushTips        the generated tip (flat bristle) and textures (paper, canvas); see provenance
+  BrushPresets     the built-in presets
+  BrushPresetStore the artist's brush library file (custom presets, saved changes, favourites)
   StrokeSmoother   distance-based ("pull string") smoothing of input samples
-  StrokeSpacer     evenly spaced dabs; PressureResponse (pressure -> size curve)
-  StrokeCompositor uniform-opacity stroke rendering into a layer (coverage mask + undo tiles)
+  StrokeSpacer     StrokeSample (position, pressure, tilt, time); distance-spaced dabs with the
+                   input interpolated; PressureResponse (firmness -> gamma)
+  StrokeEngine     the one brush renderer: smoothing, spacing, airbrush timing, dab parameters,
+                   coverage (paint, erase) or pixel smudging, texture, clip mask; undo tiles
   TileSnapshot     copies of the 64x64 tiles an edit touched; swap = undo/redo
   UndoHistory      UndoCommand (pixels / layer presence / properties / move) + linear history
                    under one byte budget; state ids for "unsaved"
@@ -42,11 +49,15 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
   ViewTransform, Pressure.h, ViewRenderer   (view and input policy; unchanged)
 src/app/    (static QML module "drawapp_ui", URI DrawApp, used by the app and tst_ui)
   CanvasItem       QQuickPaintedItem; input, strokes, layer commands, history, files, recovery
-  BrushPreview     live preview of the brush settings (same smoother/spacer/compositor)
-  Main.qml         window, toolbar, brush settings, File menu, layer panel, dialogs, shortcuts
+  BrushLibrary     presets and the paint/eraser working brushes (canvas.brushes in QML)
+  BrushThumbnails  image provider: preset thumbnails drawn by StrokeEngine
+  BrushScratchpad  try-out surface on the same engine, settings and input handling
+  Main.qml         window, toolbar (active brush, size, opacity), File menu, layer panel, dialogs
+  BrushPanel.qml   preset list, scratchpad, basic and advanced brush settings
   main.cpp         application setup (in the drawapp executable)
-tests/             tst_core, tst_document, tst_recovery (headless); tst_canvas, tst_ui (window,
-                   offscreen under ctest); FakeProvider.h; bench_core, bench_canvas
+tests/             tst_core, tst_brush, tst_document, tst_recovery (headless); tst_canvas, tst_ui
+                   (window, offscreen under ctest); FakeProvider.h; bench_core, bench_canvas;
+                   brush_sheet (renders the brush test sheet)
 ```
 
 ## Layers
@@ -82,29 +93,171 @@ tests/             tst_core, tst_document, tst_recovery (headless); tst_canvas, 
 2. **Pressure** only for pens reporting the `Pressure` capability; everything else uses 1.0, so
    mouse and touch always draw at full size whatever the pressure settings.
 3. **Coordinates** go through `viewToDoc`; document pixels never depend on the view.
-4. **Settings** are captured when the stroke starts: size, color, opacity, pressure response,
-   smoothing, tool and layer. Changing them mid-stroke affects the next stroke.
-5. **Smoothing** (`StrokeSmoother`, optional): the brush point hangs on a string of length
+4. **Settings** are captured when the stroke starts: the working brush of the tool (or of the
+   eraser for a pen's eraser end), colour, layer, a per-stroke random seed, and the optional clip
+   mask. Changing them mid-stroke affects the next stroke.
+5. **Samples**: each event becomes a `StrokeSample` in document pixels with pressure, tilt (only
+   when the pen reports it) and a time from a per-stroke clock. `CanvasItem::drawStroke` feeds the
+   same path from samples, without pointer events.
+6. **Smoothing** (`StrokeSmoother`, optional): the brush point hangs on a string of length
    `smoothing / 100 × 40` view pixels (converted to document pixels at stroke start) and moves only
    when the pointer pulls the string tight. Input segments are walked in 0.5 px steps, so the
-   result depends on the path, not on the event rate or speed. The lag is spatial, not temporal:
-   no timers and no delay when the pointer stops. When the stroke ends (release, lost grab,
-   cancelled touch, or an undo/save mid-stroke), the line is completed straight to the last input
-   position. The release event's position is used, but not its pressure, since pens often report
-   near zero at lift-off.
-6. **Spacing and pressure** (`StrokeSpacer`): a dab every `max(0.5 px, 0.15 × last dab diameter)`,
-   diameter `size × (min + (1 − min) × p^γ)`, with `min` = "Lightest" (default 10 %) and
-   γ = 3^firmness (Soft 1/3 … Linear 1 … Firm 3).
-7. **Raster** (`StrokeCompositor`): each dab's anti-aliased coverage goes into a per-stroke mask,
-   keeping the maximum, never the sum. Pixels under the stroke are recomputed from the layer as it
-   was before the stroke, which the stroke's undo `TileSnapshot` holds anyway:
-   paint = `before` under `(color, opacity × coverage)`; erase = `before × (1 − opacity × coverage)`.
-   **Opacity is therefore uniform within a stroke**: overlapping dabs, slow segments and
-   self-crossings do not darken. Separate strokes build up, since the next stroke's "before"
-   includes the previous one. At 100 % the result is the familiar opaque stroke. The mask
-   allocates 4 KiB per 64 × 64 tile the stroke touches.
+   result depends on the path, not on the event rate or speed. When the stroke ends, the line is
+   completed straight to the last input position (the release position, not its pressure).
+7. **Brush rendering** (`StrokeEngine`, next section): spaced dabs, airbrush dabs from elapsed
+   time, coverage or smudging; changed pixels are recomputed from the stroke's undo `TileSnapshot`.
+   Escape cancels the stroke by swapping that snapshot back.
 8. **Composite and repaint**: the composite is refreshed for the changed rect, which is then
-   repainted. One stroke is one undo step (the `TileSnapshot`), as before.
+   repainted. One stroke is one undo step (the `TileSnapshot`), labelled Brush, Eraser or Smudge
+   stroke.
+
+## Brush system (milestone 6)
+
+Research notes: `research/brush-system.md` (Krita, PhotoCraft and libmypaint read for concepts
+only; no code, presets or assets taken).
+
+**Separation.** `BrushSettings` is data only (no colour, no stroke state). `StrokeSample` is input
+in document coordinates. `StrokeEngine` processes and renders a stroke. `BrushLibrary`,
+`BrushPanel.qml` and the toolbar are the UI. Every preset, the scratchpad and the thumbnails use
+the same `StrokeEngine`; there is no per-preset engine.
+
+**Dab parameters.** Per dab, from the interpolated sample:
+- diameter = size × pressure→size × tilt factor (at least 1 px);
+- ceiling C = opacity × pressure→opacity × tilt factor, rounded to a whole 8-bit level;
+- pass flow = flow × pressure→flow;
+- angle = base angle (+ travel direction, or pen azimuth when tilt is reported and at least 15°,
+  if "turn with the stroke") + deterministic jitter.
+
+A pressure mapping is `minimum + (1 − minimum) × p^gamma`. Input without pressure arrives as 1.0,
+so mouse and touch draw at full size, opacity and flow. Tilt factors interpolate from 1 (upright)
+to the setting at 60°. Without tilt data they stay 1 and "turn with the stroke" uses the travel
+direction.
+
+**Opacity, flow and accumulation.** Each stroke keeps a coverage S per pixel (16-bit, sparse
+64 × 64 tiles, only where the stroke goes):
+- *Uniform*: `S = max(S, v·C)`. Overlaps and self-crossings never darken, and the stroke reaches
+  its opacity at once (flow is not used).
+- *Build-up*: `S += v·f·(C − S)` with `f = 1 − (1 − pass flow)^(step / L)`. L is the tip's pass
+  length: its integral along its densest line, as a fraction of the diameter, which is 1 for a
+  hard round tip. One pass along the stroke's centre therefore deposits "flow" of the way to the
+  opacity, whatever the spacing, hardness or tip image. Repeated passes approach C and never pass
+  it. Rounding is stochastic and seeded, so nothing stalls below C.
+
+Opacity is the stroke's ceiling and flow how fast it gets there. Neither is applied twice:
+composite strength is `k = S` (times texture and mask). Separate strokes still build up, because
+the next stroke's "before" includes the previous one.
+
+**Composite.** `k` is dithered to 8 bits with a fixed per-pixel threshold, so whole levels stay
+exact (a 50 % uniform stroke is exactly 128). Then:
+- paint: `before` under `(colour, k)`, premultiplied;
+- erase: `before × (1 − k)`.
+
+Only pixels touched by this call are recomputed, once each.
+
+**Tips.**
+- *Round*: computed. The core is solid up to the hardness, then the falloff `(1 − t²)²` runs to
+  the rim. The edge is anti-aliased by distance. Radii under 3 px are area-sampled 4 × 4.
+  Roundness and angle make ellipses.
+- *Sampled*: grayscale image from a mip chain, bilinear; the image's x axis is the travel
+  direction.
+
+**Spacing.** Dabs are placed every `max(0.5 px, spacing × diameter)` of travel along the smoothed
+path, with pressure, tilt and time interpolated. Splitting the same path into more events gives
+the same dabs.
+
+Resampling limits:
+- Input is linear between events, so curvature between events is lost. Smoothing then rounds
+  corners by design.
+- Pressure and tilt change linearly between events. Rapid changes between two events are not
+  recovered.
+- Time is interpolated linearly. Airbrush dabs while moving use the last sample's position.
+
+**Texture.** Grayscale tiles in document space, so the grain stays put along and across strokes
+and does not move with the dabs:
+- *Multiply*: `k × (1 − strength(1 − T))`.
+- *Tooth*: `opacity × max(0, S/opacity − strength(1 − T))`. Light marks catch only the tops of
+  the grain; heavy ones fill it.
+
+**Airbrush.** Dabs are added from elapsed time at the rate setting, never from the number of
+events: the canvas runs a 16 ms timer while the pen is held. Distance dabs restart the clock. A
+stall adds at most 24 dabs per call. An airbrush always builds up.
+
+**Smudge (blending, not paint simulation).** A carried patch of premultiplied colour, the size of
+the largest dab, attached to the brush:
+- each dab lays the patch down with `strength × tip`, then the patch takes on the pixels it passed
+  at the pickup rate;
+- both rates are per pass, normalised like flow;
+- the first dab only loads the patch, so a click without movement changes nothing;
+- it works only on the active layer.
+
+Transparency rules: transparent pixels carry no colour, so dragging paint into transparency
+spreads it with its own alpha and no fringe, and dragging transparency into paint thins the paint.
+Beyond the layer edge the nearest edge pixel is loaded and nothing is picked up, so edges stay
+clean.
+
+**Determinism and life cycle.**
+- *Seed and replay*: the seed (stroke count) and dab index drive jitter and rounding; the same
+  samples and seed give identical pixels (`deterministicReplay`).
+- *Dots*: a stroke that never moves becomes a dot with one full pass of paint.
+- *Tips that follow the travel direction*: the first dab waits until the direction is known; a
+  dot uses the base angle.
+- *Ending a stroke*: pen-up, lost grab, a second finger or a save/undo mid-stroke all complete the
+  stroke as one undo step. Escape cancels it completely.
+
+**Selection.** Not built. `StrokeEngine::setClipMask` / `CanvasItem::setStrokeClipMask` limit
+paint, erase and smudge to a grayscale mask (tested), as the integration point.
+
+**Memory and work.**
+- Per stroke: 8 KiB per touched 64 × 64 coverage tile, the undo tiles (as before), and a smudge
+  patch of at most (size + 4)² × 16 bytes.
+- No full-canvas buffer and no full-canvas copy per event. The first edit after a snapshot copies
+  the shared layer once (measured).
+
+**Presets** (`BrushPresets`, original definitions):
+
+| Preset | Character |
+|---|---|
+| Sketch Pencil | 5 px, slightly soft, build-up, pressure to size and opacity, paper tooth, wider and lighter with tilt |
+| Clean Ink | 8 px, hard anti-aliased edge, pressure to size, smoothing 30; ends where the pen ends (no forced taper) |
+| Solid Round | 12 px, hard, uniform: the milestone 5 brush and the default |
+| Soft Airbrush | 90 px, no hardness, build-up over time (airbrush, 40/s), pressure to flow |
+| Textured Paint | 40 px flat bristle tip turning with the stroke, build-up, pressure to size and flow, light canvas grain |
+| Blend / Smudge | 36 px smudge; pressure sets the strength |
+| Hard Eraser | 24 px, hard |
+| Soft Eraser | 70 px, soft, build-up, pressure to flow |
+
+**Library and storage.**
+- *Working brushes*: `BrushLibrary` keeps two, paint and eraser. Selecting an eraser preset
+  switches to the eraser tool and other presets switch to the brush.
+- *Session edits*: edits change a per-preset copy for this session. *Save* writes them into the
+  preset; a built-in is saved as changes that *Reset to default* removes. *Save as new* creates a
+  custom preset; custom presets can be renamed, reverted and deleted.
+- *Temporary size*: never marks a preset modified, and is saved only by an explicit Save.
+- *Brush file*: `brushes.json` in the app data folder, or `DRAWAPP_BRUSH_FILE`. It holds custom
+  presets, changes to built-ins, favourites and the selected presets. It is versioned
+  (`"format": "drawapp-brushes", "version": 1`), validated on load (bad entries are skipped with
+  a message), written atomically with `ProjectFile::writeFileSafely`, and coalesced (400 ms).
+- *Unusable files*: a damaged file, or one from a newer version, is never overwritten; the
+  built-ins still work.
+- *Project files*: brush settings are not stored in projects, so the project format is unchanged.
+
+**Interface.**
+- *Toolbar*: the active brush (its rendered stroke and name), size and opacity.
+- *Brush panel* (popup, closed while drawing):
+  - preset list with thumbnails drawn by the engine, favourites and an "unsaved edits" marker;
+  - a scratchpad on the same engine, with pen pressure and tilt;
+  - basic settings, plus "More settings…" for the rest;
+  - two columns on wide windows, one scrolling column on phones; 32–40 px touch targets.
+- *Glyphs*: plain-text labels where Android's default font lacks a glyph (arrow triangles).
+
+**Brush tips and textures: provenance.** All of them are generated by `BrushTips.cpp` from fixed
+seeds when first used. There are no image files, and nothing is derived from another
+application's assets:
+- *bristle*: 34 elliptical hairs with hashed position, width and load, saturated;
+- *paper*: tileable value-noise fibres and about 2 px grain with a contrast curve;
+- *canvas*: an 8 px over/under weave with noise.
+
+The hash is splitmix64. The round tip is computed per dab.
 
 ## Undo and redo
 
@@ -253,6 +406,13 @@ physical device. iOS is unverified.
 | Provider saves keep the local copy in the recovery file | Survives a crash during the write and is offered by the existing Restore prompt; no second staging mechanism when recovery runs |
 | Provider access through raw JNI for throwing calls | `QJniObject` clears Java exceptions without reporting their type; the type distinguishes revoked access from other errors |
 | MinGW 15.1 from MinGW-Builds (GitHub), SHA-256 pinned | Qt's repository metadata points at 13.1 but Qt was built with 15.1 |
+| One brush renderer (`StrokeEngine`) for every preset, scratchpad and thumbnail | Presets differ in data only; one place to test, measure and fix |
+| Coverage per stroke (16-bit sparse tiles), recomposited from the undo tiles | Opacity applied once; uniform and build-up from one model; no full-size buffer |
+| Flow normalised by spacing and tip pass length | "Flow" means one pass whatever the spacing or tip; found necessary on the brush sheet (bristle strokes were half as strong) |
+| Texture in document space | Grain stays coherent along and across strokes; no stamp-shaped texture repeats |
+| Airbrush from elapsed time with a timer | Buildup does not depend on how many events a device sends |
+| Size is a temporary value, never auto-saved | Resizing while drawing must not change a saved preset |
+| Generated tips and textures, no image files | Provenance is simple and nothing third-party ships |
 
 ## Limitations (known)
 
@@ -264,8 +424,13 @@ physical device. iOS is unverified.
   adds 0.1–0.22 s). During that time other file operations wait.
 - Saving to an Android `content://` document is not atomic: a write that fails part way can
   damage that file (see "Save guarantees"). The drawing and a local copy are kept.
-- Brush: round dabs only, Normal blending, no texture, no pressure → opacity, no tilt; smoothing
-  cuts corners by design (by up to the string length) and is not a curve fitter.
+- Brushes: Normal blending only. One sampled tip and two textures. Smudge is colour pushing, not
+  wet paint. No colour dynamics, scatter, dual tips or stabiliser curves. Smoothing cuts corners by
+  design (by up to the string length) and is not a curve fitter.
+- Drawing feel (pen pressure response, tilt, latency) is **unverified on hardware**: pressure and
+  tilt were exercised only with synthetic tablet events and the emulator's touch input.
+- Large brushes cost more per dab: up to about 2–4 ms for an event that places a 200 px dab
+  (BENCHMARKS.md). There is no GPU path.
 - When a touch is cancelled by the system, a move that Qt Quick was still holding back for the
   next frame is lost; the stroke ends at the last move that arrived.
 - A full composite rebuild (visibility, opacity, order) takes about 5.6 ms at 5 layers and 12 ms
@@ -290,3 +455,6 @@ later hold editable strokes.
   or a commercial license.
 - MinGW runtime DLLs: GPL with the GCC runtime library exception.
 - No Krita code is used. See `research/krita-input-and-canvas.md` for the provenance note.
+- Brush system: Krita (GPL), PhotoCraft and libmypaint (ISC) were read for concepts only
+  (`research/brush-system.md`); no code, presets, tips or textures were copied. Our tips and
+  textures are generated by our own code (see "Brush tips and textures: provenance").

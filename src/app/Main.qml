@@ -286,7 +286,7 @@ ApplicationWindow {
                     Label {
                         objectName: "activeBrushLabel"
                         anchors.verticalCenter: parent.verticalCenter
-                        text: canvas.brushes.currentName + (canvas.brushes.currentModified ? " *" : "") + "  ▾"
+                        text: canvas.brushes.currentName + (canvas.brushes.currentModified ? " *" : "")
                     }
                 }
 

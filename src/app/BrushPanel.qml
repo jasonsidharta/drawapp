@@ -293,7 +293,8 @@ Item {
                 objectName: "advancedButton"
                 Layout.topMargin: 4
                 flat: true
-                text: (panel.advanced ? "▾ " : "▸ ") + "More settings"
+                // Plain text: Android's default font has no triangle arrows.
+                text: panel.advanced ? "Fewer settings" : "More settings…"
                 onClicked: panel.advanced = !panel.advanced
             }
 

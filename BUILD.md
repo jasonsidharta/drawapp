@@ -53,6 +53,19 @@ Environment variables for testing and measurement:
 | `DRAWAPP_STATS=1` | Logs paint/input timings and UI loop lag every 2 s, plus `[recovery]` tick/snapshot/commit lines (add `QT_FORCE_STDERR_LOGGING=1` to see them, `QT_MESSAGE_PATTERN="%{time hh:mm:ss.zzz} %{message}"` for timestamps) |
 | `DRAWAPP_AUTOSAVE_MS=<ms>` | Recovery autosave interval (default 10000, minimum 50) |
 | `DRAWAPP_RECOVERY_DIR=<folder>` | Recovery folder instead of `%APPDATA%\DrawApp\recovery` |
+| `DRAWAPP_BRUSH_FILE=<file>` | Brush library file instead of `%APPDATA%\DrawApp\brushes.json` (custom presets, saved changes, favourites) |
+
+Brush tools (not part of ctest):
+
+```powershell
+build\windows-mingw-release\brush_sheet.exe brush-sheet.png     # every preset on the standard strokes
+build\windows-mingw-release\bench_core.exe 30 presets            # per-event preset timings, 1/5/10 layers
+build\windows-mingw-release\bench_canvas.exe 1 0 builtin.textured-paint   # real canvas with autosave, one preset
+```
+
+Run `brush_sheet` with `QT_QPA_PLATFORM=offscreen` and `QT_QPA_FONTDIR=C:/Windows/Fonts`. Inspect
+the result after any change to the engine, tips or presets: gaps, stamping, jagged edges,
+darkening at overlaps, seams, halos on the checkerboard.
 
 The deploy step warns that translations are missing because `qttranslations` is not downloaded.
 This is harmless for now.
@@ -176,6 +189,21 @@ pressure or tilt.
 | PNG export | Runs on the worker (0.47 s), reservation ok, exported image correct |
 | App reinstalled while unsaved (`adb install -r` kills the process) | Restore offered on next launch, drawing back |
 
+**Milestone 6 emulator results, 2026-10-12** (same AVD; `-no-window`, so nothing on the desktop;
+touch from `adb shell input`; mouse and touch have no pressure or tilt):
+
+| Check | Result |
+|---|---|
+| Active brush in the toolbar | Thumbnail and name; the selected preset persisted across app restarts and a reinstall (brush file in app data) |
+| Brush panel by touch | Opens from the active brush. All 8 thumbnails rendered by the engine. Tapping a preset selects it; ☆ toggles the favourite. "More settings…" shows the advanced controls with the preset's switches |
+| Scratchpad | A swipe draws with Clean Ink; nothing reaches the document (Undo stayed disabled) |
+| Tap outside the panel | Closes it without painting |
+| Textured Paint, Blend / Smudge on the canvas | Bristle streaks; the smudge drags paint into transparency |
+| Soft Airbrush tap vs 1.5 s hold | Faint dot vs dark dot: buildup over time while held still |
+| Fixed during testing | "▾"/"▸" showed as missing-glyph boxes in Android's default font; replaced by text ("More settings…", "Fewer settings") |
+
+Not checked on the emulator: pressure and tilt (it has no pen), and performance.
+
 Not reachable on the emulator: the provider's own free-space check (private and shared storage
 share one partition, so the local copy fails first, which is also safe); a write that stops part
 way (covered by `tst_canvas` with a fault-injecting provider); revoking a URI grant without
@@ -204,8 +232,17 @@ Nothing below has been run yet; no device was available.
      strokes taper. The response slider (Soft/Firm) and "Lightest" change that visibly. The
      pen's eraser end erases. A palm resting while drawing does not paint.
    - **Finger**: draws at full size; two fingers pan and zoom without leaving marks.
-   - **Brush settings**: popup usable with a finger; opacity uniform within a stroke; smoothing
-     ends at the lift-off point.
+   - **Brushes**: the panel is usable with a finger; opacity is uniform within a Solid Round
+     stroke; smoothing ends at the lift-off point. With the pen, per preset:
+     - Sketch Pencil shades lighter and grainier with light pressure and wider when tilted (if the
+       pen reports tilt);
+     - Clean Ink tapers with pressure, without forced tails;
+     - Soft Airbrush builds up while held still;
+     - Textured Paint turns with the stroke or the pen's tilt;
+     - Blend / Smudge pushes colour, and its strength follows pressure.
+
+     Try the scratchpad. If Krita is installed on the same device, compare its Pencil, Ink and
+     Airbrush presets with ours by feel, and note what differs (not done yet: no pen hardware).
    - **Files**: Save As to Downloads and to a cloud provider (for example Drive). Save again (the
      overwrite prompt appears), choose Save a Copy once and Overwrite once. Open and Export PNG.
    - **Lifecycle**: Home and return; `adb shell am kill org.drawapp.prototype` while in the
@@ -263,8 +300,8 @@ Resolve the Qt LGPL/static linking question (ARCHITECTURE.md) before shipping.
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 5/5 suites (34 + 62 + 28 + 67 + 10 test functions, counts include init/cleanup). Milestones 0–2 were driven on the desktop with real input. Milestones 3–5 (layers, async files, brush settings, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
-| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall |
-| Android arm64 | **Built; not run on a physical device** | Release (unsigned) and debug (development key) APKs rebuilt for milestone 5. Same source as the emulator build. Pen pressure, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 6/6 suites (tst_core 34, tst_brush 37, tst_document 62, tst_recovery 28, tst_canvas 82, tst_ui 10 test functions; counts include init/cleanup). Milestones 0–2 were driven on the desktop with real input. Milestones 3–6 (layers, async files, brush presets and panel, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots and the brush test sheet inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
+| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall; milestone 6 brush panel, presets, scratchpad and airbrush by touch |
+| Android arm64 | **Built; not run on a physical device** | Debug APK (development key) rebuilt for milestone 6. Same source as the emulator build. Pen pressure and tilt, brush feel, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
 | Linux | **Blocked** | Needs the owner to run one `sudo apt install` command (above); everything after it is prepared |
 | iOS / iPadOS | **Blocked** | Needs a Mac with Xcode 16+ (above) |

@@ -284,6 +284,78 @@ covers encode, verify, recovery copy with read-back, probe, reservation, write a
 `posix_fallocate` succeeded on the Downloads provider's file descriptor. These numbers describe
 the emulator, not a phone.
 
+## Milestone 6: brush presets, 2026-10-12, same machine (Intel Core Ultra 7 155H, 15.4 GB RAM, Windows 11 25H2)
+
+All numbers are CPU time on the UI thread with synthetic input. They are not pen-to-screen latency,
+which also includes OS input delivery, the scene-graph upload, display refresh and the compositor.
+
+### Per input event, every preset (`bench_core 30 presets`)
+
+Setup:
+- the 1000-event zig-zag with varying pressure and samples 8 ms apart, three strokes per row;
+- time covers `StrokeEngine` (smoothing off), undo tile capture and the composite refresh, on the
+  active layer of a representative 2048 × 1536 document;
+- each preset runs at its own size and at 200 px;
+- memory columns are per stroke: coverage tiles (8 KiB each), engine buffers, and the undo
+  snapshot (the touched 64 × 64 layer tiles).
+
+Median ms is 0.000 for most 200 px rows, because most events place no dab: a dab every
+`spacing × 200` px of travel. Their p95 and max are the events that do.
+
+| Preset | size px | median ms (1 / 5 / 10 layers) | p95 ms (1 / 5 / 10) | max ms (1 / 5 / 10) | coverage tiles | engine KiB | undo MiB |
+|---|---|---|---|---|---|---|---|
+| Sketch Pencil | 5 | 0.051 / 0.054 / 0.057 | 0.098 / 0.102 / 0.106 | 0.50 / 0.32 / 0.32 | 94 | 752 | 1.5 |
+| Sketch Pencil | 200 | 0.000 / 0.000 / 0.000 | 1.01 / 1.06 / 1.23 | 2.29 / 2.26 / 2.15 | 307 | 2456 | 4.8 |
+| Clean Ink | 8 | 0.026 / 0.027 / 0.030 | 0.071 / 0.075 / 0.077 | 0.15 / 0.18 / 0.24 | 92 | 736 | 1.4 |
+| Clean Ink | 200 | 0.053 / 0.059 / 0.065 | 0.62 / 0.68 / 0.80 | 1.06 / 1.39 / 1.88 | 232 | 1856 | 3.6 |
+| Solid Round | 12 | 0.012 / 0.014 / 0.016 | 0.054 / 0.060 / 0.062 | 0.14 / 0.38 / 0.55 | 94 | 752 | 1.5 |
+| Solid Round | 200 | 0.000 / 0.000 / 0.000 | 0.45 / 0.50 / 0.58 | 0.94 / 1.14 / 1.67 | 233 | 1864 | 3.6 |
+| Soft Airbrush | 90 | 0.141 / 0.156 / 0.187 | 0.24 / 0.26 / 0.31 | 0.70 / 0.63 / 0.65 | 209 | 1672 | 3.3 |
+| Soft Airbrush | 200 | 0.000 / 0.000 / 0.001 | 0.72 / 0.81 / 0.94 | 2.24 / 1.87 / 6.51 | 360 | 2880 | 5.6 |
+| Textured Paint | 40 | 0.146 / 0.153 / 0.162 | 0.25 / 0.26 / 0.28 | 0.79 / 0.79 / 0.75 | 155 | 1240 | 2.4 |
+| Textured Paint | 200 | 0.75 / 0.81 / 0.90 | 1.84 / 2.00 / 2.26 | 3.27 / 3.27 / 4.17 | 378 | 3024 | 5.9 |
+| Blend / Smudge | 36 | 0.075 / 0.099 / 0.102 | 0.13 / 0.19 / 0.20 | 0.31 / 0.75 / 0.37 | – | 25 | 2.0 |
+| Blend / Smudge | 200 | 0.000 / 0.000 / 0.001 | 1.18 / 1.66 / 1.79 | 2.40 / 2.91 / 3.38 | – | 650 | 4.9 |
+| Hard Eraser | 24 | 0.012 / 0.014 / 0.016 | 0.024 / 0.027 / 0.032 | 0.12 / 0.08 / 0.11 | 110 | 880 | 1.7 |
+| Hard Eraser | 200 | 0.000 / 0.000 / 0.000 | 0.44 / 0.50 / 0.62 | 1.44 / 1.22 / 1.83 | 273 | 2184 | 4.3 |
+| Soft Eraser | 70 | 0.082 / 0.093 / 0.107 | 0.15 / 0.16 / 0.18 | 0.62 / 0.55 / 0.53 | 187 | 1496 | 2.9 |
+| Soft Eraser | 200 | 0.000 / 0.000 / 0.000 | 0.67 / 0.75 / 0.87 | 1.71 / 1.59 / 1.99 | 359 | 2872 | 5.6 |
+
+The milestone 5 comparison, with the same table as before, is in `bench_core 30`. For the 12 px
+uniform brush the stroke engine takes 0.0115–0.0122 ms median per event, against 0.0067 for the
+milestone 4 QPainter path, which had no uniform opacity. The extra cost is the 16-bit coverage, the
+dithered composite and the per-dab tip evaluation.
+
+**First event after a snapshot** (a recovery or save snapshot makes the next edit copy the shared
+layer):
+
+| | 1 / 5 / 10 layers |
+|---|---|
+| Clean Ink 8 px, first event, median ms | 2.12 / 2.19 / 2.22 |
+| Clean Ink 8 px, next event, median ms | 0.062 / 0.066 / 0.069 |
+
+Brushes whose first dab waits for a travel direction (Textured Paint) pay the same layer copy on
+their second event instead: about 3.6–4.3 ms including a 200 px dab.
+
+### On the canvas with autosave (`bench_canvas 1 0 <preset>`)
+
+Real `CanvasItem`, offscreen, synthetic mouse strokes at 250 Hz, autosave every 1 s, one async
+save at about 5 s; the preset's own settings (Clean Ink includes its smoothing).
+
+| Preset | Ordinary event, median / p95 / max ms (1, 5, 10 layers) | First event after a snapshot, median ms (1 / 5 / 10) | Largest UI stall, ms (1 / 5 / 10) |
+|---|---|---|---|
+| Clean Ink | 0.12 / 0.74–0.95 / 1.2–1.7 | 2.8 / 3.2 / 2.7 | 3.6 / 4.0 / 3.3 |
+| Textured Paint | 0.41 / 1.06–1.07 / 2.5–3.1 | 2.9 / 3.0 / 2.9 | 4.2 / 4.2 / 3.6 |
+
+Machine load was not recorded (other desktop apps were open). The largest stall is still the first
+edit after a snapshot.
+
+### Android emulator (behaviour, not performance)
+
+On the x86_64 emulator by touch: the preset panel, thumbnails, favourites, scratchpad, Textured
+Paint and smudge strokes, and airbrush buildup while held still all worked. A 1.5 s hold built a
+dark dot where a tap left a faint one. No timings were taken; the emulator is not a phone.
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera). The
@@ -291,4 +363,7 @@ the emulator, not a phone.
   feels with a real pen is unmeasured.
 - Scene-graph texture upload cost per frame for `QQuickPaintedItem`.
 - Physical Android devices, iOS, Linux, real pen hardware, larger canvases, battery.
+- Brush feel on hardware: pressure and tilt response, and a comparison with Krita's presets on
+  the same device (no pen hardware was available for milestone 6).
+- Brush performance on a phone or tablet CPU (the 200 px brushes are the ones to watch).
 - On-screen Windows memory and timing with a real GPU surface for layers and async save.

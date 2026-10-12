@@ -43,6 +43,10 @@ future feature with no work scheduled.
 - Milestone 5: safer saving to Android storage providers (overwrite warning, Save a Copy, a local
   copy kept until the file is written and checked); brush opacity that stays even within a
   stroke, a pressure-to-size response with a live preview, and optional smoothing.
+- Milestone 6: an artist brush system with eight original presets (pencil, ink, solid round,
+  airbrush, textured paint, smudge and two erasers). Includes a preset panel with rendered
+  thumbnails, favourites and a scratchpad, custom presets, and pressure to size, opacity and flow
+  (tilt where the pen reports it).
 
 See ROADMAP.md for acceptance status.
 
