@@ -74,7 +74,35 @@ Run `dist\windows-mingw\bin\drawapp.exe` (after the install step above), then:
    (`taskkill /F /IM drawapp.exe`). Start the app again: it offers Restore / Discard. Restore brings
    back the drawing as of the last autosave, with `*` in the title. Strokes made in the last
    seconds before the kill may be missing (see BENCHMARKS.md). Escape keeps the recovery data for
-   the next start; Discard deletes it.
+   the next start; Discard deletes it. Clicking beside the prompt does not dismiss it.
+10. Async save and open: see "Testing file operations" below.
+
+## Testing file operations (manual, Windows; milestone 4)
+
+Saving and opening run on a worker thread. Small files finish too quickly to see this, so for
+steps 2–6 first make a heavy document: 10 layers, each painted over most of the canvas with a
+large brush (the save then takes about 1 s).
+
+1. Save (Ctrl+S) a small drawing: the footer briefly shows a busy indicator and "Saving…", then
+   the title loses its `*`.
+2. With the heavy document, press Ctrl+S and keep drawing at once. The strokes appear without
+   pauses. When the save finishes, the title still has `*`, because those strokes are newer than
+   the saved file. Ctrl+S again clears it.
+3. Press Ctrl+S twice quickly. The footer shows "Saving (another save queued)…". After both
+   finish, reopen the file: it contains everything drawn before the second Ctrl+S.
+4. Press Ctrl+S, then Ctrl+N or Ctrl+O at once: New and Open (and Save As) are disabled, or a
+   notice says to wait, while the save runs.
+5. Make an unsaved change, press Ctrl+N and choose Save. The new document appears only after the
+   save has finished. Repeat with the project file set to read-only in Explorer: an error is
+   shown, the drawing stays and keeps its `*`, and the file on disk is unchanged.
+6. Press Ctrl+S on the heavy document and immediately close the window. A notice says it closes
+   when the save has finished, and it then closes by itself (asking first if there are newer
+   changes).
+7. Open (Ctrl+O) a heavy file: the footer shows "Opening…". The canvas and layer panel do not
+   accept edits until the file has loaded. The previous drawing is replaced only if the file
+   loaded without error; a damaged file shows an error and keeps the current drawing.
+8. Save As to a new name, then end the process with Task Manager more than 10 s after a further
+   change. Restore brings back the newer change, and the file on disk is the saved version.
 
 ## Testing layers (manual, Windows)
 
@@ -97,7 +125,7 @@ Run `dist\windows-mingw\bin\drawapp.exe` (after the install step above), then:
 10. End the process from Task Manager more than 10 s after a change and start the app again:
     Restore brings back all layers.
 
-## Android (APK builds; not launched)
+## Android (APK builds; tested on an emulator, not on a physical device)
 
 Additional prerequisites: the Android SDK at `%LOCALAPPDATA%\Android\Sdk` (Android Studio), with
 `cmdline-tools`, `platforms;android-36` and `ndk;27.2.12479018`. The JDK is Android Studio's JBR.
@@ -116,7 +144,7 @@ Debug APK for local device testing, signed with the Android SDK's development ke
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-android.ps1 -Config Debug
-# -> %USERPROFILE%\drawapp-build\android-arm64-debug\android-build\build\outputs\apk\debug\android-build-debug.apk (66.9 MB)
+# -> %USERPROFILE%\drawapp-build\android-arm64-debug\android-build\build\outputs\apk\debug\android-build-debug.apk (71.5 MB)
 & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r <that apk>
 ```
 
@@ -127,17 +155,74 @@ The Android build directory **must not contain spaces**. `androiddeployqt` 6.12.
 "Import found outside of import paths" when it does, so the script builds outside this
 repository by default.
 
+### Emulator
+
+An x86_64 build runs on the x86_64 emulator image (the arm64 APK does not):
+
+```powershell
+python tools\fetch_qt_windows.py --android --abi x86_64
+& "$env:LOCALAPPDATA\Android\Sdk\cmdline-tools\latest\bin\sdkmanager.bat" "emulator" "system-images;android-36;google_apis;x86_64"
+& "$env:LOCALAPPDATA\Android\Sdk\cmdline-tools\latest\bin\avdmanager.bat" create avd -n drawapp_test_api36 -k "system-images;android-36;google_apis;x86_64" -d pixel_tablet
+& "$env:LOCALAPPDATA\Android\Sdk\emulator\emulator.exe" -avd drawapp_test_api36 -gpu host -no-snapshot
+powershell -ExecutionPolicy Bypass -File tools\build-android.ps1 -Config Debug -Abi x86_64
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r "$env:USERPROFILE\drawapp-build\android-x86_64-debug\android-build\build\outputs\apk\debug\android-build-debug.apk"
+```
+
+Use `-gpu host`. With the default SwiftShader renderer, the canvas showed a diagonal tear that
+is not in the app's image (BENCHMARKS.md, emulator observations).
+
+**Emulator results, 2026-10-12** (Pixel Tablet AVD, Android 16 / API 36, x86_64 google_apis
+image, emulator 36.6.11, `-gpu host -no-window`). Input came from `adb shell input` taps, swipes,
+emulated stylus swipes, typed text and key events, and was checked from `adb exec-out screencap`
+screenshots and pulled files. **This is not a physical device** and says nothing about real pen
+input, pressure, performance or a phone-sized screen.
+
+| Check | Result |
+|---|---|
+| Install and launch the debug APK | Works (cold start 0.8–2.8 s) |
+| Drawing with touch and emulated stylus | Works ("Input: touch (no pressure, full size)" for touch) |
+| Layer panel: add, delete, rename, opacity | Works. Fixed during testing: the keyboard's Enter moved focus instead of confirming the rename (now `EnterKey.type: Qt.EnterKeyDone`, verified) |
+| Footer above the gesture navigation bar | Fixed during testing (SafeArea padding plus an explicit content height), verified |
+| Save As through the system picker | Writes `content://…` into Downloads (30.8 KB, 2 layers) |
+| Title after Save As | Fixed during testing: showed "10" (the URI's document id), now shows the file's display name, verified |
+| Save to the same URI later, also after a process restart | Works (file grew to 41.7 KB, then 22.9 KB for another file) |
+| "Save changes?" → Save, then New | New waited for the save to the content URI, then cleared the canvas |
+| Open through the picker | Layered project reopened with both layers and the stroke on Layer 2 |
+| Export PNG through the picker | 2048×1536 PNG with transparency, checked after `adb pull` |
+| Home, then return (`am start`) | Same process, unsaved strokes still there |
+| Back with unsaved changes | Moves the app to the background (Android 16 default for the root activity); strokes still there on return |
+| Recovery after `am force-stop` (immediate SIGKILL, no shutdown code runs) | Prompt on next launch; Restore brought back 2 layers and the last stroke |
+| Recovery after `am kill` while in the background (how the system reclaims memory) | Prompt names "layered.drawapp"; Restore brought back both layers and both strokes |
+| Recovery after the emulator was shut down (`adb emu kill`) | Recovery files were kept; the prompt was offered on the next launch |
+| Stray tap beside the recovery prompt | Fixed during testing: a tap outside dismissed it (postponing recovery). Now it only closes through its buttons or Back/Escape, verified |
+
+Not tested on the emulator: the in-app Open conflict dialog (painting is disabled while opening,
+so it cannot be reached by touch), saving to a provider that refuses writes, and real stylus
+pressure or tilt.
+
+**Content URIs** cannot be replaced atomically: saving to one writes it in place. A failed write
+can leave that file damaged. The recovery file and the in-memory document stay intact, and the
+app keeps the document marked as unsaved.
+
 ## Linux (blocked here)
 
-In WSL Ubuntu 24.04 there is no compiler or CMake, and installing packages needs the user's sudo
-password. Ubuntu 24.04's packaged Qt (6.4) is older than this project's minimum (6.8), so Qt
-6.12 must come from Qt's installer or repository. Expected steps (unverified):
+Exact blockers, checked 2026-10-12 in WSL Ubuntu 24.04:
+- There is no C++ compiler, CMake, Ninja or OpenGL/xcb development packages. Installing them
+  needs the user's sudo password. This was not bypassed, for example with `wsl -u root`.
+- Ubuntu 24.04's packaged Qt (6.4) is older than this project's minimum (6.8).
+
+Prepared: `tools/fetch_qt_windows.py --linux` downloads Qt 6.12.0 `linux_gcc_64` (qtbase,
+qtdeclarative, qtsvg, icu) from Qt's repository and checks each archive's SHA-1. It must run on
+Linux, because the archives contain symlinks. `--dry-run` resolves and lists the archives
+without downloading; that ran successfully from Windows. Expected steps, unverified past the
+dry run:
 
 ```bash
 sudo apt install build-essential cmake ninja-build python3-pip libgl-dev libegl-dev \
   libxkbcommon-dev libxkbcommon-x11-0 libfontconfig1-dev libxcb-cursor0 libxcb-icccm4 \
   libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-image0 libvulkan-dev
-# Qt 6.12.0 linux_gcc_64 from the Qt online installer, then:
+python3 -m pip install --user py7zr
+python3 tools/fetch_qt_windows.py --linux          # -> ~/Qt/6.12.0/gcc_64
 cmake -S . -B build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$HOME/Qt/6.12.0/gcc_64
 cmake --build build/linux && ctest --test-dir build/linux --output-on-failure
 ```
@@ -152,7 +237,8 @@ linking question (ARCHITECTURE.md) before shipping.
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 5/5 suites (22 + 60 + 27 + 44 + 4 tests). Milestones 0–2 were driven on the desktop with real input (drawing, prompts, native dialogs, 9 forced kills). Milestone 3's layer panel was driven with synthetic input through the real Main.qml on the offscreen platform (`tst_ui`, screenshots inspected); an on-screen session for layers is still pending |
-| Android arm64 | **Built but not launched** | Release (unsigned) and debug (signed with the development key, `apksigner` verified) APKs rebuilt after milestone 3; no device or emulator image available. Drawing, file dialogs, `content://` saving and recovery are unverified |
-| Linux | **Blocked** | WSL needs a sudo password to install the compiler and libraries |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 5/5 suites (22 + 60 + 27 + 51 + 8 test functions, counts include init/cleanup). Milestones 0–2 were driven on the desktop with real input (drawing, prompts, native dialogs, 9 forced kills). Milestones 3–4 (layer panel, async save/open, busy state, close during a save, stray press beside the recovery prompt) were driven with synthetic input through the real Main.qml on the offscreen platform (`tst_ui`, screenshots inspected). **On-screen sessions for layers and async file operations are still pending** (checklists above), because the desktop was in use |
+| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results table above): drawing, layer panel, Save/Open/Export PNG through the system picker, background/return, recovery after `am force-stop` and `am kill`, layered save and reopen |
+| Android arm64 | **Built; not run on a physical device** | Release (unsigned, 68.6 MB) and debug (development key, `apksigner` verified, 71.5 MB) APKs rebuilt after milestone 4. Same source as the emulator build, but no arm64 device was available, so pen input, pressure and performance on real hardware are unverified |
+| Linux | **Blocked** | WSL needs a sudo password to install the compiler and libraries; Qt download script prepared (`--linux`) |
 | iOS / iPadOS | **Blocked** | No macOS or Xcode |

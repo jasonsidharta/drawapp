@@ -17,7 +17,11 @@ generation-gated atomic commits, Restore/Discard on start, verified with forced 
 window is the interval plus write time, not "only the current stroke". Mobile recovery is
 unverified. Commit `a98ec27`.
 
-## Milestone 3: raster layers (done on Windows; not committed yet)
+## Milestone 3: raster layers (done on Windows)
+
+Commit `784b2c9`. The on-screen Windows session and the Android run listed below were carried
+over to milestone 4. Android has now run on an emulator; the on-screen Windows session is still
+pending.
 
 | Criterion | Status | How verified |
 |---|---|---|
@@ -40,18 +44,36 @@ Not verified for this milestone: an on-screen session with real mouse input on t
 desktop (postponed because the desktop was in use; the panel was verified with synthetic input
 on the offscreen platform), Android at runtime.
 
-## Milestone 4: hardware and platform validation (next)
+## Milestone 4: responsive file operations and device validation (done; Windows on-screen session pending)
 
-- Windows pen device (Windows Ink) and an Android tablet with stylus, plus finger touch:
-  pressure range, event rate, synthesized mouse events, palm contacts.
-- First Android launch: drawing, layer panel on a small screen, file dialogs via the storage
-  access framework, saving to `content://`, recovery after the OS kills the app in the background.
-- On-screen Windows session for the layer panel and end-to-end latency measurement.
+| Criterion | Status | How verified |
+|---|---|---|
+| Save runs on a worker from an immutable snapshot (`ProjectIo`); the file is replaced atomically | Done | `ProjectFile::save` via `QSaveFile`, unchanged; `bench_canvas` (UI thread ≈ 0.1 ms per save request) |
+| Edits made after the snapshot stay unsaved | Done | `editsDuringSaveStayUnsaved` |
+| A failed save keeps the previous file, the unsaved state and the path (Save As changes the path only on success) | Done | `failedSaveKeepsFileDirtyStateAndPath`, `failedSaveCancelsNew` (UI) |
+| Concurrent saves never write older data over newer | Done | Saves are serialized on one worker; a Save during a save to the same file is queued and taken from a newer snapshot. Save As to another file is refused while busy. `repeatedSaveWritesTheNewestData` |
+| New/Open/Close wait for a requested save; failure or cancel keeps the document | Done | `newWaitsForASuccessfulSave`, `failedSaveCancelsNew`, `closeWaitsForTheRunningSave` (UI); Android: Save then New on a content URI |
+| Recovery for newer edits is kept after a save | Done | `recoveryKeepsEditsNewerThanTheSave`, `stalledSaveDuringAutosaveIsHarmless` |
+| Open decodes into a separate document, replacing the current one only after success and the unsaved-changes decision | Done | `openReplacesOnlyAfterSuccess`, `failedOpenKeepsCurrentDocument` |
+| Edits during loading are handled explicitly | Done | Painting and the layer panel are disabled while opening. If the document still changes (from code), the user chooses "Open the file" or "Keep my drawing" (`editsDuringOpenAreNotSilentlyLost`) |
+| Busy state shown; conflicting operations prevented | Done | Footer busy indicator and text; menu items disabled; `tst_ui` screenshot `saving_busy` |
+| First edit after an autosave measured separately; largest UI stall; 1/5/10 layers split into snapshot, worker, UI stall and total | Done | BENCHMARKS.md, milestone 4 (CPU time, offscreen; not pen latency) |
+| Android runtime: drawing, layer panel, picker Save/Open/Export, background/return, recovery after process termination, layered reopen | Done **on an emulator** (Android 16 x86_64), not on a physical device | BUILD.md emulator results. Four issues found and fixed there: hidden footer, Enter in rename, title "10" after Save As, stray tap dismissing the recovery prompt (`strayPressKeepsTheRecoveryPrompt`) |
+| Windows on-screen checklist | Written, **not run** | BUILD.md "Testing layers" and "Testing file operations". Desktop automation needs an agreed idle period |
+| Linux / iOS | Blocked | Linux: sudo password for packages (Qt fetch prepared). iOS: no macOS/Xcode |
+
+## Milestone 5: hardware validation (next)
+
+- Run the Windows on-screen checklists (layers, file operations) with real mouse and pen input.
+- Windows pen device (Windows Ink) and a physical Android tablet with stylus, plus finger touch:
+  pressure range, event rate, synthesized mouse events, palm contacts, and the milestone 4
+  Android checks repeated on hardware.
+- End-to-end latency measurement (needs hardware or a high-speed camera).
 - Unblock Linux (WSL packages) and run the same tests.
 
 ## Later (unordered)
 
-Background saving/export and incremental recovery writes (only changed layers); more blend modes,
+Background export and incremental recovery writes (only changed layers); more blend modes,
 groups, clipping, masks; drag-and-drop layer reordering; canvas rotation and mirroring;
 smoothing/stabilizer; brush presets; selection and transform; iOS build (needs macOS and a
 licensing decision); Play Store AAB with an upload key and release pipeline.

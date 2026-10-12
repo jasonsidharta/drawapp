@@ -23,6 +23,11 @@ qt_add_executable(tst_ui tst_ui.cpp)
 target_link_libraries(tst_ui PRIVATE drawapp_ui drawapp_uiplugin Qt6::Test)
 add_test(NAME tst_ui COMMAND tst_ui)
 
+# Real CanvasItem under synthetic strokes with autosave and an async save (not part of ctest).
+qt_add_executable(bench_canvas bench_canvas.cpp ../src/app/CanvasItem.cpp ../src/app/CanvasItem.h)
+target_include_directories(bench_canvas PRIVATE ../src/app)
+target_link_libraries(bench_canvas PRIVATE drawcore Qt6::Quick Qt6::Test)
+
 qt_add_executable(bench_core bench_core.cpp)
 target_link_libraries(bench_core PRIVATE drawcore)
 if(WIN32)

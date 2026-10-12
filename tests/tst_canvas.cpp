@@ -61,6 +61,27 @@ private:
     std::unique_ptr<QPointingDevice> m_eraserTip;
     QPointingDevice *m_touch = nullptr;
 
+    // Starts an asynchronous file operation and waits for its result: empty string on success,
+    // otherwise the immediate refusal or the reported error.
+    template <typename Start>
+    QString waitFor(Start start, bool isSave)
+    {
+        QSignalSpy spy(m_canvas, isSave ? &CanvasItem::saveFinished : &CanvasItem::openFinished);
+        const QString refused = start();
+        if (!refused.isEmpty())
+            return refused;
+        if (!QTest::qWaitFor([&] { return spy.count() > 0; }, 15000))
+            return QStringLiteral("timed out");
+        return spy.first().at(0).toBool() ? QString() : spy.first().at(1).toString();
+    }
+    QByteArray fileBytes(const QString &path)
+    {
+        QFile f(path);
+        return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+    }
+    QString saveAs(const QUrl &url) { return waitFor([&] { return m_canvas->saveFileAs(url); }, true); }
+    QString save() { return waitFor([&] { return m_canvas->saveFile(); }, true); }
+    QString open(const QUrl &url) { return waitFor([&] { return m_canvas->openFile(url); }, false); }
     // What the layers composite to (with one opaque layer, exactly that layer's pixels).
     const QImage &doc() const { return m_canvas->document().composite(); }
     QImage layerImage(int index) const { return m_canvas->document().layer(index).image; }
@@ -437,10 +458,10 @@ private slots:
         QCOMPARE(m_canvas->documentTitle(), QStringLiteral("Untitled"));
         mouseStroke({{100, 300}, {600, 300}});
         QVERIFY(m_canvas->isModified());
-        QCOMPARE(m_canvas->saveFile(), QStringLiteral("Choose a file name first (Save As)."));
+        QCOMPARE(save(), QStringLiteral("Choose a file name first (Save As)."));
 
         // Save As without an extension adds ".drawapp".
-        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("first"))), QString());
+        QCOMPARE(saveAs(QUrl::fromLocalFile(dir.filePath("first"))), QString());
         const QString path = dir.filePath("first.drawapp");
         QVERIFY(QFile::exists(path));
         QVERIFY(!m_canvas->isModified());
@@ -452,7 +473,7 @@ private slots:
         QVERIFY(!m_canvas->isModified()); // back at the saved pixels
         m_canvas->redo();
         QVERIFY(m_canvas->isModified());
-        QCOMPARE(m_canvas->saveFile(), QString());
+        QCOMPARE(save(), QString());
         QVERIFY(!m_canvas->isModified());
         const QImage savedSecond = doc().copy();
 
@@ -462,7 +483,7 @@ private slots:
         QVERIFY(!m_canvas->canUndo());
         QCOMPARE(alphaAt(toDoc(QPointF(300, 300))), 0);
 
-        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(open(QUrl::fromLocalFile(path)), QString());
         QCOMPARE(doc(), savedSecond);
         QCOMPARE(m_canvas->documentSize(), QSize(2048, 1536));
         QVERIFY(!m_canvas->isModified());
@@ -472,7 +493,7 @@ private slots:
     void failedOpenKeepsCurrentDocument()
     {
         QTemporaryDir dir;
-        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("current.drawapp"))), QString());
+        QCOMPARE(saveAs(QUrl::fromLocalFile(dir.filePath("current.drawapp"))), QString());
         mouseStroke({{100, 300}, {600, 300}});
         const QImage before = doc().copy();
         const int undoSteps = m_canvas->history().undoCount();
@@ -485,9 +506,9 @@ private slots:
             QVERIFY(f.open(QIODevice::WriteOnly));
             f.write(bytes);
         }
-        const QString error = m_canvas->openFile(QUrl::fromLocalFile(damaged));
+        const QString error = open(QUrl::fromLocalFile(damaged));
         QVERIFY2(error.contains("damaged"), qPrintable(error));
-        QVERIFY(!m_canvas->openFile(QUrl::fromLocalFile(dir.filePath("missing.drawapp"))).isEmpty());
+        QVERIFY(!open(QUrl::fromLocalFile(dir.filePath("missing.drawapp"))).isEmpty());
 
         QCOMPARE(doc(), before);
         QVERIFY(m_canvas->isModified());
@@ -499,7 +520,7 @@ private slots:
     {
         QTemporaryDir dir;
         mouseStroke({{100, 300}, {600, 300}});
-        const QString error = m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("missing/folder/x.drawapp")));
+        const QString error = saveAs(QUrl::fromLocalFile(dir.filePath("missing/folder/x.drawapp")));
         QVERIFY(!error.isEmpty());
         QVERIFY(m_canvas->isModified());
         QVERIFY(!m_canvas->hasFile());
@@ -513,7 +534,7 @@ private slots:
         small.stampDabs({{QPointF(150, 100), 50}}, QColor(200, 0, 0), BrushMode::Paint);
         const QString path = dir.filePath("small.drawapp");
         QCOMPARE(ProjectFile::save(DocumentData::fromImage(small.image()), path), QString());
-        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(open(QUrl::fromLocalFile(path)), QString());
         QCOMPARE(m_canvas->documentSize(), QSize(300, 200));
         QCOMPARE(doc(), small.image());
         // Drawing still maps through the (refitted) view onto the opened canvas.
@@ -558,7 +579,7 @@ private slots:
         QCOMPARE(recoveredImage(), doc());
 
         QTemporaryDir projects;
-        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(projects.filePath("art.drawapp"))), QString());
+        QCOMPARE(saveAs(QUrl::fromLocalFile(projects.filePath("art.drawapp"))), QString());
         QVERIFY(!QFile::exists(rec)); // saved: recovery data removed at once
 
         mouseStroke({{100, 450}, {600, 450}});
@@ -580,7 +601,7 @@ private slots:
         QTemporaryDir projects;
         const QString project = projects.filePath("keep.drawapp");
         mouseStroke({{100, 300}, {600, 300}});
-        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(project)), QString());
+        QCOMPARE(saveAs(QUrl::fromLocalFile(project)), QString());
         QFile f(project);
         QVERIFY(f.open(QIODevice::ReadOnly));
         const QByteArray original = f.readAll();
@@ -608,10 +629,10 @@ private slots:
         mouseStroke({{100, 300}, {600, 300}});
         QVERIFY(autosaveAndWait());
         // A failed save keeps the work recoverable.
-        QVERIFY(!m_canvas->saveFileAs(QUrl::fromLocalFile(projects.filePath("no/such/dir/x.drawapp"))).isEmpty());
+        QVERIFY(!saveAs(QUrl::fromLocalFile(projects.filePath("no/such/dir/x.drawapp"))).isEmpty());
         QVERIFY(QFile::exists(rec));
         // A failed open changes nothing.
-        QVERIFY(!m_canvas->openFile(QUrl::fromLocalFile(projects.filePath("missing.drawapp"))).isEmpty());
+        QVERIFY(!open(QUrl::fromLocalFile(projects.filePath("missing.drawapp"))).isEmpty());
         QVERIFY(QFile::exists(rec));
         // New (after the user discarded) removes it.
         m_canvas->newDocument();
@@ -622,7 +643,7 @@ private slots:
         QVERIFY(QFile::exists(rec));
         RasterDocument other(QSize(200, 100));
         QCOMPARE(ProjectFile::save(DocumentData::fromImage(other.image()), projects.filePath("other.drawapp")), QString());
-        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(projects.filePath("other.drawapp"))), QString());
+        QCOMPARE(open(QUrl::fromLocalFile(projects.filePath("other.drawapp"))), QString());
         QVERIFY(!QFile::exists(rec));
     }
 
@@ -662,7 +683,7 @@ private slots:
         const QString project = projects.filePath("piece.drawapp");
         attachRecovery(dir);
         mouseStroke({{100, 300}, {600, 300}});
-        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(project)), QString());
+        QCOMPARE(saveAs(QUrl::fromLocalFile(project)), QString());
         mouseStroke({{100, 450}, {600, 450}});
         QVERIFY(autosaveAndWait());
         const QImage before = doc().copy();
@@ -684,7 +705,7 @@ private slots:
         // The project file still holds the last explicit save, not the recovered strokes.
         QVERIFY(ProjectFile::load(project).document.composite() != before);
         // Saving clears the unsaved state and the recovery data.
-        QCOMPARE(m_canvas->saveFile(), QString());
+        QCOMPARE(save(), QString());
         QVERIFY(!m_canvas->isModified());
         QVERIFY(!QFile::exists(m_recovery->recoveryFilePath()));
         QCOMPARE(ProjectFile::load(project).document.composite(), before);
@@ -857,7 +878,7 @@ private slots:
 
         QTemporaryDir dir;
         m_canvas->addLayer();
-        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("sel.drawapp"))), QString());
+        QCOMPARE(saveAs(QUrl::fromLocalFile(dir.filePath("sel.drawapp"))), QString());
         m_canvas->setActiveLayer(m_canvas->document().layer(0).id);
         QVERIFY(!m_canvas->isModified());
         QVERIFY(m_canvas->undoText() == QStringLiteral("Add layer"));
@@ -907,11 +928,11 @@ private slots:
         const DocumentData saved = m_canvas->document().snapshot();
         const QImage composite = doc().copy();
         const QString path = dir.filePath("layers.drawapp");
-        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(saveAs(QUrl::fromLocalFile(path)), QString());
 
         m_canvas->newDocument();
         QCOMPARE(m_canvas->layerCount(), 1);
-        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(open(QUrl::fromLocalFile(path)), QString());
         const LayeredDocument &d = m_canvas->document();
         QCOMPARE(d.count(), 3);
         QCOMPARE(d.activeLayerId(), saved.activeLayerId);
@@ -936,12 +957,12 @@ private slots:
         old.stampDabs({{QPointF(160, 120), 80}}, QColor(10, 100, 200), BrushMode::Paint);
         const QString path = dir.filePath("old.drawapp");
         QCOMPARE(ProjectFile::writeFileSafely(path, ProjectFile::encodeVersion1(old.image())), QString());
-        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(open(QUrl::fromLocalFile(path)), QString());
         QCOMPARE(m_canvas->layerCount(), 1);
         QCOMPARE(m_canvas->documentSize(), QSize(320, 240));
         QCOMPARE(doc(), old.image());
         // Saving writes the layered format, which opens to the same pixels.
-        QCOMPARE(m_canvas->saveFile(), QString());
+        QCOMPARE(save(), QString());
         QCOMPARE(ProjectFile::load(path).version, 2);
         QCOMPARE(ProjectFile::load(path).document.composite(), old.image());
     }
@@ -1025,6 +1046,197 @@ private slots:
         m_canvas->restoreRecovery();
         QCOMPARE(m_canvas->layerCount(), 1);
         QCOMPARE(doc(), old.image());
+    }
+
+    // --- asynchronous save and open ---
+
+    void editsDuringSaveStayUnsaved()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("during.drawapp");
+        mouseStroke({{100, 300}, {600, 300}});
+        const QImage atSnapshot = doc().copy();
+        QSemaphore gate;
+        m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(path)), QString());
+        QVERIFY(m_canvas->fileBusy());
+        QVERIFY(!m_canvas->hasFile()); // the path changes only after success
+        mouseStroke({{100, 450}, {600, 450}}); // drawing continues while the worker saves
+        QCOMPARE(alphaAt(toDoc(QPointF(300, 450))), 255);
+        gate.release();
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 1; }, 10000));
+        QVERIFY(finished.first().at(0).toBool());
+        QVERIFY(m_canvas->hasFile());
+        QVERIFY(m_canvas->isModified()); // the second stroke is not in the file
+        QCOMPARE(ProjectFile::load(path).document.composite(), atSnapshot);
+        m_canvas->undo(); // back at exactly the saved state
+        QVERIFY(!m_canvas->isModified());
+        m_canvas->projectIo().setBeforeFinishHookForTesting({});
+    }
+
+    void failedSaveKeepsFileDirtyStateAndPath()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("keep.drawapp");
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(saveAs(QUrl::fromLocalFile(path)), QString());
+        const QByteArray before = fileBytes(path);
+        mouseStroke({{100, 450}, {600, 450}});
+        QVERIFY(QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::ReadUser));
+        const QString error = save();
+        QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        QVERIFY(!error.isEmpty());
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(fileBytes(path), before);
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("keep.drawapp"));
+
+        // A failed Save As to a new place keeps the old path.
+        QVERIFY(!saveAs(QUrl::fromLocalFile(dir.filePath("missing/x.drawapp"))).isEmpty());
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("keep.drawapp"));
+        QVERIFY(m_canvas->isModified());
+    }
+
+    void repeatedSaveWritesTheNewestData()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("newest.drawapp");
+        mouseStroke({{100, 300}, {600, 300}});
+        QSemaphore gate;
+        m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(path)), QString());
+        mouseStroke({{100, 450}, {600, 450}});
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(path)), QString()); // same file: queued
+        QVERIFY(m_canvas->fileBusyText().contains("queued"));
+        QVERIFY(!m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("other.drawapp"))).isEmpty()); // refused
+        QVERIFY(!m_canvas->openFile(QUrl::fromLocalFile(path)).isEmpty());                           // refused
+        const QImage newest = doc().copy();
+        gate.release(); // first save (older snapshot)
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 1; }, 10000));
+        QVERIFY(m_canvas->fileBusy()); // the queued save started from a newer snapshot
+        gate.release();
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 2; }, 10000));
+        QVERIFY(!m_canvas->fileBusy());
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(ProjectFile::load(path).document.composite(), newest);
+        QVERIFY(!QFile::exists(dir.filePath("other.drawapp")));
+        m_canvas->projectIo().setBeforeFinishHookForTesting({});
+    }
+
+    void openReplacesOnlyAfterSuccess()
+    {
+        QTemporaryDir dir;
+        RasterDocument other(QSize(300, 200));
+        other.stampDabs({{QPointF(150, 100), 60}}, QColor(0, 0, 200), BrushMode::Paint);
+        const QString path = dir.filePath("other.drawapp");
+        QCOMPARE(ProjectFile::save(DocumentData::fromImage(other.image()), path), QString());
+        mouseStroke({{100, 300}, {600, 300}});
+        const QImage mine = doc().copy();
+
+        QSemaphore gate;
+        m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+        QSignalSpy finished(m_canvas, &CanvasItem::openFinished);
+        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        QVERIFY(m_canvas->isOpening());
+        QCOMPARE(doc(), mine); // nothing replaced while loading
+        QVERIFY(!m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("x.drawapp"))).isEmpty()); // refused
+        gate.release();
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 1; }, 10000));
+        QVERIFY(finished.first().at(0).toBool());
+        QCOMPARE(doc(), other.image());
+
+        // A damaged file reports an error and changes nothing.
+        m_canvas->projectIo().setBeforeFinishHookForTesting({});
+        const QImage now = doc().copy();
+        {
+            QFile f(dir.filePath("bad.drawapp"));
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("DRAWAPP\nnot really");
+        }
+        QVERIFY(!open(QUrl::fromLocalFile(dir.filePath("bad.drawapp"))).isEmpty());
+        QCOMPARE(doc(), now);
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("other.drawapp"));
+    }
+
+    void editsDuringOpenAreNotSilentlyLost()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("target.drawapp");
+        RasterDocument target(QSize(320, 240));
+        QCOMPARE(ProjectFile::save(DocumentData::fromImage(target.image()), path), QString());
+
+        for (bool useOpened : {false, true}) {
+            QSemaphore gate;
+            m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+            QSignalSpy conflict(m_canvas, &CanvasItem::openConflict);
+            QSignalSpy finished(m_canvas, &CanvasItem::openFinished);
+            QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+            mouseStroke({{100, 300}, {600, 300}}); // an edit while the file loads
+            const QImage edited = doc().copy();
+            gate.release();
+            QVERIFY(QTest::qWaitFor([&] { return conflict.count() == 1; }, 10000));
+            QVERIFY(m_canvas->hasOpenConflict());
+            QCOMPARE(doc(), edited); // not replaced until the user decides
+            QCOMPARE(finished.count(), 0);
+            m_canvas->resolveOpenConflict(useOpened);
+            QCOMPARE(finished.count(), 1);
+            if (useOpened) {
+                QVERIFY(finished.first().at(0).toBool());
+                QCOMPARE(m_canvas->documentSize(), QSize(320, 240));
+            } else {
+                QVERIFY(!finished.first().at(0).toBool());
+                QVERIFY(finished.first().at(1).toString().isEmpty()); // cancelled, not an error
+                QCOMPARE(doc(), edited);
+                QVERIFY(m_canvas->isModified());
+            }
+            m_canvas->projectIo().setBeforeFinishHookForTesting({});
+        }
+    }
+
+    void recoveryKeepsEditsNewerThanTheSave()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QTemporaryDir dir;
+        const QString path = dir.filePath("rec.drawapp");
+        mouseStroke({{100, 300}, {600, 300}});
+        QVERIFY(autosaveAndWait());
+        QSemaphore gate;
+        m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(path)), QString());
+        mouseStroke({{100, 450}, {600, 450}}); // newer than the save's snapshot
+        gate.release();
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 1; }, 10000));
+        m_canvas->projectIo().setBeforeFinishHookForTesting({});
+        QVERIFY(m_canvas->isModified());
+        QVERIFY(QFile::exists(m_recovery->recoveryFilePath())); // not discarded by that save
+        QVERIFY(autosaveAndWait());
+        QCOMPARE(recoveredImage(), doc()); // includes the newer stroke
+        QCOMPARE(save(), QString());
+        QVERIFY(!QFile::exists(m_recovery->recoveryFilePath())); // saved now: removed
+    }
+
+    void stalledSaveDuringAutosaveIsHarmless()
+    {
+        // A recovery write and a project save can run at the same time on their own threads.
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QTemporaryDir dir;
+        mouseStroke({{100, 300}, {600, 300}});
+        QSemaphore recoveryGate;
+        m_recovery->setBeforeCommitHookForTesting([&] { recoveryGate.acquire(); });
+        m_canvas->autosaveNow(); // recovery write held before its commit
+        QVERIFY(m_recovery->isWriting());
+        QCOMPARE(saveAs(QUrl::fromLocalFile(dir.filePath("both.drawapp"))), QString());
+        QVERIFY(!m_canvas->isModified());
+        QSignalSpy written(m_recovery.get(), &RecoveryManager::writeFinished);
+        recoveryGate.release();
+        QVERIFY(QTest::qWaitFor([&] { return written.count() == 1; }, 10000));
+        QVERIFY(written.first().at(1).toBool()); // stale: the save discarded it, no file recreated
+        QVERIFY(!QFile::exists(m_recovery->recoveryFilePath()));
+        m_recovery->setBeforeCommitHookForTesting({});
     }
 
     void shutdownKeepsOrRemovesRecovery()

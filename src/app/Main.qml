@@ -21,15 +21,29 @@ ApplicationWindow {
     property var pendingAction: null
     // Action to run after a Save As chosen from the unsaved-changes prompt succeeds.
     property var afterSaveAs: null
+    // Action waiting for the running save to finish successfully (New, Open or Close after Save).
+    property var afterSave: null
     property bool closeConfirmed: false
+    // The window was closed during a save or open; close again once it has finished.
+    property bool closeWhenIdle: false
 
     function showError(message) {
         errorDialog.text = message
         errorDialog.open()
     }
 
+    function showNotice(message) {
+        noticeLabel.text = message
+        noticeBanner.visible = true
+        noticeTimer.restart()
+    }
+
     // Runs action now, or after the user saves or discards unsaved changes. Cancel drops it.
     function whenChangesHandled(action) {
+        if (canvas.fileBusy) {
+            showNotice(canvas.fileBusyText + " Try again when it has finished.")
+            return
+        }
         if (!canvas.modified) {
             action()
             return
@@ -38,22 +52,30 @@ ApplicationWindow {
         unsavedDialog.open()
     }
 
-    // Saves to the current file, or asks for one. Runs then() only after a successful save.
-    function saveDocument(then) {
-        if (canvas.hasFile) {
-            const error = canvas.saveFile()
-            if (error) {
-                showError(error)
-                return
-            }
-            if (then)
-                then()
-        } else {
-            saveAsDocument(then)
+    // Starts a save. then() runs only after it succeeds (see onSaveFinished).
+    function startSave(call, then) {
+        const error = call()
+        if (error) {
+            showError(error)
+            return
         }
+        if (then)
+            afterSave = then
+    }
+
+    // Saves to the current file, or asks for one.
+    function saveDocument(then) {
+        if (canvas.hasFile)
+            startSave(() => canvas.saveFile(), then)
+        else
+            saveAsDocument(then)
     }
 
     function saveAsDocument(then) {
+        if (canvas.fileBusy) {
+            showNotice(canvas.fileBusyText + " Try again when it has finished.")
+            return
+        }
         afterSaveAs = then || null
         saveDialog.open()
     }
@@ -61,7 +83,46 @@ ApplicationWindow {
     function newDocument() { whenChangesHandled(() => canvas.newDocument()) }
     function openDocument() { whenChangesHandled(() => openDialog.open()) }
 
+    Connections {
+        target: canvas
+        function onSaveFinished(ok, error) {
+            const then = window.afterSave
+            window.afterSave = null
+            if (!ok) {
+                if (error)
+                    window.showError(error) // the document stays unsaved; nothing else happens
+            } else if (then) {
+                // Edits made while saving are not in the file: ask again rather than drop them.
+                if (canvas.modified)
+                    window.whenChangesHandled(then)
+                else
+                    then()
+            }
+            window.closeIfWaiting()
+        }
+        function onOpenFinished(ok, error) {
+            if (!ok && error)
+                window.showError(error)
+            window.closeIfWaiting()
+        }
+        function onOpenConflict() { openConflictDialog.open() }
+    }
+
+    function closeIfWaiting() {
+        if (closeWhenIdle && !canvas.fileBusy) {
+            closeWhenIdle = false
+            window.close()
+        }
+    }
+
     onClosing: (close) => {
+        if (canvas.fileBusy) {
+            // Never exit in the middle of a save or open; close afterwards (with the usual prompt).
+            close.accepted = false
+            closeWhenIdle = true
+            showNotice(canvas.fileBusyText + " The window closes when it has finished.")
+            return
+        }
         if (canvas.modified && !closeConfirmed) {
             close.accepted = false
             whenChangesHandled(() => {
@@ -89,6 +150,11 @@ ApplicationWindow {
     }
 
     header: ToolBar {
+        // Android draws apps edge to edge (target API 35+): keep controls out of the status bar and
+        // display cutouts. The margins are 0 on desktop.
+        topPadding: SafeArea.margins.top
+        leftPadding: SafeArea.margins.left
+        rightPadding: SafeArea.margins.right
         Flow {
             width: parent.width
             spacing: 6
@@ -100,10 +166,10 @@ ApplicationWindow {
                 Menu {
                     id: fileMenu
                     y: parent.height
-                    MenuItem { text: "New   (Ctrl+N)"; onTriggered: window.newDocument() }
-                    MenuItem { text: "Open…   (Ctrl+O)"; onTriggered: window.openDocument() }
-                    MenuItem { text: "Save   (Ctrl+S)"; onTriggered: window.saveDocument(null) }
-                    MenuItem { text: "Save As…   (Ctrl+Shift+S)"; onTriggered: window.saveAsDocument(null) }
+                    MenuItem { text: "New   (Ctrl+N)"; enabled: !canvas.fileBusy; onTriggered: window.newDocument() }
+                    MenuItem { text: "Open…   (Ctrl+O)"; enabled: !canvas.fileBusy; onTriggered: window.openDocument() }
+                    MenuItem { text: "Save   (Ctrl+S)"; enabled: !canvas.opening; onTriggered: window.saveDocument(null) }
+                    MenuItem { text: "Save As…   (Ctrl+Shift+S)"; enabled: !canvas.fileBusy; onTriggered: window.saveAsDocument(null) }
                     MenuSeparator {}
                     MenuItem { text: "Export PNG…   (Ctrl+Shift+E)"; onTriggered: exportDialog.open() }
                 }
@@ -260,7 +326,10 @@ ApplicationWindow {
                 objectName: "canvas"
                 anchors.fill: parent
                 focus: true
+                // Painting is blocked while a file is opening, so no edit can be made to a drawing
+                // that is about to be replaced (C++ still detects it, see openConflict).
                 enabled: !unsavedDialog.visible && !errorDialog.visible && !recoveryDialog.visible
+                         && !openConflictDialog.visible && !canvas.opening
                          && !renameDialog.visible
                 onNotice: (message) => {
                     noticeLabel.text = message
@@ -297,6 +366,7 @@ ApplicationWindow {
 
         Pane {
             id: layerPanel
+            enabled: !canvas.opening
             Layout.preferredWidth: 270
             Layout.fillHeight: true
             visible: window.width >= 720
@@ -466,12 +536,30 @@ ApplicationWindow {
     Component.onCompleted: syncOpacitySlider()
 
     footer: ToolBar {
+        // Above the Android navigation bar (0 on desktop).
+        bottomPadding: SafeArea.margins.bottom
+        leftPadding: SafeArea.margins.left
+        rightPadding: SafeArea.margins.right
+        // The children are anchored, so the content height has to be given explicitly.
+        contentHeight: statusLabel.implicitHeight + 6
+        BusyIndicator {
+            id: fileBusyIndicator
+            objectName: "fileBusyIndicator"
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            height: parent.height - 4
+            width: visible ? height : 0
+            running: canvas.fileBusy
+            visible: canvas.fileBusy
+        }
         Label {
+            id: statusLabel
             anchors.fill: parent
-            anchors.leftMargin: 8
+            anchors.leftMargin: 8 + fileBusyIndicator.width
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
-            text: canvas.inputStatus + "   ·   Canvas " + canvas.documentSize.width + " × "
+            text: (canvas.fileBusy ? canvas.fileBusyText + "   ·   " : "")
+                  + canvas.inputStatus + "   ·   Canvas " + canvas.documentSize.width + " × "
                   + canvas.documentSize.height + " px"
                   + (canvas.recoveryStatus ? "   ·   " + canvas.recoveryStatus : "")
                   + "   ·   Wheel: zoom   ·   Middle-drag or Space+drag: pan"
@@ -509,13 +597,7 @@ ApplicationWindow {
         onAccepted: {
             const then = window.afterSaveAs
             window.afterSaveAs = null
-            const error = canvas.saveFileAs(selectedFile)
-            if (error) {
-                window.showError(error)
-                return
-            }
-            if (then)
-                then()
+            window.startSave(() => canvas.saveFileAs(selectedFile), then)
         }
         // Cancelling Save As also cancels whatever was waiting for the save.
         onRejected: window.afterSaveAs = null
@@ -574,6 +656,8 @@ ApplicationWindow {
         width: Math.min(window.width - 32, 520)
         modal: true
         focus: true
+        // A stray touch outside must not dismiss the decision (Escape still postpones).
+        closePolicy: Popup.CloseOnEscape
         title: "Recover unsaved artwork?"
         footer: DialogButtonBox {
             Button { text: "Restore"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
@@ -607,6 +691,29 @@ ApplicationWindow {
     }
 
     Dialog {
+        id: openConflictDialog
+        anchors.centerIn: parent
+        width: Math.min(window.width - 32, 460)
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        title: "Replace the drawing?"
+        footer: DialogButtonBox {
+            Button { text: "Open the file"; DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole }
+            Button { text: "Keep my drawing"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        }
+        Label {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "The drawing changed while the file was opening. Opening the file now discards those changes."
+        }
+        onDiscarded: {
+            openConflictDialog.close()
+            canvas.resolveOpenConflict(true)
+        }
+        onRejected: canvas.resolveOpenConflict(false)
+    }
+
+    Dialog {
         id: renameDialog
         property int layerId: 0
         anchors.centerIn: parent
@@ -619,6 +726,8 @@ ApplicationWindow {
             objectName: "renameField"
             width: parent.width
             maximumLength: 256
+            // On Android the keyboard's Enter otherwise moves focus instead of confirming.
+            EnterKey.type: Qt.EnterKeyDone
             onAccepted: renameDialog.accept()
         }
         onAccepted: canvas.renameLayer(layerId, renameField.text)
@@ -645,18 +754,18 @@ ApplicationWindow {
         onClosed: canvas.forceActiveFocus()
     }
 
-    Shortcut { sequences: [StandardKey.Undo]; onActivated: canvas.undo() }
-    Shortcut { sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; onActivated: canvas.redo() }
+    Shortcut { sequences: [StandardKey.Undo]; enabled: !canvas.opening; onActivated: canvas.undo() }
+    Shortcut { sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; enabled: !canvas.opening; onActivated: canvas.redo() }
     Shortcut { sequences: [StandardKey.New]; onActivated: window.newDocument() }
     Shortcut { sequences: [StandardKey.Open]; onActivated: window.openDocument() }
     Shortcut { sequences: [StandardKey.Save]; onActivated: window.saveDocument(null) }
     Shortcut { sequences: ["Ctrl+Shift+S"]; onActivated: window.saveAsDocument(null) }
     Shortcut { sequences: ["Ctrl+Shift+E"]; onActivated: exportDialog.open() }
-    Shortcut { sequences: ["Ctrl+Shift+N"]; onActivated: canvas.addLayer() }
-    Shortcut { sequence: "B"; onActivated: canvas.tool = CanvasItem.Brush }
-    Shortcut { sequence: "E"; onActivated: canvas.tool = CanvasItem.Eraser }
-    Shortcut { sequence: "["; onActivated: canvas.brushSize = Math.max(1, Math.round(canvas.brushSize / 1.2)) }
-    Shortcut { sequence: "]"; onActivated: canvas.brushSize = Math.min(256, Math.round(canvas.brushSize * 1.2) + 1) }
+    Shortcut { sequences: ["Ctrl+Shift+N"]; enabled: !canvas.opening; onActivated: canvas.addLayer() }
+    Shortcut { sequence: "B"; enabled: !canvas.opening; onActivated: canvas.tool = CanvasItem.Brush }
+    Shortcut { sequence: "E"; enabled: !canvas.opening; onActivated: canvas.tool = CanvasItem.Eraser }
+    Shortcut { sequence: "["; enabled: !canvas.opening; onActivated: canvas.brushSize = Math.max(1, Math.round(canvas.brushSize / 1.2)) }
+    Shortcut { sequence: "]"; enabled: !canvas.opening; onActivated: canvas.brushSize = Math.min(256, Math.round(canvas.brushSize * 1.2) + 1) }
     Shortcut { sequences: [StandardKey.ZoomIn, "Ctrl+="]; onActivated: canvas.zoomIn() }
     Shortcut { sequences: [StandardKey.ZoomOut]; onActivated: canvas.zoomOut() }
     Shortcut { sequence: "Ctrl+0"; onActivated: canvas.fitToView() }

@@ -28,8 +28,9 @@ All tests must pass before handing off: `tst_core`, `tst_document`, `tst_recover
 `tst_canvas` and `tst_ui` (windows; under ctest they render offscreen so they do not take over the
 user's desktop). They save screenshots to `build\windows-mingw-release\tests\tst_*.png`; look at
 them after rendering or QML changes. Do not drive the real desktop with synthetic OS input unless
-the user is not using the machine. Android: `tools\build-android.ps1 [-Config Debug]` (build
-directory must not contain spaces).
+the user is not using the machine. Android: `tools\build-android.ps1 [-Config Debug] [-Abi x86_64]`
+(build directory must not contain spaces; `x86_64` for the emulator, see BUILD.md). Emulator
+results are not physical-device results; label them as such.
 
 ## Version control
 
@@ -65,6 +66,17 @@ push. Never commit build outputs, APKs/AABs, keystores or other credentials (see
   pixels saved or deliberately abandoned must call `discardRecoveryFile()`; failures and
   cancellations must not.
 - Do not claim the autosave interval is the maximum loss; report measured windows (BENCHMARKS.md).
+
+## Async save/open invariants
+
+- Save and open go through `ProjectIo` (one worker, one operation at a time). The worker gets a
+  `DocumentData` snapshot or a path, never `CanvasItem` or the live document.
+- A finished save marks as saved only the `stateId` recorded when its snapshot was taken, and
+  changes the path only on success. A failed save changes nothing.
+- An opened document replaces the current one only after success and only if the document did
+  not change meanwhile; otherwise ask (`openConflict`). Never drop either version silently.
+- New/Open/Close after a requested save wait for its success. Every new file action must check
+  `fileBusy`. Test races with `ProjectIo::setBeforeFinishHookForTesting`.
 
 ## Conventions
 

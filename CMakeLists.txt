@@ -17,6 +17,7 @@ add_library(drawcore STATIC
     src/core/LayeredDocument.cpp src/core/LayeredDocument.h
     src/core/Pressure.h
     src/core/ProjectFile.cpp src/core/ProjectFile.h
+    src/core/ProjectIo.cpp src/core/ProjectIo.h
     src/core/RasterDocument.cpp src/core/RasterDocument.h
     src/core/RecoveryFile.cpp src/core/RecoveryFile.h
     src/core/RecoveryManager.cpp src/core/RecoveryManager.h

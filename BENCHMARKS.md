@@ -146,8 +146,76 @@ Observations:
 Not measured for layers: on-screen app memory with a real GPU surface (the session was postponed
 because the desktop was in use), Android, and input-to-display latency.
 
+## Milestone 4: async save and the first edit after a snapshot, 2026-10-12, same machine
+
+`bench_canvas` (tests/bench_canvas.cpp) drives the real `CanvasItem` on Qt's offscreen platform:
+synthetic mouse strokes at 250 Hz (one event every 4 ms) for about 12.5 s per document, an
+autosave (recovery snapshot) every 1 s, and one asynchronous project save started about 5 s in,
+while drawing continues. Documents are those of the milestone 3 table (2048×1536, 1, 5 and 10
+painted layers). Release build; other desktop applications were open; power state not recorded.
+Two runs back to back; the table gives run 1 / run 2.
+
+Run: `$env:QT_QPA_PLATFORM="offscreen"; build\windows-mingw-release\bench_canvas.exe`.
+
+What each row measures, all **CPU time on the UI thread unless marked "worker"**:
+- *Input handler*: `CanvasItem`'s mouse handler for one event (spacing, dab stamping into the
+  active layer, undo capture, composite refresh of the dab rect).
+- *First event after a snapshot*: the same for the first event that paints after an autosave or
+  save snapshot. This is where the active layer, still shared with the snapshot, is copied
+  (12 MiB).
+- *Event loop + render*: processing the queued events and the item's paint after each event.
+- *Whole iteration*: handler plus event loop plus render for one event. Its maximum is the
+  largest UI stall seen during the run. The first-edit iteration (layer copy plus redraw) is the
+  maximum in every run.
+
+| Measure (ms) | 1 layer | 5 layers | 10 layers |
+|---|---|---|---|
+| Input handler, ordinary event, median / p95 | 0.10 / 0.93 – 0.94 | 0.10 / 0.87 – 0.88 | 0.10 / 0.73 – 0.77 |
+| First event after a snapshot (layer copy), median | 3.03 / 3.10 | 3.30 / 3.23 | 3.13 / 3.30 |
+| First event after a snapshot, max | 4.40 / 4.23 | 3.96 / 4.06 | 3.73 / 4.67 |
+| Event loop + render after an event, max | 0.91 / 0.72 | 0.62 / 1.00 | 0.63 / 1.02 |
+| Whole iteration, p95 | 1.00 / 1.00 | 0.93 / 0.96 | 0.83 / 0.78 |
+| **Largest UI stall** (whole iteration, max) | **4.40 / 4.23** | **3.96 / 4.06** | **3.73 / 4.67** |
+| Save request on the UI thread (snapshot + start) | 0.12 / 0.13 | 0.19 / 0.09 | 0.08 / 0.15 |
+| Save, worker | 48 / 43 | 352 / 350 | 755 / 785 |
+| Save, request to finished signal (drawing continued) | 50 / 44 | 356 / 353 | 756 / 788 |
+| Recovery write, worker, median | 45 / 45 | 337 / 340 | 743 / 718 |
+
+12–13 snapshots per run. In milestone 3 a 10-layer save blocked the UI for about 0.8 s. Now
+the UI thread spends about 0.1 ms to start it, and the worker time (0.75–0.79 s) passes while
+drawing continues. The first edit after each snapshot costs about 3–4.7 ms whatever the layer
+count, because only the active layer is copied.
+
+`bench_core 30` in the same session reproduced the milestone 3 rows within run-to-run
+variation. For example, the first dab after a snapshot took 2.1–2.2 ms median, and save/open
+took 38/20, 340/119 and 728/236 ms for 1/5/10 layers. Opening runs on the worker as well. Only
+replacing the document runs on the UI thread, and that step was not benchmarked separately.
+
+Limits of these numbers:
+- Offscreen platform: no GPU texture upload or display. This is CPU time, **not pen-to-display
+  latency**.
+- Synthetic input at a fixed rate.
+- Not measured on the Android emulator, which uses the host GPU and an x86_64 image and would
+  not represent a phone.
+
+## Android emulator observations (2026-10-12, not a physical device)
+
+Pixel Tablet AVD, Android 16 (API 36, google_apis x86_64 image), emulator 36.6.11 with
+`-gpu host -no-window`, on the same Windows machine. Only qualitative timings were recorded:
+- App cold start (`am start -W` TotalTime): 0.8–2.8 s, and 11 s once right after a forced stop.
+- On the first launch after the emulator booted, the window showed its first frame for 10–15 s
+  before later frames, such as the recovery prompt, appeared.
+- With the SwiftShader software renderer, the canvas showed a diagonal tear; with `-gpu host`
+  it rendered correctly.
+- Once the whole emulator display froze while the soft keyboard animated in. The status-bar
+  clock stopped too, so the emulator's compositor, not the app, had hung. A cold restart of the
+  emulator fixed it.
+
+These are properties of this emulator setup and say nothing about a phone or tablet.
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera).
 - Scene-graph texture upload cost per frame for `QQuickPaintedItem`.
-- Android/iOS/Linux, real pen hardware, larger canvases, battery.
+- Physical Android devices, iOS, Linux, real pen hardware, larger canvases, battery.
+- On-screen Windows memory and timing with a real GPU surface for layers and async save.

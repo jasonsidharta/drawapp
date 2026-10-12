@@ -88,6 +88,8 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     m_autosaveTimer.setInterval(m_autosaveIntervalMs);
     m_autosaveTimer.setTimerType(Qt::CoarseTimer);
     connect(&m_autosaveTimer, &QTimer::timeout, this, &CanvasItem::autosaveNow);
+    connect(&m_io, &ProjectIo::saveFinished, this, &CanvasItem::onSaveFinished);
+    connect(&m_io, &ProjectIo::openFinished, this, &CanvasItem::onOpenFinished);
     // Constructed with a parent already in a window: ItemSceneChange ran before this class existed.
     watchWindow(window());
 }
@@ -124,7 +126,9 @@ QString CanvasItem::documentTitle() const
 {
     if (m_filePath.isEmpty())
         return QStringLiteral("Untitled");
-    const QString name = m_fileUrl.isLocalFile() ? QFileInfo(m_filePath).fileName() : m_fileUrl.fileName();
+    // For an Android content:// URI, QFileInfo asks the document provider for the display name;
+    // the URI's last segment is often only a document id (".../document/10").
+    const QString name = QFileInfo(m_filePath).fileName();
     return name.isEmpty() ? QStringLiteral("Untitled") : name;
 }
 
@@ -469,25 +473,88 @@ void CanvasItem::newDocument()
     emit fileChanged();
 }
 
+QString CanvasItem::fileBusyText() const
+{
+    if (m_save.id)
+        return m_saveQueued ? QStringLiteral("Saving (another save queued)…") : QStringLiteral("Saving…");
+    if (m_open.id)
+        return QStringLiteral("Opening…");
+    return {};
+}
+
 QString CanvasItem::openFile(const QUrl &url)
 {
+    if (fileBusy())
+        return QStringLiteral("Wait until the current save or open has finished.");
+    if (m_conflict)
+        return QStringLiteral("Decide first what to do with the file that was just opened.");
     const QString path = pathFromUrl(url);
-    // Decoded into separate memory first: a failed open leaves the current artwork untouched.
-    ProjectFile::LoadResult result = ProjectFile::load(path);
-    if (!result.ok())
-        return result.error;
-    replaceDocument(LayeredDocument(result.document));
+    // Decoded into a separate DocumentData on the worker; the open document is only replaced when
+    // that succeeds (onOpenFinished).
+    const quint64 id = m_io.open(path);
+    if (!id)
+        return QStringLiteral("Wait until the current save or open has finished.");
+    m_open = {id, path, url, m_documentId, m_contentRevision};
+    emit fileBusyChanged();
+    return {};
+}
+
+void CanvasItem::onOpenFinished(quint64 id, const QString &path, const ProjectFile::LoadResult &result, qint64 workerMs)
+{
+    if (id != m_open.id)
+        return;
+    const OpenRequest request = m_open;
+    m_open = {};
+    emit fileBusyChanged();
+    if (m_statsEnabled)
+        qInfo().noquote() << QStringLiteral("[file] open finished in %1 ms on the worker").arg(workerMs);
+    if (!result.ok()) {
+        emit openFinished(false, result.error); // the open document was never touched
+        return;
+    }
+    if (m_documentId != request.documentId || m_contentRevision != request.revision) {
+        // The drawing changed while the file was loading: never drop those edits silently.
+        m_conflict = OpenConflict{result.document, path, request.url};
+        emit openConflict();
+        return;
+    }
+    QElapsedTimer applyTimer;
+    applyTimer.start();
+    applyOpened(result.document, path, request.url);
+    if (m_statsEnabled)
+        qInfo().noquote() << QStringLiteral("[file] replacing the document on the UI thread took %1 ms (%2 layers)")
+                                 .arg(applyTimer.nsecsElapsed() / 1e6, 0, 'f', 2)
+                                 .arg(result.document.layers.size());
+    emit openFinished(true, {});
+}
+
+void CanvasItem::resolveOpenConflict(bool useOpenedFile)
+{
+    if (!m_conflict)
+        return;
+    const OpenConflict conflict = std::move(*m_conflict);
+    m_conflict.reset();
+    if (useOpenedFile) {
+        applyOpened(conflict.document, conflict.path, conflict.url);
+        emit openFinished(true, {});
+    } else {
+        emit openFinished(false, {}); // cancelled: the current drawing stays as it is
+    }
+}
+
+void CanvasItem::applyOpened(const DocumentData &document, const QString &path, const QUrl &url)
+{
+    replaceDocument(LayeredDocument(document));
     m_filePath = path;
     m_fileUrl = url;
     emit fileChanged();
-    return {};
 }
 
 QString CanvasItem::saveFile()
 {
     if (m_filePath.isEmpty())
         return QStringLiteral("Choose a file name first (Save As).");
-    return saveTo(m_filePath, m_fileUrl);
+    return startSave(m_filePath, m_fileUrl);
 }
 
 QString CanvasItem::saveFileAs(const QUrl &url)
@@ -495,29 +562,75 @@ QString CanvasItem::saveFileAs(const QUrl &url)
     QString path = pathFromUrl(url);
     QUrl target = url;
     ensureSuffix(path, target, QString::fromLatin1(ProjectFile::Extension));
-    return saveTo(path, target);
+    return startSave(path, target);
 }
 
-QString CanvasItem::saveTo(const QString &path, const QUrl &url)
+QString CanvasItem::startSave(const QString &path, const QUrl &url)
 {
+    if (m_open.id)
+        return QStringLiteral("Wait until the file has finished opening.");
+    if (m_save.id) {
+        if (path == m_save.path) {
+            // Saved again after the running save, from a newer snapshot: newer data always lands last.
+            m_saveQueued = true;
+            emit fileBusyChanged();
+            return {};
+        }
+        return QStringLiteral("Another save is still running. Try again when it has finished.");
+    }
     if (m_gesture == Gesture::Stroke)
         endStroke();
     if (m_opacityDragLayerId != 0)
         commitLayerOpacity(int(m_opacityDragLayerId), m_document.layer(m_document.indexOf(m_opacityDragLayerId)).opacity);
-    const QString error = ProjectFile::save(m_document.snapshot(), path);
-    if (!error.isEmpty())
-        return error; // recovery data stays: the work is still only recoverable from there
-    m_savedStateId = m_history.stateId();
-    // The saved file now holds this state; recovery data would only duplicate it.
-    discardRecoveryFile();
-    m_oldestUnrecoveredMs = -1;
-    const bool fileChangedNow = path != m_filePath;
-    m_filePath = path;
-    m_fileUrl = url;
-    emit historyChanged();
-    if (fileChangedNow)
-        emit fileChanged();
+
+    // Immutable snapshot (copy-on-write images); editing continues while the worker writes it.
+    const quint64 id = m_io.save(m_document.snapshot(), path);
+    m_firstEditAfterSnapshot = true;
+    if (!id)
+        return QStringLiteral("Another file operation is still running.");
+    m_save = {id, path, url, m_history.stateId(), m_documentId};
+    emit fileBusyChanged();
     return {};
+}
+
+void CanvasItem::onSaveFinished(quint64 id, const QString &path, const QString &error, qint64 workerMs)
+{
+    Q_UNUSED(path);
+    if (id != m_save.id)
+        return;
+    const SaveRequest done = m_save;
+    const bool queued = m_saveQueued;
+    m_save = {};
+    m_saveQueued = false;
+    if (m_statsEnabled)
+        qInfo().noquote() << QStringLiteral("[file] save finished in %1 ms on the worker%2")
+                                 .arg(workerMs)
+                                 .arg(error.isEmpty() ? QString() : QStringLiteral(" (failed)"));
+    if (!error.isEmpty()) {
+        // The previous file is intact (atomic replace), the document stays unsaved, the path is
+        // unchanged and a queued save is dropped.
+        emit fileBusyChanged();
+        emit saveFinished(false, error);
+        return;
+    }
+    if (done.documentId == m_documentId) {
+        // Only the state captured in the snapshot is saved; later edits keep the document modified.
+        m_savedStateId = done.stateId;
+        const bool pathChanged = done.path != m_filePath;
+        m_filePath = done.path;
+        m_fileUrl = done.url;
+        if (!needsRecovery()) {
+            discardRecoveryFile();
+            m_oldestUnrecoveredMs = -1;
+        }
+        emit historyChanged();
+        if (pathChanged)
+            emit fileChanged();
+        if (queued && isModified())
+            startSave(m_filePath, m_fileUrl);
+    }
+    emit fileBusyChanged();
+    emit saveFinished(true, {});
 }
 
 QString CanvasItem::exportPng(const QUrl &url)
@@ -904,11 +1017,23 @@ void CanvasItem::applyPendingDabs()
         return;
     }
     // Only the stroke's layer changes; the composite is rebuilt for the changed area only.
+    // The first edit after a snapshot (recovery or save) also copies this layer's shared pixels.
+    QElapsedTimer firstEditTimer;
+    const bool firstAfterSnapshot = m_firstEditAfterSnapshot;
+    if (firstAfterSnapshot)
+        firstEditTimer.start();
     const QRect changed = RasterDocument::stampDabs(m_document.pixels(index), m_pendingDabs, m_strokeColor,
                                                     m_strokeMode, &m_strokeBefore);
     if (!changed.isEmpty()) {
         m_document.refreshComposite(changed);
         markContentChanged();
+    }
+    if (firstAfterSnapshot) {
+        m_firstEditAfterSnapshot = false;
+        if (m_statsEnabled)
+            qInfo().noquote() << QStringLiteral("[snapshot] first edit after a snapshot: %1 ms (stamp + layer copy + "
+                                                "composite refresh, before the repaint)")
+                                     .arg(firstEditTimer.nsecsElapsed() / 1e6, 0, 'f', 3);
     }
     updateDocumentRect(changed);
     m_pendingDabs.clear();
@@ -1099,6 +1224,8 @@ void CanvasItem::autosaveNow()
     m_requestedRevision = m_contentRevision;
     m_inFlightOldestMs = m_oldestUnrecoveredMs;
     m_oldestUnrecoveredMs = -1;
+    m_firstEditAfterSnapshot = true;
+    emit recoverySnapshotTaken();
     if (m_statsEnabled)
         qInfo().noquote() << QStringLiteral("[recovery] snapshot rev %1 of %2 layers taken on UI thread in %3 ms")
                                  .arg(m_contentRevision)

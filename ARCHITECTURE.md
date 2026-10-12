@@ -112,9 +112,36 @@ Defined in `src/core/ProjectFile.h`.
   checksum, metadata (unique non-zero ids, names ≤ 256 characters, opacity 0–1, block sizes that
   add up), each block's declared raw size before decompressing, and premultiplied validity.
   An unknown active layer id falls back to the top layer.
-- **Saving** encodes in memory and writes through `QSaveFile` (atomic replace); `content://` URIs
-  are written directly (untested). **Opening** decodes into a separate `DocumentData`; only a fully
-  valid document replaces the open one.
+- **Saving** encodes in memory and writes through `QSaveFile` (atomic replace). `content://` URIs
+  cannot be replaced atomically and are written directly; this worked on the Android emulator.
+  **Opening** decodes into a separate `DocumentData`; only a fully valid document replaces the
+  open one.
+
+## Asynchronous save and open (milestone 4)
+
+`ProjectIo` (src/core/ProjectIo.h) owns a one-thread `QThreadPool`. `save(snapshot, path)` and
+`open(path)` run `ProjectFile::save` / `load` there and deliver `saveFinished` / `openFinished`
+through a queued call back on the UI thread. Only one operation runs at a time.
+
+`CanvasItem` drives it as a small state machine:
+- **Save** takes `LayeredDocument::snapshot()`. This is the same copy-on-write value used for
+  recovery, so later edits detach their layer and never reach the worker. Save also records the
+  undo `stateId` at that moment. On success, only that `stateId` becomes the saved state: edits
+  made during the save stay unsaved, and the recovery file is deleted only if nothing newer
+  exists. On failure, the path, the saved state and the previous file are unchanged.
+- **Save during a save** to the same path is queued; when the first save finishes, the queued
+  one starts from a fresh snapshot, so newer data always lands last. Save As to a different path
+  while busy is refused. Opening while saving is refused.
+- **Open** records the document id and content revision when it starts. The decoded document
+  replaces the current one only if neither changed meanwhile. Otherwise the result is held and
+  the user chooses "Open the file" or "Keep my drawing" (`openConflict`,
+  `resolveOpenConflict`). The UI disables painting and the layer panel while opening, so this
+  path is a safeguard.
+- **Main.qml** chains actions after a save (`afterSave`). New, Open and Close run only after the
+  requested save succeeded, and prompt again if the document changed while it ran. A failed or
+  cancelled save cancels the action. Closing during a save is deferred until it finishes. The
+  footer shows a busy indicator and "Saving…" / "Opening…".
+- PNG export is still synchronous (79–350 ms for 1–10 layers).
 
 ## PNG export
 
@@ -140,7 +167,12 @@ atomic commits, cleanup on save/new/open/discard), with these changes:
 
 QML `FileDialog` (native on Windows; storage access framework on Android) returns URLs. `file:`
 URLs become local paths, other URLs (Android `content://`) are passed to `QFile` as strings.
-Nothing assumes a fixed writable folder. Android and iOS file and recovery flows are unverified.
+Nothing assumes a fixed writable folder. For a `content://` URI, the document title comes
+from `QFileInfo::fileName()`. On Android, Qt's content file engine returns the provider's
+display name, while the URI's last segment is often only a document id.
+
+The Android file and recovery flows were exercised on an emulator (BUILD.md), not yet on a
+physical device. iOS is unverified.
 
 ## Decisions
 
@@ -162,8 +194,11 @@ Nothing assumes a fixed writable folder. Android and iOS file and recovery flows
 - **Crash recovery has a loss window** (interval + write time; it grows with layer count because
   the worker re-encodes every layer: about 0.37 s per write at 5 layers and 0.8 s at 10, measured).
   Only process kills were tested; OS crash or power loss may lose unflushed data.
-- **Save and open run on the UI thread** and grow with layer count: about 0.37 s / 0.14 s at
-  5 layers and 0.78 s / 0.25 s at 10 layers (2048 × 1536, representative content). The UI pauses.
+- Save and open run on a worker, but they still take about 0.35 s / 0.12 s at 5 layers and
+  0.75 s / 0.24 s at 10 layers (2048 × 1536, representative content). During that time other
+  file operations wait. PNG export still blocks the UI thread.
+- Saving to an Android `content://` URI is not atomic: a failed write can damage that file. The
+  document and recovery data are kept, and the document stays marked as unsaved.
 - A full composite rebuild (visibility, opacity, order) takes about 5.6 ms at 5 layers and 12 ms
   at 10; an opacity drag recomposites on every slider move.
 - Memory: 12 MiB per layer plus the 12 MiB composite, plus up to 128 MiB of history.
@@ -175,7 +210,7 @@ Nothing assumes a fixed writable folder. Android and iOS file and recovery flows
 ## Future requirements (noted, not built)
 
 More blend modes, groups, clipping and masks; tiled or sparse layer storage if memory requires
-it; background saving; incremental recovery writes (only changed layers); the document model may
+it; background PNG export; incremental recovery writes (only changed layers); the document model may
 later hold editable strokes.
 
 ## Licensing notes

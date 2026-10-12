@@ -2,6 +2,7 @@
 
 #include "LayeredDocument.h"
 #include "Pressure.h"
+#include "ProjectIo.h"
 #include "RasterDocument.h"
 #include "RecoveryManager.h"
 #include "StrokeSpacer.h"
@@ -51,6 +52,10 @@ class CanvasItem : public QQuickPaintedItem
     Q_PROPERTY(int activeLayerId READ activeLayerId NOTIFY layersChanged)
     Q_PROPERTY(int layerCount READ layerCount NOTIFY layersChanged)
     Q_PROPERTY(int maxLayers READ maxLayers NOTIFY documentChanged)
+    // A save or open is running on the worker thread.
+    Q_PROPERTY(bool fileBusy READ fileBusy NOTIFY fileBusyChanged)
+    Q_PROPERTY(QString fileBusyText READ fileBusyText NOTIFY fileBusyChanged)
+    Q_PROPERTY(bool opening READ isOpening NOTIFY fileBusyChanged)
 
 public:
     enum Tool { Brush, Eraser };
@@ -86,11 +91,21 @@ public:
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
     Q_INVOKABLE void newDocument();
-    // These return an empty string on success, otherwise a message to show the user.
+    // Saving and opening run on a worker thread. These return an empty string when the operation
+    // started (or, for Save during a save to the same file, was queued) and otherwise a message to
+    // show. The outcome arrives later through saveFinished / openFinished.
     Q_INVOKABLE QString openFile(const QUrl &url);
     Q_INVOKABLE QString saveFile();
     Q_INVOKABLE QString saveFileAs(const QUrl &url);
+    // Synchronous; returns an empty string on success, otherwise a message.
     Q_INVOKABLE QString exportPng(const QUrl &url);
+    bool fileBusy() const { return m_save.id != 0 || m_open.id != 0; }
+    QString fileBusyText() const;
+    bool isOpening() const { return m_open.id != 0; }
+    // After openConflict: true replaces the drawing with the opened file, false keeps the drawing.
+    Q_INVOKABLE void resolveOpenConflict(bool useOpenedFile);
+    bool hasOpenConflict() const { return m_conflict.has_value(); }
+    ProjectIo &projectIo() { return m_io; }
 
     // Crash recovery. The manager must outlive this item.
     void setRecoveryManager(RecoveryManager *manager);
@@ -154,6 +169,13 @@ signals:
     void recoveryChanged();
     void recoveryStatusChanged();
     void layersChanged();
+    void fileBusyChanged();
+    // ok = false with an empty error means the operation was cancelled.
+    void saveFinished(bool ok, const QString &error);
+    void openFinished(bool ok, const QString &error);
+    // An opened file is ready but the drawing changed while it was loading; see resolveOpenConflict.
+    void openConflict();
+    void recoverySnapshotTaken();
     // A user action was refused (for example drawing on a hidden layer); message explains why.
     void notice(const QString &message);
 
@@ -198,7 +220,10 @@ private:
     void setRecoveryStatus(const QString &status);
     RecoveryFile::Metadata recoveryMetadata() const;
     void replaceDocument(const LayeredDocument &document);
-    QString saveTo(const QString &path, const QUrl &url);
+    QString startSave(const QString &path, const QUrl &url);
+    void onSaveFinished(quint64 id, const QString &path, const QString &error, qint64 workerMs);
+    void onOpenFinished(quint64 id, const QString &path, const ProjectFile::LoadResult &result, qint64 workerMs);
+    void applyOpened(const DocumentData &document, const QString &path, const QUrl &url);
     void updateDocumentRect(const QRect &docRect);
     void viewModified();
     void setInputStatus(const QString &status);
@@ -214,6 +239,34 @@ private:
     QString m_filePath;
     QUrl m_fileUrl;
 
+    struct SaveRequest
+    {
+        quint64 id = 0; // 0 = no save running
+        QString path;
+        QUrl url;
+        quint64 stateId = 0;    // history state captured in the snapshot
+        quint64 documentId = 0;
+    };
+    struct OpenRequest
+    {
+        quint64 id = 0; // 0 = no open running
+        QString path;
+        QUrl url;
+        quint64 documentId = 0; // document and revision when the open started
+        quint64 revision = 0;
+    };
+    struct OpenConflict
+    {
+        DocumentData document;
+        QString path;
+        QUrl url;
+    };
+    ProjectIo m_io;
+    SaveRequest m_save;
+    bool m_saveQueued = false; // Save pressed again during a save to the same file
+    OpenRequest m_open;
+    std::optional<OpenConflict> m_conflict;
+
     RecoveryManager *m_recovery = nullptr;
     QTimer m_autosaveTimer;
     int m_autosaveIntervalMs = 10000;
@@ -222,6 +275,7 @@ private:
     quint64 m_requestedDocumentId = 0;
     quint64 m_requestedRevision = 0; // last revision handed to a recovery write
     bool m_autosaveTickMissed = false;
+    bool m_firstEditAfterSnapshot = false; // for timing the deferred layer copy
     bool m_discardedForClose = false;
     QList<RecoveryManager::Orphan> m_orphans;
     QString m_recoveryWarning;

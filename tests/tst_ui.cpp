@@ -4,9 +4,13 @@
 
 #include "CanvasItem.h"
 #include "ProjectFile.h"
+#include "RecoveryManager.h"
 
 #include <QDir>
+#include <QScopeGuard>
 #include <QQmlApplicationEngine>
+#include <QSemaphore>
+#include <QSignalSpy>
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
@@ -48,6 +52,29 @@ class TestUi : public QObject
         return item->mapToScene(QPointF(item->width() * fx, item->height() * fy)).toPoint();
     }
 
+    // A visible button (e.g. in a dialog's button box) whose text is exactly text.
+    QQuickItem *findButton(const QString &text, QQuickItem *root = nullptr)
+    {
+        if (!root)
+            root = m_window->contentItem()->parentItem() ? m_window->contentItem()->parentItem() : m_window->contentItem();
+        if (root->isVisible() && QString::fromLatin1(root->metaObject()->className()).contains("Button")
+            && root->property("text").toString() == text)
+            return root;
+        for (QQuickItem *child : root->childItems()) {
+            if (QQuickItem *hit = findButton(text, child))
+                return hit;
+        }
+        return nullptr;
+    }
+
+    QQuickItem *waitForButton(const QString &text)
+    {
+        QQuickItem *item = nullptr;
+        return QTest::qWaitFor([&] { return (item = findButton(text)) != nullptr; }, 3000) ? item : nullptr;
+    }
+
+    int alphaAtDoc(QPointF doc) const { return qAlpha(m_canvas->document().composite().pixel(doc.toPoint())); }
+
     void click(const QString &name)
     {
         QQuickItem *item = waitFor(name);
@@ -83,6 +110,18 @@ class TestUi : public QObject
             QTest::keyClick(m_window, ch.toLatin1());
         QTest::keyClick(m_window, Qt::Key_Return);
         QTRY_COMPARE(activeLayer().name, name);
+    }
+
+    template <typename Start>
+    QString waitFor(Start start, bool isSave)
+    {
+        QSignalSpy spy(m_canvas, isSave ? &CanvasItem::saveFinished : &CanvasItem::openFinished);
+        const QString refused = start();
+        if (!refused.isEmpty())
+            return refused;
+        if (!QTest::qWaitFor([&] { return spy.count() > 0; }, 15000))
+            return QStringLiteral("timed out");
+        return spy.first().at(0).toBool() ? QString() : spy.first().at(1).toString();
     }
 
     const LayerData &activeLayer() const { return m_canvas->document().layer(m_canvas->document().activeIndex()); }
@@ -227,11 +266,11 @@ private slots:
         QTemporaryDir dir;
         const DocumentData before = m_canvas->document().snapshot();
         const QImage composite = m_canvas->document().composite().copy();
-        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("house.drawapp"))), QString());
+        QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("house.drawapp"))); }, true), QString());
         QCOMPARE(m_canvas->exportPng(QUrl::fromLocalFile(dir.filePath("house.png"))), QString());
         m_canvas->newDocument();
         QCOMPARE(m_canvas->layerCount(), 1);
-        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(dir.filePath("house.drawapp"))), QString());
+        QCOMPARE(waitFor([&] { return m_canvas->openFile(QUrl::fromLocalFile(dir.filePath("house.drawapp"))); }, false), QString());
         QCOMPARE(namesBottomToTop(), (QStringList{"Background", "Color", "Line art", "Sketch"}));
         QCOMPARE(m_canvas->document().composite(), composite);
         for (int i = 0; i < 4; ++i)
@@ -242,6 +281,128 @@ private slots:
         QCOMPARE(png.convertToFormat(QImage::Format_ARGB32), composite.convertToFormat(QImage::Format_ARGB32));
         // The panel shows the reopened layers (top first).
         QTRY_VERIFY(find("layerRow_Sketch") && find("layerRow_Background"));
+    }
+
+    void newWaitsForASuccessfulSave()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("waits.drawapp");
+        QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(path)); }, true), QString());
+        const int layers = m_canvas->layerCount();
+        m_canvas->setActiveLayer(int(m_canvas->document().layer(1).id)); // Color (visible, unlocked)
+        m_canvas->setTool(CanvasItem::Brush);
+        draw({{200, 200}, {400, 200}});
+        QVERIFY(m_canvas->isModified());
+
+        QSemaphore gate;
+        m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+        QTest::keyClick(m_window, Qt::Key_N, Qt::ControlModifier);
+        QQuickItem *saveButton = waitForButton("Save");
+        QVERIFY(saveButton);
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(saveButton));
+        QTRY_VERIFY(m_canvas->fileBusy());
+        QTest::qWait(150);
+        QCOMPARE(m_canvas->layerCount(), layers); // New has not happened yet
+        QVERIFY(find("fileBusyIndicator"));
+        snap("saving_busy");
+        gate.release();
+        QTRY_COMPARE(m_canvas->layerCount(), 1); // New ran after the save succeeded
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("Untitled"));
+        m_canvas->projectIo().setBeforeFinishHookForTesting({});
+        QCOMPARE(ProjectFile::load(path).document.layers.size(), size_t(layers));
+    }
+
+    void failedSaveCancelsNew()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("readonly.drawapp");
+        QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(path)); }, true), QString());
+        draw({{200, 300}, {400, 300}});
+        QVERIFY(QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::ReadUser));
+        QTest::keyClick(m_window, Qt::Key_N, Qt::ControlModifier);
+        QQuickItem *saveButton = waitForButton("Save");
+        QVERIFY(saveButton);
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(saveButton));
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 1; }, 10000));
+        QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        QVERIFY(waitForButton("OK")); // the error dialog
+        snap("save_failed_error");
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(alphaAtDoc(QPointF(300, 300)), 255); // the drawing is still there
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(waitForButton("OK")));
+    }
+
+    // On a touch screen a stray tap next to the recovery prompt must not dismiss it; Escape
+    // postpones and keeps the recovery file.
+    void strayPressKeepsTheRecoveryPrompt()
+    {
+        QTemporaryDir dir;
+        QString orphanPath;
+        {
+            RecoveryManager crashed(dir.path());
+            QCOMPARE(crashed.start(), QString());
+            RecoveryFile::Metadata metadata;
+            metadata.savedAt = QDateTime::currentDateTimeUtc();
+            QCOMPARE(crashed.writeNow(m_canvas->document().snapshot(), metadata), QString());
+            orphanPath = crashed.recoveryFilePath();
+            crashed.releaseKeepingFile();
+        }
+        strayPressInSecondWindow(dir.path(), orphanPath); // a slot with parameters: not run as a test
+        // Shortcuts only reach the active window; later tests use the main window again.
+        m_window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(m_window));
+    }
+
+    void strayPressInSecondWindow(const QString &recoveryDir, const QString &orphanPath)
+    {
+        RecoveryManager recovery(recoveryDir); // outlives the second window's canvas
+        QQmlApplicationEngine engine;
+        engine.loadFromModule("DrawApp", "Main");
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QQuickWindow *const mainWindow = m_window;
+        CanvasItem *const mainCanvas = m_canvas;
+        const auto restore = qScopeGuard([&] { m_window = mainWindow; m_canvas = mainCanvas; });
+        m_window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(m_window);
+        m_window->resize(1200, 800);
+        QVERIFY(QTest::qWaitForWindowExposed(m_window));
+        m_canvas = qobject_cast<CanvasItem *>(find("canvas"));
+        QVERIFY(m_canvas);
+        m_canvas->setRecoveryManager(&recovery);
+
+        QQuickItem *restoreButton = waitForButton("Restore");
+        QVERIFY(restoreButton);
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, QPoint(40, m_window->height() / 2));
+        QTest::qWait(150);
+        QVERIFY(findButton("Restore"));
+        QVERIFY(m_canvas->recoveryOffered());
+        snap("recovery_prompt_after_stray_press");
+
+        QTest::keyClick(m_window, Qt::Key_Escape);
+        QTRY_VERIFY(!findButton("Restore"));
+        QVERIFY(!m_canvas->recoveryOffered());
+        QVERIFY(QFile::exists(orphanPath)); // postponed, not discarded
+    }
+
+    void closeWaitsForTheRunningSave()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("close.drawapp");
+        QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(path)); }, true), QString());
+        draw({{200, 400}, {400, 400}});
+        QSemaphore gate;
+        m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+        QTest::keyClick(m_window, Qt::Key_S, Qt::ControlModifier);
+        QTRY_VERIFY(m_canvas->fileBusy());
+        m_window->close();
+        QTest::qWait(150);
+        QVERIFY(m_window->isVisible()); // not closed in the middle of the save
+        QVERIFY(find("noticeLabel")->property("text").toString().contains("closes when it has finished"));
+        gate.release();
+        QTRY_VERIFY(!m_window->isVisible()); // saved and unmodified: the window closes on its own
+        m_canvas->projectIo().setBeforeFinishHookForTesting({});
+        QCOMPARE(ProjectFile::load(path).document.composite(), m_canvas->document().composite());
     }
 };
 

@@ -3,7 +3,8 @@
 Reads Qt's online repository index (download.qt.io), verifies each archive against the
 SHA-1 published next to it, and extracts only the modules this project needs.
 Usage: python tools/fetch_qt_windows.py [install_root]            (default: %USERPROFILE%\\Qt)
-       python tools/fetch_qt_windows.py --android [install_root]  (Qt for Android arm64-v8a)
+       python tools/fetch_qt_windows.py --android [--abi arm64_v8a|x86_64] [install_root]  (Qt for Android)
+       python3 tools/fetch_qt_windows.py --linux [--dry-run] [install_root]  (on Linux: Qt gcc_64)
 """
 
 import hashlib
@@ -73,25 +74,63 @@ def install(repo_dir: str, package: str, wanted, target: str, cache: str) -> Non
             z.extractall(destination)
 
 
-ANDROID_PACKAGE_DIR = "https://download.qt.io/online/qtsdkrepository/all_os/android/qt6_6120/qt6_6120_arm64_v8a"
-ANDROID_PACKAGE = "qt.qt6.6120.android_arm64_v8a"
+ANDROID_REPO = "https://download.qt.io/online/qtsdkrepository/all_os/android/qt6_6120"
+ANDROID_ABIS = ("arm64_v8a", "x86_64")
 ANDROID_MODULES = ("qtbase", "qtdeclarative", "qtsvg")
 
 
-def install_android(root: str, cache: str) -> None:
-    prefix = os.path.join(root, QT_VERSION, "android_arm64_v8a")
+def install_android(root: str, cache: str, abi: str) -> None:
+    if abi not in ANDROID_ABIS:
+        raise SystemExit(f"unknown ABI {abi}; choose one of {ANDROID_ABIS}")
+    prefix = os.path.join(root, QT_VERSION, f"android_{abi}")
     os.makedirs(prefix, exist_ok=True)
-    install(ANDROID_PACKAGE_DIR, ANDROID_PACKAGE, ANDROID_MODULES, prefix, cache)
+    package_dir = ANDROID_REPO + "/qt6_6120_" + abi
+    install(package_dir, f"qt.qt6.6120.android_{abi}", ANDROID_MODULES, prefix, cache)
     print(f"Qt for Android prefix: {prefix}")
 
 
+LINUX_PACKAGE_DIR = "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_6120/qt6_6120"
+LINUX_PACKAGE = "qt.qt6.6120.linux_gcc_64"
+LINUX_MODULES = ("qtbase", "qtdeclarative", "qtsvg", "icu")
+
+
+def install_linux(root: str, dry_run: bool) -> None:
+    # Run this on Linux (for example inside WSL): the archives contain symlinks that must be created
+    # by a Linux file system. --dry-run only resolves and lists the archives.
+    version, archives = package_archives(LINUX_PACKAGE_DIR, LINUX_PACKAGE)
+    wanted = [a for a in archives if a.startswith(LINUX_MODULES)]
+    for archive in wanted:
+        print(f"{'would fetch' if dry_run else 'fetching'} {version}{archive}")
+    if dry_run:
+        return
+    prefix = os.path.join(root, QT_VERSION, "gcc_64")
+    cache = os.path.join(root, "_downloads")
+    os.makedirs(prefix, exist_ok=True)
+    os.makedirs(cache, exist_ok=True)
+    install(LINUX_PACKAGE_DIR, LINUX_PACKAGE, LINUX_MODULES, prefix, cache)
+    print(f"Qt for Linux prefix: {prefix}")
+
+
 def main() -> None:
+    if "--linux" in sys.argv:
+        sys.argv.remove("--linux")
+        dry_run = "--dry-run" in sys.argv
+        if dry_run:
+            sys.argv.remove("--dry-run")
+        root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.expanduser("~"), "Qt")
+        install_linux(root, dry_run)
+        return
     if "--android" in sys.argv:
         sys.argv.remove("--android")
+        abi = "arm64_v8a"
+        if "--abi" in sys.argv:
+            i = sys.argv.index("--abi")
+            abi = sys.argv[i + 1]
+            del sys.argv[i:i + 2]
         root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ["USERPROFILE"], "Qt")
         cache = os.path.join(root, "_downloads")
         os.makedirs(cache, exist_ok=True)
-        install_android(root, cache)
+        install_android(root, cache, abi)
         return
     root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ["USERPROFILE"], "Qt")
     cache = os.path.join(root, "_downloads")
