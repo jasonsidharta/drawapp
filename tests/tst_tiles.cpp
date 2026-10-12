@@ -11,6 +11,7 @@
 #include <QRandomGenerator>
 #include <QtTest>
 #include <atomic>
+#include <climits>
 #include <thread>
 #include <vector>
 
@@ -45,6 +46,7 @@ struct BudgetGuard
     {
         MemoryBudget::setLimit(0);
         MemoryBudget::failReservationsForTesting(-1, 0);
+        MemoryBudget::setPhysicalFloorForTesting(0);
     }
 };
 
@@ -628,6 +630,61 @@ private slots:
             QCOMPARE(target.pixel(inside.left() > 0 ? 0 : size.width() - 1, inside.top() > 0 ? 0 : size.height() - 1),
                      qRgba(9, 9, 9, 9));
         }
+    }
+
+    void contentBoundsAreExact()
+    {
+        // The bounds skip tiles already inside them; checked against a scan of every pixel.
+        QRandomGenerator rng(17);
+        for (int round = 0; round < 300; ++round) {
+            const QSize size(1 + int(rng.bounded(700)), 1 + int(rng.bounded(500)));
+            TiledImage img(size);
+            const int marks = int(rng.bounded(6));
+            for (int m = 0; m < marks; ++m) {
+                const QRect r(int(rng.bounded(size.width())), int(rng.bounded(size.height())), 1 + int(rng.bounded(90)),
+                              1 + int(rng.bounded(90)));
+                QVERIFY(img.fillRect(r, qRgba(1, 2, 3, 200)));
+            }
+            if (rng.bounded(2)) // a painted-then-erased (allocated but transparent) tile
+                QVERIFY(img.fillRect(QRect(int(rng.bounded(size.width())), int(rng.bounded(size.height())), 5, 5), 0));
+            int left = INT_MAX, top = INT_MAX, right = -1, bottom = -1;
+            for (int y = 0; y < size.height(); ++y)
+                for (int x = 0; x < size.width(); ++x)
+                    if (img.pixel(x, y)) {
+                        left = std::min(left, x);
+                        right = std::max(right, x);
+                        top = std::min(top, y);
+                        bottom = std::max(bottom, y);
+                    }
+            const QRect expected = right < 0 ? QRect() : QRect(QPoint(left, top), QPoint(right, bottom));
+            QCOMPARE(img.contentBounds(), expected);
+        }
+    }
+
+    void lowDeviceMemoryRefusesCleanly()
+    {
+        // Other programs can leave the device short of memory long before DrawApp's own limit;
+        // then reservations are refused (after the caches are given up) and messages say why.
+        BudgetGuard guard;
+        QVERIFY(MemoryBudget::availablePhysicalMemory() > 0);
+        int evicted = 0;
+        const int evictor = MemoryBudget::addEvictor([&](qint64) {
+            ++evicted;
+            return qint64(0);
+        });
+        const auto removeEvictor = qScopeGuard([&] { MemoryBudget::removeEvictor(evictor); });
+        MemoryBudget::setPhysicalFloorForTesting(qint64(1) << 50); // more than any device has
+        TiledImage img(QSize(256, 256));
+        QVERIFY(!img.fillRect(QRect(0, 0, 100, 100), 0xff000000));
+        QVERIFY(img.allocatedTileCount() == 0);
+        QVERIFY(evicted > 0);
+        QVERIFY2(MemoryBudget::shortageText().contains("device"), qPrintable(MemoryBudget::shortageText()));
+        MemoryBudget::setPhysicalFloorForTesting(0);
+        QVERIFY(img.fillRect(QRect(0, 0, 100, 100), 0xff000000));
+        // A refusal by the limit says so.
+        MemoryBudget::setLimit(MemoryBudget::usedTotal() + 1);
+        QVERIFY(!img.fillRect(QRect(150, 150, 100, 100), 0xff000000));
+        QVERIFY2(MemoryBudget::shortageText().contains("limit"), qPrintable(MemoryBudget::shortageText()));
     }
 };
 

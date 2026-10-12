@@ -220,9 +220,9 @@ CanvasItem::~CanvasItem()
 void CanvasItem::refreshComposite(const QRect &rect)
 {
     if (!m_document.refreshComposite(rect.isNull() ? QRect(QPoint(0, 0), m_document.size()) : rect))
-        emit notice(QStringLiteral("Not enough memory to update the whole view (memory limit %1 MiB). "
+        emit notice(QStringLiteral("Not enough memory to update the whole view (%1). "
                                    "The drawing itself is unchanged; free memory (undo history, layers) and zoom to refresh.")
-                        .arg(MemoryBudget::limit() / (1024 * 1024)));
+                        .arg(MemoryBudget::shortageText()));
 }
 
 bool CanvasItem::confirmIfNotUndoable(qsizetype undoBytes, const QString &what, std::function<void()> action)
@@ -1627,9 +1627,9 @@ bool CanvasItem::strokeOutOfMemory()
     m_strokeBefore = TileSnapshot();
     m_engine.reset();
     m_gesture = Gesture::None;
-    emit notice(QStringLiteral("Not enough memory to continue this stroke (memory limit %1 MiB), so it was undone. "
-                               "Undo history, hidden layers or a smaller canvas free memory.")
-                    .arg(MemoryBudget::limit() / (1024 * 1024)));
+    emit notice(QStringLiteral("Not enough memory to continue this stroke (%1), so it was undone. "
+                               "Undo history, hidden layers, a smaller canvas or closing other programs free memory.")
+                    .arg(MemoryBudget::shortageText()));
     return true;
 }
 

@@ -50,6 +50,12 @@ future feature with no work scheduled.
 - Milestone 8: selections (rectangle, ellipse, lasso; add, subtract, intersect; soft edges) that
   every brush respects, and move, scale, rotate and flip of the selection or the layer, with
   handles, numeric entry, Apply and Cancel; copy, cut and paste to a new layer.
+- Milestone 10: large canvases. New canvas up to 16384 × 16384 and 64 layers at any size; memory
+  is used only where something is painted, within a limit (half of the device's memory on
+  desktop, a quarter on Android) shown in a Memory usage dialog. Zooming out stays fast on large
+  canvases; large transforms are applied in the background with progress and Stop; the undo
+  history grows with the memory limit and asks before an action that could not be undone.
+  Projects are saved in a new sparse format (older projects still open).
 
 See ROADMAP.md for acceptance status.
 
@@ -66,4 +72,6 @@ See ROADMAP.md for acceptance status.
 
 - Final name and app id.
 - Qt licensing route for iOS (LGPLv3 with static linking vs. commercial license); see ARCHITECTURE.md.
-- Default canvas sizes and maximum canvas size per platform (needs memory measurements on devices).
+- Default canvas sizes per platform. The maximum is 16384 × 16384 everywhere since milestone 10,
+  with memory bounded by the painted area; whether phones need a smaller default still needs
+  measurements on devices (only the emulator was used).

@@ -561,8 +561,8 @@ QString CanvasItem::beginTransform()
     }
     if (!m_transform.begin(images, selected)) {
         if (m_transform.lastBeginOutOfMemory())
-            return QStringLiteral("Not enough memory to transform this area (memory limit %1 MiB). Nothing was changed.")
-                .arg(MemoryBudget::limit() / (1024 * 1024));
+            return QStringLiteral("Not enough memory to transform this area (%1). Nothing was changed.")
+                .arg(MemoryBudget::shortageText());
         if (ids.size() == 1)
             return QStringLiteral("The layer \"%1\" has nothing to transform.").arg(m_document.layer(m_document.indexOf(ids.front())).name);
         return QStringLiteral("The selected layers have nothing to transform.");
@@ -1096,8 +1096,8 @@ QString CanvasItem::paste()
     for (const ClipItem &item : items) {
         images.emplace_back(m_document.size());
         if (!images.back().write(item.origin, item.image))
-            return QStringLiteral("Not enough memory to paste (memory limit %1 MiB). Nothing was changed.")
-                .arg(MemoryBudget::limit() / (1024 * 1024));
+            return QStringLiteral("Not enough memory to paste (%1). Nothing was changed.")
+                .arg(MemoryBudget::shortageText());
     }
     for (size_t i = 0; i < items.size(); ++i) {
         const ClipItem &item = items[i];

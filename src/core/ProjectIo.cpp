@@ -83,10 +83,10 @@ quint64 ProjectIo::exportPng(const DocumentData &snapshot, const QString &path, 
             if (flat.isNull()) {
                 SafeSave::Result failed;
                 failed.error = QStringLiteral("Not enough memory to export: the flattened %1 × %2 image needs %3 MiB "
-                                              "(memory limit %4 MiB). The drawing is unchanged.")
+                                              "(%4). The drawing is unchanged.")
                                    .arg(snapshot.size.width()).arg(snapshot.size.height())
                                    .arg(qint64(snapshot.size.width()) * snapshot.size.height() * 4 / (1024 * 1024))
-                                   .arg(MemoryBudget::limit() / (1024 * 1024));
+                                   .arg(MemoryBudget::shortageText());
                 return failed;
             }
             flat.convertTo(QImage::Format_ARGB32); // in place: no second copy

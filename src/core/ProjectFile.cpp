@@ -50,8 +50,8 @@ QString damaged(const QString &detail)
 
 QString outOfMemory()
 {
-    return QStringLiteral("Not enough memory to open this project: its layers need more than the memory limit "
-                          "allows (%1 MiB).").arg(MemoryBudget::limit() / MiB);
+    return QStringLiteral("Not enough memory to open this project: its layers need more than %1 allows.")
+        .arg(MemoryBudget::shortageText());
 }
 
 // dense: versions 1 and 2, which hold whole layers in memory.
@@ -684,8 +684,8 @@ ProjectFile::LoadResult ProjectFile::load(const QString &path)
     // it is read rather than after.
     const qint64 expected = file.isSequential() ? 0 : file.size();
     if (!MemoryBudget::tryReserve(expected, MemoryBudget::Category::Temporary))
-        return failure(QStringLiteral("Not enough memory to read \"%1\" (%2 MiB) within the memory limit (%3 MiB).")
-                           .arg(displayName(path)).arg(expected / MiB).arg(MemoryBudget::limit() / MiB));
+        return failure(QStringLiteral("Not enough memory to read \"%1\" (%2 MiB) within %3.")
+                           .arg(displayName(path)).arg(expected / MiB).arg(MemoryBudget::shortageText()));
     struct Release
     {
         qint64 bytes;

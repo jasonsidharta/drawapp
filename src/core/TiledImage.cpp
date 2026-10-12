@@ -240,23 +240,52 @@ int TiledImage::pruneTransparent(const QRect &area)
 
 QRect TiledImage::contentBounds() const
 {
-    QRect bounds;
-    forEachTile([&](int c, int r, const uchar *data) {
+    // Exact, but a tile whose whole area already lies inside the bounds found so far cannot change
+    // them, so it is not scanned. Tiles on the outer ring of the allocated area go first, which
+    // for most drawings leaves the interior unscanned.
+    auto scan = [&](int c, int r, QRect &bounds) {
+        const uchar *data = tileData(c, r);
+        if (!data)
+            return;
         const QRect t = tileRect(c, r);
+        if (bounds.contains(t))
+            return;
         int x0 = INT_MAX, y0 = INT_MAX, x1 = -1, y1 = -1;
         for (int y = 0; y < t.height(); ++y) {
             const QRgb *row = reinterpret_cast<const QRgb *>(data + y * tileStride());
-            for (int x = 0; x < t.width(); ++x)
-                if (row[x]) {
-                    x0 = std::min(x0, x);
-                    x1 = std::max(x1, x);
-                    y0 = std::min(y0, y);
-                    y1 = std::max(y1, y);
-                }
+            int first = 0;
+            while (first < t.width() && !row[first])
+                ++first;
+            if (first == t.width())
+                continue;
+            int last = t.width() - 1;
+            while (!row[last])
+                --last;
+            x0 = std::min(x0, first);
+            x1 = std::max(x1, last);
+            y0 = std::min(y0, y);
+            y1 = y;
         }
         if (x1 >= 0)
             bounds |= QRect(t.left() + x0, t.top() + y0, x1 - x0 + 1, y1 - y0 + 1);
-    });
+    };
+    const QRect allocated = allocatedBounds();
+    if (allocated.isEmpty())
+        return QRect();
+    const int c0 = columnOf(allocated.left()), c1 = columnOf(allocated.right());
+    const int r0 = rowOf(allocated.top()), r1 = rowOf(allocated.bottom());
+    QRect bounds;
+    for (int c = c0; c <= c1; ++c) {
+        scan(c, r0, bounds);
+        scan(c, r1, bounds);
+    }
+    for (int r = r0; r <= r1; ++r) {
+        scan(c0, r, bounds);
+        scan(c1, r, bounds);
+    }
+    for (int r = r0 + 1; r < r1; ++r)
+        for (int c = c0 + 1; c < c1; ++c)
+            scan(c, r, bounds);
     return bounds;
 }
 

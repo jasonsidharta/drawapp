@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QString>
 #include <QtGlobal>
 #include <functional>
 
@@ -40,6 +41,18 @@ qint64 limit();
 void setLimit(qint64 bytes); // <= 0 restores the default
 qint64 defaultLimit();
 qint64 physicalMemory(); // bytes, 0 if unknown
+// Physical memory the operating system reports as available now (bytes), -1 if unknown.
+qint64 availablePhysicalMemory();
+// Besides the limit, reservations also stop when the device itself runs low: every 64 MiB of
+// growth the available physical memory is checked, and below this floor (default the larger of
+// 256 MiB and 1/32 of physical memory; DRAWAPP_MEMORY_FLOOR_MB overrides) evictors run and the
+// reservation is refused. Other programs' memory use is invisible to the limit; this keeps
+// DrawApp from driving the device into paging (measured: docs/m10-performance.md).
+qint64 physicalFloor();
+void setPhysicalFloorForTesting(qint64 bytes); // <= 0 restores the default; checks at once
+// Why the last refusal happened, for messages: "the memory limit (7870 MiB)" or "the device's
+// free memory (412 MiB left)".
+QString shortageText();
 
 // Frees reconstructible memory: called with the number of bytes wanted, returns bytes freed.
 // Evictors run only on the thread that registered them (the UI thread), never from a worker.
