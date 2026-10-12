@@ -21,7 +21,7 @@ inferences separate (see AGENTS.md).
 | Project | What it is | Language / UI | License | Revision (date) | Notes |
 |---|---|---|---|---|---|
 | Krita | Painting app (KDE) | C++ / Qt Widgets | GPL-2.0-or-later / GPL-3 (some files LGPL) | `25840ee8949d` (2026-10-11) | `krita-input-and-canvas.md`, `krita-android-saving-stylus-brush.md`. The working tree is missing `LICENSES/` (21 files); not caused by us |
-| PhotoCraft | Clean-room image editor in the style of Photoshop, by the ArtCraft team ("early alpha") | Rust / egui, wgpu | MIT or Apache-2.0; ArtCraft name and logos excluded (`docs/brand/LICENSE-brand.txt`) | `20cb95bc272f` (2026-10-12) | Cloned 2026-10-12 from https://github.com/storytold/photocraft. The brush engine was studied for `brush-system.md`; everything else is unstudied (map below) |
+| PhotoCraft | Clean-room image editor in the style of Photoshop, by the ArtCraft team ("early alpha") | Rust / egui, wgpu | MIT or Apache-2.0; ArtCraft name and logos excluded (`docs/brand/LICENSE-brand.txt`) | `20cb95bc272f` (2026-10-12) | Cloned 2026-10-12 from https://github.com/storytold/photocraft. The brush engine was studied for `brush-system.md`, selections and the transform tool for `selections-transforms.md`; everything else is unstudied (map below) |
 | EffectCraft | Motion graphics and VFX app by the same team | Rust | MIT or Apache-2.0 | `67434e90388b` (2026-10-11) | Cloned in milestone 0; not studied |
 | libmypaint | MyPaint's brush engine library | C | ISC | `d5a88fbe6649` (2026-04-14, shallow clone) | Smudge and dab mask only: `brush-system.md` |
 
