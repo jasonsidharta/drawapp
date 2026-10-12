@@ -19,7 +19,13 @@ struct Tip
     QString id;
     QString label;
     std::vector<QImage> mips; // level 0 is the largest; each next level is half the size
+    // How much paint one pass of the tip lays along its densest line in the travel direction, as
+    // a fraction of the tip width (1 for a hard round tip). Used to normalise flow.
+    double passLength = 1.0;
 };
+
+// passLength for the computed round tip with this hardness.
+double roundPassLength(double hardness);
 
 struct Texture
 {

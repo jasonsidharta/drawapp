@@ -186,11 +186,19 @@ StrokeEngine::StrokeEngine(const BrushSettings &settings, const QColor &color, q
 {
     if (!m_settings.tip.isEmpty())
         m_tip = BrushTips::tip(m_settings.tip); // unknown id: round tip
+    m_passLength = m_tip ? m_tip->passLength : BrushTips::roundPassLength(m_settings.hardness);
     if (!m_settings.texture.isEmpty() && m_settings.textureStrength > 0)
         m_texture = BrushTips::texture(m_settings.texture);
 }
 
 StrokeEngine::~StrokeEngine() = default;
+
+double StrokeEngine::passExponent(double diameter) const
+{
+    // Dabs per pass along the tip's densest line = pass length / step; each dab gets the share
+    // of the per-pass amount that makes the pass add up to it.
+    return std::min(1.0, m_spacer.stepFraction(diameter) / m_passLength);
+}
 
 void StrokeEngine::setClipMask(const QImage &mask)
 {
@@ -385,7 +393,7 @@ StrokeEngine::DabParams StrokeEngine::paramsFor(const Dab &dab) const
     d.ceiling = std::clamp(std::round(m_settings.opacity * strength * 255.0), 0.0, 255.0) / 255.0;
     d.strength = std::clamp(m_settings.smudgeStrength * strength, 0.0, 1.0);
     d.passFlow = std::clamp(m_settings.flow * m_settings.pressureFlow.apply(s.pressure), 0.0, 1.0);
-    d.flow = m_buildUp ? 1.0 - std::pow(1.0 - d.passFlow, m_spacer.stepFraction(d.diameter)) : 1.0;
+    d.flow = m_buildUp ? 1.0 - std::pow(1.0 - d.passFlow, passExponent(d.diameter)) : 1.0;
 
     double angle = m_settings.angle * Pi / 180.0;
     if (m_settings.followDirection) {
@@ -587,7 +595,7 @@ void StrokeEngine::smudge(QImage &image, const DabParams &dab, const QRect &rect
     const DabShape shape(dab, m_settings, m_tip);
     // Strength and pickup are per pass, like flow: normalised to the spacing so a pixel passed
     // once is affected the same however many dabs cover it.
-    const double fraction = m_spacer.stepFraction(dab.diameter);
+    const double fraction = passExponent(dab.diameter);
     const float strength = float(1.0 - std::pow(1.0 - dab.strength, fraction));
     const float pickup = float(1.0 - std::pow(1.0 - m_settings.smudgePickup, fraction));
     for (int y = rect.top(); y <= rect.bottom(); ++y) {

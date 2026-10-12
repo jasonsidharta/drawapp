@@ -70,9 +70,9 @@ QImage paperTexture()
     for (int y = 0; y < n; ++y) {
         uchar *row = image.scanLine(y);
         for (int x = 0; x < n; ++x) {
-            const double fibres = fbm(x * 0.5, y * 2.0, n, 8, 3, 101); // elongated along x
-            const double grain = fbm(x, y, n, 64, 2, 202);
-            double v = 0.45 * fibres + 0.55 * grain;
+            const double fibres = fbm(x * 0.5, y * 2.0, n, 16, 3, 101); // elongated along x
+            const double grain = fbm(x, y, n, 128, 2, 202);                // about 2 px
+            double v = 0.35 * fibres + 0.65 * grain;
             v = smooth(std::clamp((v - 0.25) / 0.5, 0.0, 1.0));
             row[x] = toByte(v);
         }
@@ -118,7 +118,7 @@ QImage bristleTip()
         const double rx = ry * (1.6 + BrushTips::hash01(i, 4, 404));
         // Hairs near the edges of the brush carry less paint.
         const double edge = std::sin(Pi * t);
-        const double load = (0.45 + 0.55 * BrushTips::hash01(i, 5, 404)) * (0.55 + 0.45 * edge);
+        const double load = (0.6 + 0.4 * BrushTips::hash01(i, 5, 404)) * (0.6 + 0.4 * edge);
         for (int y = std::max(0, int(cy - 3 * ry)); y < std::min(n, int(cy + 3 * ry) + 1); ++y)
             for (int x = std::max(0, int(cx - 3 * rx)); x < std::min(n, int(cx + 3 * rx) + 1); ++x) {
                 const double dx = (x + 0.5 - cx) / rx, dy = (y + 0.5 - cy) / ry;
@@ -130,7 +130,7 @@ QImage bristleTip()
     for (int y = 0; y < n; ++y) {
         uchar *row = image.scanLine(y);
         for (int x = 0; x < n; ++x)
-            row[x] = toByte(1.0 - std::exp(-2.2 * acc[size_t(y) * n + x])); // soft saturation
+            row[x] = toByte(1.0 - std::exp(-3.5 * acc[size_t(y) * n + x])); // soft saturation
     }
     return image;
 }
@@ -156,6 +156,19 @@ std::vector<QImage> mipChain(const QImage &base)
     return mips;
 }
 
+double passLength(const QImage &tip)
+{
+    double best = 0;
+    for (int y = 0; y < tip.height(); ++y) {
+        const uchar *row = tip.constScanLine(y);
+        double sum = 0;
+        for (int x = 0; x < tip.width(); ++x)
+            sum += row[x] / 255.0;
+        best = std::max(best, sum / tip.width());
+    }
+    return std::max(0.05, best);
+}
+
 struct Library
 {
     std::map<QString, BrushTips::Tip> tips;
@@ -167,7 +180,9 @@ const Library &library()
     // Built once (thread-safe static initialisation), never modified afterwards.
     static const Library lib = [] {
         Library l;
-        l.tips[QStringLiteral("bristle")] = {QStringLiteral("bristle"), QStringLiteral("Flat bristle"), mipChain(bristleTip())};
+        const QImage bristle = bristleTip();
+        l.tips[QStringLiteral("bristle")] = {QStringLiteral("bristle"), QStringLiteral("Flat bristle"), mipChain(bristle),
+                                             passLength(bristle)};
         l.textures[QStringLiteral("paper")] = {QStringLiteral("paper"), QStringLiteral("Paper tooth"), paperTexture()};
         l.textures[QStringLiteral("canvas")] = {QStringLiteral("canvas"), QStringLiteral("Canvas weave"), canvasTexture()};
         return l;
@@ -176,6 +191,13 @@ const Library &library()
 }
 
 } // namespace
+
+double BrushTips::roundPassLength(double hardness)
+{
+    // The core is flat; the falloff (1 − t²)² integrates to 8/15 over the rim.
+    const double h = std::clamp(hardness, 0.0, 1.0);
+    return h + (1.0 - h) * 8.0 / 15.0;
+}
 
 double BrushTips::hash01(qint64 a, qint64 b, quint64 salt)
 {

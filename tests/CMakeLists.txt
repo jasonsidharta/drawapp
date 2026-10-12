@@ -32,6 +32,10 @@ qt_add_executable(bench_canvas bench_canvas.cpp ../src/app/CanvasItem.cpp ../src
 target_include_directories(bench_canvas PRIVATE ../src/app)
 target_link_libraries(bench_canvas PRIVATE drawcore Qt6::Quick Qt6::Test)
 
+# Renders every built-in preset on the standard strokes (not part of ctest): brush_sheet out.png
+qt_add_executable(brush_sheet brush_sheet.cpp)
+target_link_libraries(brush_sheet PRIVATE drawcore)
+
 qt_add_executable(bench_core bench_core.cpp)
 target_link_libraries(bench_core PRIVATE drawcore)
 if(WIN32)

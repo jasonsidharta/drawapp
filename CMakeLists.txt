@@ -14,6 +14,7 @@ option(DRAWAPP_BUILD_TESTS "Build unit tests and benchmarks" ON)
 # Document model and raster operations: QtGui only, no Qt Quick, so they can be tested headless.
 add_library(drawcore STATIC
     src/core/AndroidDocumentProvider.cpp
+    src/core/BrushPresets.cpp src/core/BrushPresets.h
     src/core/BrushSettings.cpp src/core/BrushSettings.h
     src/core/BrushTips.cpp src/core/BrushTips.h
     src/core/DocumentData.cpp src/core/DocumentData.h

@@ -1,9 +1,11 @@
+#include "BrushPresets.h"
 #include "BrushSettings.h"
 #include "BrushTips.h"
 #include "StrokeEngine.h"
 #include "TileSnapshot.h"
 
 #include <QJsonDocument>
+#include <QSet>
 #include <QtTest>
 #include <cmath>
 
@@ -630,6 +632,58 @@ private slots:
         QVERIFY2(engine.coverageTileCount() <= 100, qPrintable(QString::number(engine.coverageTileCount())));
         QCOMPARE(engine.bufferBytes(), qsizetype(engine.coverageTileCount()) * 64 * 64 * 2);
         QVERIFY(before.tileCount() <= 100);
+    }
+
+    // --- built-in presets ---
+    void builtInPresetsAreValidAndDistinct()
+    {
+        const auto &presets = BrushPresets::builtIns();
+        QVERIFY(presets.size() >= 8);
+        QSet<QString> ids, names;
+        for (const BrushPreset &p : presets) {
+            QVERIFY(p.builtIn);
+            QVERIFY(p.id.startsWith("builtin."));
+            QVERIFY(!p.settings.name.isEmpty());
+            ids.insert(p.id);
+            names.insert(p.settings.name);
+            QVERIFY2(p.settings == p.settings.sanitized(), qPrintable(p.id)); // stored values are in range
+            BrushSettings back;
+            QString error;
+            QVERIFY(BrushSettings::fromJson(p.settings.toJson(), &back, &error));
+            QVERIFY(back == p.settings);
+            if (!p.settings.tip.isEmpty())
+                QVERIFY(BrushTips::tip(p.settings.tip));
+            if (!p.settings.texture.isEmpty())
+                QVERIFY(BrushTips::texture(p.settings.texture));
+        }
+        QCOMPARE(ids.size(), int(presets.size()));
+        QCOMPARE(names.size(), int(presets.size()));
+        QVERIFY(BrushPresets::builtIn(BrushPresets::defaultPaintId()));
+        QCOMPARE(BrushPresets::builtIn(BrushPresets::defaultEraserId())->settings.blend, BrushBlend::Erase);
+        // The default paint brush is the milestone 5 brush.
+        const BrushSettings &solid = BrushPresets::builtIn(BrushPresets::defaultPaintId())->settings;
+        QCOMPARE(solid.size, 12.0);
+        QCOMPARE(solid.hardness, 1.0);
+        QCOMPARE(solid.accumulation, Accumulation::Uniform);
+        QVERIFY(solid.pressureSize.enabled && solid.pressureSize.minimum == 0.1);
+    }
+
+    void everyPresetDrawsWithAndWithoutPressure()
+    {
+        for (const BrushPreset &p : BrushPresets::builtIns()) {
+            for (qreal pressure : {0.3, 1.0}) {
+                QImage image = p.settings.blend == BrushBlend::Paint ? transparent(300, 160)
+                                                                       : filled(300, 160, QColor(200, 40, 40));
+                for (int x = 150; x < 300; ++x) // a second colour for the smudge to move
+                    for (int y = 0; y < 160; ++y)
+                        image.setPixel(x, y, qRgb(30, 60, 220));
+                const QImage original = image.copy();
+                const QRect changed = StrokeEngine::render(image, p.settings, Qt::black,
+                                                           line({{40, 80}, {150, 60}, {260, 90}}, 12, pressure), 3);
+                QVERIFY2(!changed.isEmpty() && image != original, qPrintable(p.id));
+                QVERIFY2(premultipliedValid(image), qPrintable(p.id));
+            }
+        }
     }
 
     void dabsOutsideTheLayerAreIgnored()

@@ -32,9 +32,11 @@ struct Texture;
 //   Uniform: S = max(S, v·C)            overlaps and self-crossings never darken
 //   BuildUp: S = S + v·f·(C − S)        approaches C, never passes it
 // C = opacity × pressure→opacity × tilt factor, rounded to a whole 8-bit level so flat interiors
-// come out exact. f is normalised to the spacing: f = 1 − (1 − flow)^(step / diameter), so one
-// pass over a pixel deposits about `flow` of the way to C whatever the spacing. Opacity therefore
-// limits the stroke and flow sets how fast it gets there; neither is applied twice.
+// come out exact. f is normalised to the spacing and the tip: f = 1 − (1 − flow)^(step / L), with
+// L the tip's pass length (its integral along its densest line, BrushTips::Tip::passLength), so
+// one pass along the centre of the stroke deposits `flow` of the way to C whatever the spacing,
+// hardness or tip image. Opacity therefore limits the stroke and flow sets how fast it gets
+// there; neither is applied twice.
 //
 // After each call the changed pixels are recomputed from the layer as it was before the stroke
 // (the stroke's undo snapshot holds it), so the result never depends on how the input was split:
@@ -122,6 +124,7 @@ private:
     void composite(QImage &image, const QRect &rect, const TileSnapshot &before);
     void smudge(QImage &image, const DabParams &dab, const QRect &rect);
     double textureAt(int x, int y) const;
+    double passExponent(double diameter) const;
     CoverageTile &coverageTile(int column, int row);
     QRect dabRect(const DabParams &dab, const QImage &image) const;
 
@@ -131,6 +134,7 @@ private:
     bool m_buildUp;
     const BrushTips::Tip *m_tip = nullptr;
     const BrushTips::Texture *m_texture = nullptr;
+    double m_passLength = 1.0; // in diameters
     QImage m_clip;
 
     StrokeSmoother m_smoother;
