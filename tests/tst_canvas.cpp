@@ -2,6 +2,7 @@
 // touch through QTest, pen through constructed QTabletEvents. Pen hardware is not involved.
 
 #include "CanvasItem.h"
+#include "FakeProvider.h"
 #include "ProjectFile.h"
 #include "RasterDocument.h"
 #include "RecoveryFile.h"
@@ -78,6 +79,16 @@ private:
     {
         QFile f(path);
         return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+    }
+    QString exportPng(const QUrl &url)
+    {
+        QSignalSpy spy(m_canvas, &CanvasItem::exportFinished);
+        const QString refused = m_canvas->exportPng(url);
+        if (!refused.isEmpty())
+            return refused;
+        if (!QTest::qWaitFor([&] { return spy.count() > 0; }, 15000))
+            return QStringLiteral("timed out");
+        return spy.first().at(0).toBool() ? QString() : spy.first().at(1).toString();
     }
     QString saveAs(const QUrl &url) { return waitFor([&] { return m_canvas->saveFileAs(url); }, true); }
     QString save() { return waitFor([&] { return m_canvas->saveFile(); }, true); }
@@ -553,7 +564,7 @@ private slots:
         mouseStroke({{600, 400}, {450, 330}}, Qt::MiddleButton);
 
         const QString png = dir.filePath("export"); // ".png" gets added
-        QCOMPARE(m_canvas->exportPng(QUrl::fromLocalFile(png)), QString());
+        QCOMPARE(exportPng(QUrl::fromLocalFile(png)), QString());
         QImage exported(png + ".png");
         QVERIFY(!exported.isNull());
         QCOMPARE(exported.size(), QSize(2048, 1536));
@@ -981,7 +992,7 @@ private slots:
         m_canvas->setLayerVisible(m_canvas->activeLayerId(), false);
         sendWheel(QPointF(300, 300), 240); // the view must not matter
         const QString png = dir.filePath("composite.png");
-        QCOMPARE(m_canvas->exportPng(QUrl::fromLocalFile(png)), QString());
+        QCOMPARE(exportPng(QUrl::fromLocalFile(png)), QString());
         QImage exported(png);
         QCOMPARE(exported.size(), QSize(2048, 1536));
         QCOMPARE(exported.convertToFormat(QImage::Format_ARGB32), doc().convertToFormat(QImage::Format_ARGB32));
@@ -1237,6 +1248,447 @@ private slots:
         QVERIFY(written.first().at(1).toBool()); // stale: the save discarded it, no file recreated
         QVERIFY(!QFile::exists(m_recovery->recoveryFilePath()));
         m_recovery->setBeforeCommitHookForTesting({});
+    }
+
+    // --- brush opacity, pressure response and smoothing (milestone 5) ---
+
+    void translucentStrokesAreUniformAndOneUndoStepEach()
+    {
+        m_canvas->setBrushSize(30);
+        m_canvas->setBrushOpacity(0.5);
+        const int steps = m_canvas->history().undoCount();
+        // An X drawn in one stroke: overlapping dabs and the crossing stay at 50 %.
+        mouseStroke({{200, 150}, {250, 200}, {300, 250}, {400, 350}, {400, 150}, {300, 250}, {200, 350}});
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        const QImage first = layerImage(0).copy();
+        QCOMPARE(alphaAt(toDoc(QPointF(300, 250))), 128);
+        QCOMPARE(alphaAt(toDoc(QPointF(250, 200))), 128);
+        // A second stroke over it builds up.
+        mouseStroke({{150, 250}, {450, 250}});
+        QCOMPARE(m_canvas->history().undoCount(), steps + 2);
+        QCOMPARE(alphaAt(toDoc(QPointF(300, 250))), 192);
+        QCOMPARE(alphaAt(toDoc(QPointF(180, 250))), 128);
+        m_canvas->undo();
+        QCOMPARE(layerImage(0), first);
+        m_canvas->redo();
+        QCOMPARE(alphaAt(toDoc(QPointF(300, 250))), 192);
+        screenshot("translucent_strokes");
+    }
+
+    void translucentStrokeOnAPaintedLayer()
+    {
+        m_canvas->setBrushSize(80);
+        m_canvas->setBrushColor(QColor(255, 255, 255));
+        mouseStroke({{100, 300}, {700, 300}});
+        m_canvas->setBrushColor(QColor(0, 0, 200));
+        m_canvas->setBrushOpacity(0.25);
+        m_canvas->setBrushSize(20);
+        mouseStroke({{400, 200}, {400, 400}});
+        const QRgb over = doc().pixel(toDoc(QPointF(400, 300)).toPoint());
+        QCOMPARE(qAlpha(over), 255);
+        QVERIFY2(qRed(over) >= 190 && qRed(over) <= 192 && qBlue(over) >= 240, qPrintable(QString::number(over, 16)));
+        QCOMPARE(qAlpha(doc().pixel(toDoc(QPointF(400, 220)).toPoint())), 64); // on transparency: 25 %
+
+        // A translucent eraser takes away a share, the same everywhere in the stroke.
+        m_canvas->setTool(CanvasItem::Eraser);
+        m_canvas->setBrushOpacity(0.5);
+        mouseStroke({{200, 280}, {300, 300}, {200, 320}});
+        QCOMPARE(qAlpha(doc().pixel(toDoc(QPointF(250, 300)).toPoint())), 127);
+    }
+
+    void brushSettingsAreCapturedAtStrokeStart()
+    {
+        QTest::mousePress(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(100, 300));
+        QTest::mouseMove(m_window.get(), QPoint(300, 300));
+        // Changes during the stroke apply from the next stroke on.
+        m_canvas->setBrushOpacity(0.2);
+        m_canvas->setBrushSize(80);
+        m_canvas->setSmoothing(100);
+        m_canvas->setPressureMinSize(1.0);
+        QTest::mouseMove(m_window.get(), QPoint(600, 300));
+        QTest::mouseRelease(m_window.get(), Qt::LeftButton, Qt::NoModifier, QPoint(600, 300));
+        for (int x : {120, 300, 450, 590})
+            QCOMPARE(alphaAt(toDoc(QPointF(x, 300))), 255);
+        const int extent = verticalExtent(toDoc(QPointF(450, 300)));
+        QVERIFY2(extent >= 11 && extent <= 14, qPrintable(QString::number(extent)));
+        mouseStroke({{100, 450}, {600, 450}}); // now with the new settings
+        QCOMPARE(alphaAt(toDoc(QPointF(300, 450))), 51);
+    }
+
+    void smoothedStrokeEndsWhereThePenIsLifted()
+    {
+        m_canvas->setSmoothing(100); // the brush trails by up to 40 view pixels
+        // Jittery input (±8 px) along y = 300, ending at (600, 300).
+        QList<QPoint> pts;
+        for (int i = 0; i <= 50; ++i)
+            pts << QPoint(100 + 10 * i, 300 + (i % 2 ? 8 : -8));
+        pts << QPoint(600, 300);
+        mouseStroke(pts);
+        QCOMPARE(alphaAt(toDoc(QPointF(600, 300))), 255); // no missing tail
+        QCOMPARE(m_canvas->history().undoCount(), 1);
+        // Between the ends the line is straight: nothing of the zigzag at y = 300 ± 8 remains.
+        for (int x = 200; x <= 500; x += 25) {
+            QCOMPARE(alphaAt(toDoc(QPointF(x, 300))), 255);
+            QCOMPARE(alphaAt(toDoc(QPointF(x, 290))), 0);
+            QCOMPARE(alphaAt(toDoc(QPointF(x, 310))), 0);
+        }
+        screenshot("smoothed_stroke");
+    }
+
+    void smoothingIsIndependentOfTheEventRate()
+    {
+        m_canvas->setSmoothing(60);
+        m_canvas->setBrushSize(16);
+        const QList<QPoint> corners{{100, 150}, {350, 450}, {500, 200}, {750, 420}};
+        const auto densified = [&](int perSegment) {
+            QList<QPoint> pts{corners.first()};
+            for (qsizetype i = 1; i < corners.size(); ++i)
+                for (int k = 1; k <= perSegment; ++k)
+                    pts << corners[i - 1] + (corners[i] - corners[i - 1]) * k / perSegment;
+            return pts;
+        };
+        mouseStroke(densified(1)); // 3 move events in all
+        const QImage sparse = layerImage(0).copy();
+        m_canvas->undo();
+        mouseStroke(densified(40)); // 120 move events
+        const QImage dense = layerImage(0);
+        int painted = 0, differing = 0;
+        for (int y = 0; y < sparse.height(); ++y)
+            for (int x = 0; x < sparse.width(); ++x) {
+                const int a = qAlpha(sparse.pixel(x, y)), b = qAlpha(dense.pixel(x, y));
+                painted += a > 0;
+                differing += std::abs(a - b) > 64;
+            }
+        QVERIFY(painted > 5000);
+        // The view rounds event positions to whole pixels, so allow a thin seam.
+        QVERIFY2(differing < painted / 100, qPrintable(QStringLiteral("%1 of %2").arg(differing).arg(painted)));
+    }
+
+    void interruptedTouchStrokeIsCompleted()
+    {
+        m_canvas->setSmoothing(100);
+        m_canvas->setBrushSize(20);
+        QTest::touchEvent(m_window.get(), m_touch).press(0, QPoint(100, 300));
+        for (int x = 150; x <= 500; x += 50)
+            QTest::touchEvent(m_window.get(), m_touch).move(0, QPoint(x, 300));
+        // Qt Quick compresses touch moves until the next frame; let them arrive first.
+        QTest::qWait(50);
+        QCOMPARE(alphaAt(toDoc(QPointF(480, 300))), 0); // the brush trails the finger
+        // The system takes the touch away (for example a gesture); the stroke ends at once,
+        // completed to the last position the canvas received.
+        QTouchEvent cancel(QEvent::TouchCancel, m_touch);
+        QCoreApplication::sendEvent(m_window.get(), &cancel);
+        QCOMPARE(alphaAt(toDoc(QPointF(500, 300))), 255);
+        QCOMPARE(m_canvas->history().undoCount(), 1);
+        mouseStroke({{100, 450}, {300, 450}}); // drawing works normally afterwards
+        QCOMPARE(m_canvas->history().undoCount(), 2);
+    }
+
+    void dotsAndSharpTurns()
+    {
+        m_canvas->setBrushSize(24);
+        for (int smoothing : {0, 100}) {
+            m_canvas->setSmoothing(smoothing);
+            const int y = smoothing ? 450 : 200;
+            mouseStroke({{150, y}, {150, y}}); // a tap leaves a round dot of the brush size
+            QCOMPARE(alphaAt(toDoc(QPointF(150, y))), 255);
+            const int width = verticalExtent(toDoc(QPointF(150, y)));
+            QVERIFY2(width >= 23 && width <= 26, qPrintable(QString::number(width)));
+            // A V shape: the stroke reaches the far end exactly, with or without smoothing.
+            mouseStroke({{300, y - 100}, {400, y + 60}, {500, y - 100}});
+            QCOMPARE(alphaAt(toDoc(QPointF(500, y - 100))), 255);
+        }
+    }
+
+    void penLiftOffEndsTheLine()
+    {
+        // The release event's position completes the line; its near-zero pressure is not used.
+        m_canvas->setBrushSize(30);
+        sendTablet(QEvent::TabletPress, m_pen.get(), QPointF(100, 300), 1.0);
+        sendTablet(QEvent::TabletMove, m_pen.get(), QPointF(300, 300), 1.0);
+        sendTablet(QEvent::TabletRelease, m_pen.get(), QPointF(500, 300), 0.0);
+        QCOMPARE(alphaAt(toDoc(QPointF(490, 300))), 255);
+        const int width = verticalExtent(toDoc(QPointF(480, 300)));
+        QVERIFY2(width >= 29 && width <= 32, qPrintable(QString::number(width)));
+        QCOMPARE(m_canvas->history().undoCount(), 1);
+    }
+
+    void penPressureResponseSettings()
+    {
+        m_canvas->setBrushSize(40);
+        const auto penLineAt = [&](int y) {
+            sendTablet(QEvent::TabletPress, m_pen.get(), QPointF(100, y), 0.5);
+            sendTablet(QEvent::TabletMove, m_pen.get(), QPointF(500, y), 0.5);
+            sendTablet(QEvent::TabletRelease, m_pen.get(), QPointF(500, y), 0.5);
+            return verticalExtent(toDoc(QPointF(300, y)));
+        };
+        const int linear = penLineAt(100); // 0.1 + 0.9 × 0.5 = 55 % of 40 px
+        m_canvas->setPressureFirmness(1.0);
+        const int firm = penLineAt(200); // 0.1 + 0.9 × 0.5³ ≈ 21 %
+        m_canvas->setPressureFirmness(-1.0);
+        const int soft = penLineAt(300); // 0.1 + 0.9 × 0.5^(1/3) ≈ 81 %
+        m_canvas->setPressureMinSize(1.0);
+        const int constant = penLineAt(400); // pressure does not change size
+        QVERIFY2(linear >= 21 && linear <= 24, qPrintable(QString::number(linear)));
+        QVERIFY2(firm >= 7 && firm <= 10, qPrintable(QString::number(firm)));
+        QVERIFY2(soft >= 31 && soft <= 34, qPrintable(QString::number(soft)));
+        QVERIFY2(constant >= 39 && constant <= 42, qPrintable(QString::number(constant)));
+        // The mouse has no pressure: full size whatever the response.
+        QTest::qWait(450);
+        m_canvas->setPressureMinSize(0.0);
+        m_canvas->setPressureFirmness(1.0);
+        mouseStroke({{100, 500}, {500, 500}});
+        const int mouse = verticalExtent(toDoc(QPointF(300, 500)));
+        QVERIFY2(mouse >= 39 && mouse <= 42, qPrintable(QString::number(mouse)));
+    }
+
+    void translucentPaintingWhileSavingAndAutosaving()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        QTemporaryDir dir;
+        const QString path = dir.filePath("translucent.drawapp");
+        m_canvas->setBrushOpacity(0.5);
+        m_canvas->setBrushSize(30);
+        mouseStroke({{100, 300}, {600, 300}});
+        const QImage atSave = doc().copy();
+        QSemaphore gate;
+        m_canvas->projectIo().setBeforeFinishHookForTesting([&] { gate.acquire(); });
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(path)), QString());
+        mouseStroke({{350, 150}, {350, 450}}); // crosses the first stroke while the save runs
+        QVERIFY(autosaveAndWait());            // and a recovery write runs too
+        QCOMPARE(alphaAt(toDoc(QPointF(350, 300))), 192);
+        gate.release();
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 1; }, 10000));
+        m_canvas->projectIo().setBeforeFinishHookForTesting({});
+        QVERIFY(finished.first().at(0).toBool());
+        QCOMPARE(ProjectFile::load(path).document.composite(), atSave); // only the first stroke
+        QCOMPARE(recoveredImage(), doc());                             // both strokes
+        QVERIFY(m_canvas->isModified());
+        m_canvas->undo();
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(doc(), atSave);
+    }
+
+    // --- saving to storage-provider documents (content:// URIs, simulated) ---
+
+    void providerSaveToANewDocument()
+    {
+        FakeProvider provider;
+        m_canvas->projectIo().setProviderForTesting(&provider);
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        const QString uri = QStringLiteral("content://test.documents/document/new.drawapp");
+        provider.documents.insert(uri, QByteArray()); // what a "create document" picker hands out
+        QSignalSpy asked(m_canvas, &CanvasItem::overwriteConfirmationNeeded);
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(saveAs(QUrl(uri)), QString());
+        QCOMPARE(asked.count(), 0); // nothing to overwrite
+        QCOMPARE(ProjectFile::decode(provider.contents(uri)).document.composite(), doc());
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("new.drawapp"));
+        QVERIFY(!QFile::exists(m_recovery->recoveryFilePath())); // the local copy is released
+        m_canvas->projectIo().setProviderForTesting(nullptr);
+    }
+
+    void providerOverwriteIsConfirmedFirst()
+    {
+        FakeProvider provider;
+        m_canvas->projectIo().setProviderForTesting(&provider);
+        const QString uri = QStringLiteral("content://test.documents/document/existing.drawapp");
+        RasterDocument old(QSize(64, 64));
+        const QByteArray oldBytes = ProjectFile::encode(DocumentData::fromImage(old.image()));
+        provider.documents.insert(uri, oldBytes);
+        QTemporaryDir staging;
+        m_canvas->setStagingDirectory(staging.path());
+        mouseStroke({{100, 300}, {600, 300}});
+
+        QSignalSpy asked(m_canvas, &CanvasItem::overwriteConfirmationNeeded);
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QCOMPARE(m_canvas->saveFileAs(QUrl(uri)), QString());
+        QVERIFY(QTest::qWaitFor([&] { return asked.count() == 1; }, 10000));
+        QVERIFY(m_canvas->overwriteConfirmationPending());
+        QCOMPARE(m_canvas->overwriteTarget(), QStringLiteral("existing.drawapp"));
+        QVERIFY(!m_canvas->overwriteDetails().isEmpty());
+        QCOMPARE(finished.count(), 0);  // the save waits for the decision
+        QCOMPARE(provider.writes, 0);   // nothing written yet
+        QVERIFY(!m_canvas->openFile(QUrl(uri)).isEmpty());       // other file actions wait
+        QVERIFY(!m_canvas->saveFileAs(QUrl(uri)).isEmpty());
+
+        m_canvas->cancelOverwrite(); // Cancel: reported as a cancelled save
+        QCOMPARE(finished.count(), 1);
+        QVERIFY(!finished.first().at(0).toBool());
+        QVERIFY(finished.first().at(1).toString().isEmpty());
+        QCOMPARE(provider.contents(uri), oldBytes);
+        QVERIFY(m_canvas->isModified());
+        QVERIFY(!m_canvas->hasFile());
+
+        QCOMPARE(m_canvas->saveFileAs(QUrl(uri)), QString()); // asked again: not confirmed yet
+        QVERIFY(QTest::qWaitFor([&] { return asked.count() == 2; }, 10000));
+        QCOMPARE(m_canvas->confirmOverwrite(), QString());
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 2; }, 10000));
+        QVERIFY(finished.last().at(0).toBool());
+        QCOMPARE(ProjectFile::decode(provider.contents(uri)).document.composite(), doc());
+        QVERIFY(!m_canvas->isModified());
+        QVERIFY(QDir(staging.path()).entryList(QDir::Files).isEmpty()); // local copy released
+
+        mouseStroke({{100, 450}, {600, 450}});
+        QCOMPARE(save(), QString()); // confirmed once for this file in this session
+        QCOMPARE(asked.count(), 2);
+        QCOMPARE(ProjectFile::decode(provider.contents(uri)).document.composite(), doc());
+        m_canvas->projectIo().setProviderForTesting(nullptr);
+    }
+
+    void providerFailuresBeforeWritingLeaveTheDocumentUntouched()
+    {
+        FakeProvider provider;
+        m_canvas->projectIo().setProviderForTesting(&provider);
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        const QString uri = QStringLiteral("content://test.documents/document/full.drawapp");
+        provider.documents.insert(uri, QByteArray());
+        mouseStroke({{100, 300}, {600, 300}});
+
+        // Not enough free space reported for the destination.
+        provider.freeBytes = 1000;
+        QString error = saveAs(QUrl(uri));
+        QVERIFY2(error.contains("not enough free space"), qPrintable(error));
+        QVERIFY(error.contains("not changed"));
+        QCOMPARE(provider.writes, 0);
+        QVERIFY(provider.contents(uri).isEmpty());
+        QVERIFY(m_canvas->isModified());
+        QVERIFY(!m_canvas->hasFile());
+        QCOMPARE(recoveredImage(), doc()); // the drawing is kept in the recovery data
+
+        // The storage finds it is full when reserving space.
+        provider.freeBytes = -1;
+        provider.failReservation = true;
+        error = saveAs(QUrl(uri));
+        QVERIFY2(error.contains("not changed"), qPrintable(error));
+        QVERIFY(provider.contents(uri).isEmpty());
+        QVERIFY(m_canvas->isModified());
+
+        // Access withdrawn (for example the grant was revoked or the file was deleted).
+        provider.failReservation = false;
+        provider.revoked.insert(uri);
+        error = saveAs(QUrl(uri));
+        QVERIFY2(error.contains("permission"), qPrintable(error));
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(recoveredImage(), doc());
+        m_canvas->projectIo().setProviderForTesting(nullptr);
+    }
+
+    void providerWriteInterruptedKeepsTheDrawingAndARecoverableCopy()
+    {
+        FakeProvider provider;
+        m_canvas->projectIo().setProviderForTesting(&provider);
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        attachRecovery(m_recoveryDir->path());
+        const QString uri = QStringLiteral("content://test.documents/document/cut.drawapp");
+        provider.documents.insert(uri, QByteArray());
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(saveAs(QUrl(uri)), QString());
+        QVERIFY(!m_canvas->isModified());
+        QVERIFY(!QFile::exists(m_recovery->recoveryFilePath()));
+
+        // The saved drawing changes and the next save is cut off part way through the file.
+        mouseStroke({{100, 450}, {600, 450}});
+        const QImage latest = doc().copy();
+        bool copyExistedBeforeWriting = false;
+        provider.beforeWrite = [&](const QString &) {
+            copyExistedBeforeWriting = RecoveryFile::load(m_recovery->recoveryFilePath()).document.composite() == latest;
+        };
+        provider.failAfterBytes = 100;
+        // Saving again overwrites what is there now, so it is confirmed first (once per file).
+        QSignalSpy asked(m_canvas, &CanvasItem::overwriteConfirmationNeeded);
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QCOMPARE(m_canvas->saveFile(), QString());
+        QVERIFY(QTest::qWaitFor([&] { return asked.count() == 1; }, 10000));
+        QCOMPARE(m_canvas->confirmOverwrite(), QString());
+        QVERIFY(QTest::qWaitFor([&] { return finished.count() == 1; }, 10000));
+        const QString error = finished.first().at(1).toString();
+        QVERIFY2(error.contains("may be damaged") && error.contains("copy is kept"), qPrintable(error));
+        QVERIFY(copyExistedBeforeWriting); // the local copy was complete before the document changed
+        QVERIFY(ProjectFile::decode(provider.contents(uri)).error.contains("damaged"));
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(doc(), latest);
+        QCOMPARE(recoveredImage(), latest);
+        // The recovery copy keeps the name to show even if the document cannot be reached later.
+        QCOMPARE(RecoveryFile::load(m_recovery->recoveryFilePath()).metadata.displayName, QStringLiteral("cut.drawapp"));
+
+        // Undoing back to the last saved state: the file no longer matches it, so it stays unsaved
+        // and recoverable.
+        m_canvas->undo();
+        QVERIFY(m_canvas->isModified());
+        QVERIFY(autosaveAndWait());
+        QVERIFY(QFile::exists(m_recovery->recoveryFilePath()));
+
+        // Read-back that does not match is a failure too.
+        provider.beforeWrite = {};
+        provider.failAfterBytes = -1;
+        provider.corruptReadBack = true;
+        QVERIFY(save().contains("reading it back"));
+        QVERIFY(m_canvas->isModified());
+        provider.corruptReadBack = false;
+        QCOMPARE(save(), QString());
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(ProjectFile::decode(provider.contents(uri)).document.composite(), doc());
+        m_canvas->projectIo().setProviderForTesting(nullptr);
+    }
+
+    void providerSaveWithoutRecoveryUsesAStagingCopy()
+    {
+        FakeProvider provider;
+        m_canvas->projectIo().setProviderForTesting(&provider);
+        QTemporaryDir staging;
+        m_canvas->setStagingDirectory(staging.path());
+        const QString uri = QStringLiteral("content://test.documents/document/staged.drawapp");
+        provider.documents.insert(uri, QByteArray());
+        mouseStroke({{100, 300}, {600, 300}});
+
+        provider.failAfterBytes = 10;
+        QVERIFY(!saveAs(QUrl(uri)).isEmpty());
+        const QStringList kept = QDir(staging.path()).entryList({"*.drawapp"}, QDir::Files);
+        QCOMPARE(kept.size(), 1);
+        QCOMPARE(ProjectFile::load(QDir(staging.path()).filePath(kept.first())).document.composite(), doc());
+
+        // Save As again (the picker creates a new, empty document).
+        provider.failAfterBytes = -1;
+        const QString second = QStringLiteral("content://test.documents/document/staged2.drawapp");
+        provider.documents.insert(second, QByteArray());
+        QCOMPARE(saveAs(QUrl(second)), QString());
+        QCOMPARE(QDir(staging.path()).entryList({"*.drawapp"}, QDir::Files).size(), 1); // only the earlier one
+
+        // If no local copy can be made, the destination is not touched at all.
+        const int writes = provider.writes;
+        const QString blocker = staging.filePath("blocked");
+        { QFile f(blocker); QVERIFY(f.open(QIODevice::WriteOnly)); }
+        m_canvas->setStagingDirectory(blocker); // a file where a folder is needed
+        mouseStroke({{100, 450}, {600, 450}});
+        const QString third = QStringLiteral("content://test.documents/document/staged3.drawapp");
+        provider.documents.insert(third, QByteArray());
+        const QString error = saveAs(QUrl(third));
+        QVERIFY2(error.contains("Could not keep a copy"), qPrintable(error));
+        QCOMPARE(provider.writes, writes);
+        QVERIFY(m_canvas->isModified());
+        m_canvas->projectIo().setProviderForTesting(nullptr);
+    }
+
+    void exportToAProviderDocument()
+    {
+        FakeProvider provider;
+        m_canvas->projectIo().setProviderForTesting(&provider);
+        const QString uri = QStringLiteral("content://test.documents/document/picture.png");
+        provider.documents.insert(uri, QByteArray("an older picture"));
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(exportPng(QUrl(uri)), QString()); // exports overwrite without asking
+        QImage png;
+        QVERIFY(png.loadFromData(provider.contents(uri), "png"));
+        QCOMPARE(png.convertToFormat(QImage::Format_ARGB32), doc().convertToFormat(QImage::Format_ARGB32));
+        provider.revoked.insert(uri);
+        QVERIFY(exportPng(QUrl(uri)).contains("permission"));
+        m_canvas->projectIo().setProviderForTesting(nullptr);
     }
 
     void shutdownKeepsOrRemovesRecovery()

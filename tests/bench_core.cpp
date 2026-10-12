@@ -6,6 +6,9 @@
 #include "ProjectFile.h"
 #include "RasterDocument.h"
 #include "RecoveryFile.h"
+#include "SafeSave.h"
+#include "StrokeCompositor.h"
+#include "StrokeSmoother.h"
 #include "StrokeSpacer.h"
 #include "TileSnapshot.h"
 #include "UndoHistory.h"
@@ -106,11 +109,12 @@ void layerBench(int layers, int reps)
     const qsizetype layerBytes = qsizetype(doc.size().width()) * doc.size().height() * 4;
     const int active = doc.activeIndex();
 
-    // Stroke events exactly as CanvasItem runs them, on the middle layer.
+    // Stroke events exactly as CanvasItem runs them (100 % opacity, no smoothing), on the middle layer.
     const std::vector<StrokeSample> samples = zigZag();
     std::vector<double> events;
     for (int r = 0; r < std::max(1, reps / 10); ++r) {
         StrokeSpacer spacer(12);
+        StrokeCompositor compositor(Qt::black, 1.0, BrushMode::Paint);
         TileSnapshot before;
         std::vector<Dab> pending;
         UndoHistory history;
@@ -121,7 +125,7 @@ void layerBench(int layers, int reps)
                 spacer.begin(samples[i], pending);
             else
                 spacer.moveTo(samples[i], pending);
-            const QRect changed = RasterDocument::stampDabs(doc.pixels(active), pending, Qt::black, BrushMode::Paint, &before);
+            const QRect changed = compositor.addDabs(doc.pixels(active), pending, before);
             doc.refreshComposite(changed);
             pending.clear();
             events.push_back(t.nsecsElapsed() / 1e6);
@@ -141,11 +145,13 @@ void layerBench(int layers, int reps)
         t.start();
         DocumentData snapshot = doc.snapshot();
         snapshotMs.push_back(t.nsecsElapsed() / 1e6);
+        StrokeCompositor compositor(Qt::red, 1.0, BrushMode::Paint);
+        TileSnapshot before;
         t.restart();
-        RasterDocument::stampDabs(doc.pixels(active), {{QPointF(500 + r, 500), 10}}, Qt::red, BrushMode::Paint);
+        compositor.addDabs(doc.pixels(active), {{QPointF(500 + r, 500), 10}}, before);
         detachMs.push_back(t.nsecsElapsed() / 1e6);
         t.restart();
-        RasterDocument::stampDabs(doc.pixels(active), {{QPointF(520 + r, 500), 10}}, Qt::red, BrushMode::Paint);
+        compositor.addDabs(doc.pixels(active), {{QPointF(520 + r, 500), 10}}, before);
         normalMs.push_back(t.nsecsElapsed() / 1e6);
     }
     const DocumentData snapshot = doc.snapshot();
@@ -163,6 +169,9 @@ void layerBench(int layers, int reps)
     });
     const QString path = dir.filePath("bench.drawapp");
     const Stats save = measure(ioReps, [&] { ProjectFile::save(snapshot, path); });
+    const QByteArray encoded = ProjectFile::encode(snapshot);
+    const Stats verify = measure(ioReps, [&] { ProjectFile::verify(encoded); });
+    const Stats safeSave = measure(ioReps, [&] { SafeSave::saveProject(snapshot, dir.filePath("safe.drawapp"), {}); });
     const Stats open = measure(ioReps, [&] { ProjectFile::load(path); });
     const QString png = dir.filePath("bench.png");
     const Stats exportPng = measure(ioReps, [&] { ProjectFile::exportPng(snapshot.composite(), png); });
@@ -173,7 +182,7 @@ void layerBench(int layers, int reps)
                 QFileInfo(recoveryPath).size() / mib);
     std::printf("Process private memory added by creating the document: %.0f MiB.\n\n", memDocument);
     std::printf("| Operation | median ms | p95 ms | max ms |\n|---|---|---|---|\n");
-    std::printf("| stroke event (12 px brush): stamp + undo capture + composite refresh | %.4f | %.4f | %.4f |\n",
+    std::printf("| stroke event (12 px brush, compositor): dabs + undo capture + composite refresh | %.4f | %.4f | %.4f |\n",
                 stroke.medianMs, stroke.p95Ms, stroke.maxMs);
     std::printf("| full composite rebuild (visibility/opacity/order change) | %.2f | %.2f | %.2f |\n",
                 fullComposite.medianMs, fullComposite.p95Ms, fullComposite.maxMs);
@@ -184,7 +193,11 @@ void layerBench(int layers, int reps)
     std::printf("| same dab without a pending snapshot | %.4f | %.4f | %.4f |\n", nor.medianMs, nor.p95Ms, nor.maxMs);
     std::printf("| recovery encode + atomic write (worker thread) | %.1f | %.1f | %.1f |\n",
                 recoveryWrite.medianMs, recoveryWrite.p95Ms, recoveryWrite.maxMs);
-    std::printf("| save project | %.1f | %.1f | %.1f |\n", save.medianMs, save.p95Ms, save.maxMs);
+    std::printf("| save project (encode + atomic write) | %.1f | %.1f | %.1f |\n", save.medianMs, save.p95Ms, save.maxMs);
+    std::printf("| verify encoded project (checksum + decompress each layer) | %.1f | %.1f | %.1f |\n", verify.medianMs,
+                verify.p95Ms, verify.maxMs);
+    std::printf("| app save to a local file (SafeSave: encode + verify + space check + atomic write) | %.1f | %.1f | %.1f |\n",
+                safeSave.medianMs, safeSave.p95Ms, safeSave.maxMs);
     std::printf("| open project | %.1f | %.1f | %.1f |\n", open.medianMs, open.p95Ms, open.maxMs);
     std::printf("| export PNG (composite + encode) | %.1f | %.1f | %.1f |\n", exportPng.medianMs, exportPng.p95Ms,
                 exportPng.maxMs);
@@ -239,6 +252,93 @@ void singleLayerComparison(int reps)
     std::printf("| export PNG, painted dabs | %.1f | - | %.1f |\n", exportPng.medianMs, exportPng.maxMs);
 }
 
+// Per input event on one opaque 2048 × 1536 layer: the 1000-event zig-zag stroke with undo capture
+// and composite refresh, through the milestone 4 path (QPainter dabs) and the milestone 5 path
+// (smoother -> spacer -> uniform-opacity compositor).
+void brushEngineBench(int reps)
+{
+    struct Variant
+    {
+        const char *label;
+        bool legacy;
+        qreal size, opacity, smoothing;
+    };
+    const Variant variants[] = {
+        {"milestone 4 path (QPainter dabs), 12 px", true, 12, 1.0, 0},
+        {"compositor, 12 px, 100 %, smoothing off", false, 12, 1.0, 0},
+        {"compositor, 12 px, 50 %, smoothing off", false, 12, 0.5, 0},
+        {"compositor, 12 px, 50 %, smoothing 20 px", false, 12, 0.5, 20},
+        {"milestone 4 path (QPainter dabs), 128 px", true, 128, 1.0, 0},
+        {"compositor, 128 px, 50 %, smoothing off", false, 128, 0.5, 0},
+    };
+    const std::vector<StrokeSample> samples = zigZag();
+    std::printf("\n### Brush engine: one input event of a 1000-event stroke (stroke processing + undo capture + composite refresh)\n\n");
+    std::printf("| Variant | median ms | p95 ms | max ms | mask tiles |\n|---|---|---|---|---|\n");
+    for (const Variant &v : variants) {
+        LayeredDocument doc;
+        doc.pixels(0).fill(Qt::white);
+        doc.refreshComposite();
+        std::vector<double> events;
+        int maskTiles = 0;
+        for (int r = 0; r < std::max(1, reps / 10); ++r) {
+            StrokeSmoother smoother(v.smoothing);
+            StrokeSpacer spacer(v.size);
+            StrokeCompositor compositor(Qt::black, v.opacity, BrushMode::Paint);
+            TileSnapshot before;
+            std::vector<StrokeSample> smoothed;
+            std::vector<Dab> pending;
+            for (size_t i = 0; i < samples.size(); ++i) {
+                QElapsedTimer t;
+                t.start();
+                if (i == 0) {
+                    smoother.begin(samples[i], smoothed);
+                    spacer.begin(smoothed.front(), pending);
+                    smoothed.clear();
+                } else {
+                    smoother.moveTo(samples[i], smoothed);
+                }
+                if (i + 1 == samples.size())
+                    smoother.finish(smoothed);
+                for (const StrokeSample &s : smoothed)
+                    spacer.moveTo(s, pending);
+                smoothed.clear();
+                const QRect changed = v.legacy
+                    ? RasterDocument::stampDabs(doc.pixels(0), pending, Qt::black, BrushMode::Paint, &before)
+                    : compositor.addDabs(doc.pixels(0), pending, before);
+                doc.refreshComposite(changed);
+                pending.clear();
+                events.push_back(t.nsecsElapsed() / 1e6);
+            }
+            maskTiles = compositor.maskTileCount();
+            before.swapWith(doc.pixels(0)); // undo, so every repetition starts from the same pixels
+            doc.refreshComposite();
+        }
+        const Stats s = summarize(events);
+        std::printf("| %s | %.4f | %.4f | %.4f | %s |\n", v.label, s.medianMs, s.p95Ms, s.maxMs,
+                    v.legacy ? "-" : qPrintable(QString::number(maskTiles)));
+    }
+
+    // Smoothing alone (no painting), per event.
+    for (qreal radius : {0.0, 20.0, 80.0}) {
+        std::vector<double> events;
+        for (int r = 0; r < std::max(1, reps / 10); ++r) {
+            StrokeSmoother smoother(radius);
+            std::vector<StrokeSample> out;
+            smoother.begin(samples.front(), out);
+            for (size_t i = 1; i < samples.size(); ++i) {
+                out.clear();
+                QElapsedTimer t;
+                t.start();
+                smoother.moveTo(samples[i], out);
+                events.push_back(t.nsecsElapsed() / 1e6);
+            }
+        }
+        const Stats s = summarize(events);
+        std::printf("| smoothing only, string %.0f px (no painting) | %.4f | %.4f | %.4f | - |\n", radius, s.medianMs,
+                    s.p95Ms, s.maxMs);
+    }
+}
+
 void renderBench(const char *label, qreal zoom, const QRect &exposed, int reps)
 {
     LayeredDocument doc = makeDocument(5);
@@ -261,6 +361,7 @@ int main(int argc, char **argv)
                 qPrintable(QSysInfo::currentCpuArchitecture()), LayeredDocument::DefaultWidth,
                 LayeredDocument::DefaultHeight);
     singleLayerComparison(reps);
+    brushEngineBench(reps);
     for (int layers : {1, 5, 10})
         layerBench(layers, reps);
     std::printf("\n### View rendering (composite cache drawn through the view; independent of layer count)\n\n");

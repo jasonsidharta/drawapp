@@ -134,12 +134,43 @@ QString RecoveryManager::writeNow(const DocumentData &snapshot, const RecoveryFi
     return writeAndCommit(snapshot, metadata, generation, m_nextSequence++).error;
 }
 
+RecoveryManager::WriteToken RecoveryManager::reserveWrite()
+{
+    WriteToken token;
+    if (!m_lock)
+        return token;
+    QMutexLocker locker(&m_commitMutex);
+    token.generation = m_generation;
+    token.sequence = m_nextSequence++;
+    token.valid = true;
+    return token;
+}
+
+QString RecoveryManager::writeProject(const WriteToken &token, const QByteArray &project,
+                                      const RecoveryFile::Metadata &metadata)
+{
+    if (!token.valid)
+        return QStringLiteral("crash recovery is not running");
+    const WriteOutcome outcome =
+        commitBytes(RecoveryFile::encodeProject(project, metadata), token.generation, token.sequence, true);
+    if (!outcome.error.isEmpty())
+        return outcome.error;
+    if (outcome.discarded)
+        return QStringLiteral("the recovery data was discarded while saving");
+    return {}; // committed, or a newer write of this document already replaced it
+}
+
 RecoveryManager::WriteOutcome RecoveryManager::writeAndCommit(const DocumentData &snapshot,
                                                               const RecoveryFile::Metadata &metadata,
                                                               quint64 generation, quint64 sequence)
 {
+    return commitBytes(RecoveryFile::encode(snapshot, metadata), generation, sequence, false);
+}
+
+RecoveryManager::WriteOutcome RecoveryManager::commitBytes(const QByteArray &bytes, quint64 generation,
+                                                           quint64 sequence, bool readBack)
+{
     WriteOutcome outcome;
-    const QByteArray bytes = RecoveryFile::encode(snapshot, metadata);
     // The temporary file lives next to the recovery file; the previous recovery file stays
     // valid until commit() atomically replaces it.
     QSaveFile file(recoveryFilePath());
@@ -156,12 +187,19 @@ RecoveryManager::WriteOutcome RecoveryManager::writeAndCommit(const DocumentData
     } else if (generation != m_generation || sequence <= m_lastCommittedSequence) {
         file.cancelWriting();
         outcome.stale = true;
+        outcome.discarded = generation != m_generation;
     } else if (!file.commit()) {
         outcome.error = QStringLiteral("Could not replace the recovery file: %1").arg(file.errorString());
     } else {
         outcome.committed = true;
         m_lastCommittedSequence = sequence;
         m_fileExists = true;
+        if (readBack) {
+            // Still under the lock, so no other write can replace the file in between.
+            QFile check(recoveryFilePath());
+            if (!check.open(QIODevice::ReadOnly) || check.readAll() != bytes)
+                outcome.error = QStringLiteral("the recovery file could not be read back correctly");
+        }
     }
     return outcome;
 }

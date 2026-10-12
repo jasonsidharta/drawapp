@@ -5,7 +5,11 @@
 
 #include <QCursor>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QSaveFile>
+#include <QStandardPaths>
 #include <QLocale>
 #include <limits>
 #include <QPainter>
@@ -90,6 +94,7 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     connect(&m_autosaveTimer, &QTimer::timeout, this, &CanvasItem::autosaveNow);
     connect(&m_io, &ProjectIo::saveFinished, this, &CanvasItem::onSaveFinished);
     connect(&m_io, &ProjectIo::openFinished, this, &CanvasItem::onOpenFinished);
+    connect(&m_io, &ProjectIo::exportFinished, this, &CanvasItem::onExportFinished);
     // Constructed with a parent already in a window: ItemSceneChange ran before this class existed.
     watchWindow(window());
 }
@@ -103,9 +108,45 @@ void CanvasItem::setBrushSize(int size)
     emit brushSizeChanged();
 }
 
+void CanvasItem::setBrushOpacity(qreal opacity)
+{
+    opacity = std::clamp(opacity, MinBrushOpacity, 1.0);
+    if (qFuzzyCompare(opacity, m_brushOpacity))
+        return;
+    m_brushOpacity = opacity;
+    emit brushSettingsChanged();
+}
+
+void CanvasItem::setPressureMinSize(qreal fraction)
+{
+    fraction = std::clamp(fraction, 0.0, 1.0);
+    if (fraction == m_pressureMinSize)
+        return;
+    m_pressureMinSize = fraction;
+    emit brushSettingsChanged();
+}
+
+void CanvasItem::setPressureFirmness(qreal firmness)
+{
+    firmness = std::clamp(firmness, -1.0, 1.0);
+    if (firmness == m_pressureFirmness)
+        return;
+    m_pressureFirmness = firmness;
+    emit brushSettingsChanged();
+}
+
+void CanvasItem::setSmoothing(int smoothing)
+{
+    smoothing = std::clamp(smoothing, 0, 100);
+    if (smoothing == m_smoothing)
+        return;
+    m_smoothing = smoothing;
+    emit brushSettingsChanged();
+}
+
 void CanvasItem::setBrushColor(const QColor &color)
 {
-    // Opaque only: dabs overlap, so a translucent color would build up within a stroke.
+    // The color is opaque; transparency comes from brushOpacity, applied once per stroke.
     QColor opaque = color;
     opaque.setAlpha(255);
     if (opaque == m_brushColor)
@@ -124,12 +165,7 @@ void CanvasItem::setTool(Tool tool)
 
 QString CanvasItem::documentTitle() const
 {
-    if (m_filePath.isEmpty())
-        return QStringLiteral("Untitled");
-    // For an Android content:// URI, QFileInfo asks the document provider for the display name;
-    // the URI's last segment is often only a document id (".../document/10").
-    const QString name = QFileInfo(m_filePath).fileName();
-    return name.isEmpty() ? QStringLiteral("Untitled") : name;
+    return m_fileName.isEmpty() ? QStringLiteral("Untitled") : m_fileName;
 }
 
 // --- history ---
@@ -468,9 +504,18 @@ void CanvasItem::replaceDocument(const LayeredDocument &document)
 void CanvasItem::newDocument()
 {
     replaceDocument(LayeredDocument());
-    m_filePath.clear();
-    m_fileUrl = QUrl();
+    setFile({}, {});
     emit fileChanged();
+}
+
+void CanvasItem::setFile(const QString &path, const QUrl &url, const QString &knownName)
+{
+    m_filePath = path;
+    m_fileUrl = url;
+    // Looked up once: for an Android content:// URI, QFileInfo asks the document provider for the
+    // display name (the URI's last segment is often only a document id), which it can no longer do
+    // once the document is gone.
+    m_fileName = path.isEmpty() ? QString() : !knownName.isEmpty() ? knownName : QFileInfo(path).fileName();
 }
 
 QString CanvasItem::fileBusyText() const
@@ -479,6 +524,8 @@ QString CanvasItem::fileBusyText() const
         return m_saveQueued ? QStringLiteral("Saving (another save queued)…") : QStringLiteral("Saving…");
     if (m_open.id)
         return QStringLiteral("Opening…");
+    if (m_exportId)
+        return QStringLiteral("Exporting PNG…");
     return {};
 }
 
@@ -488,6 +535,8 @@ QString CanvasItem::openFile(const QUrl &url)
         return QStringLiteral("Wait until the current save or open has finished.");
     if (m_conflict)
         return QStringLiteral("Decide first what to do with the file that was just opened.");
+    if (m_pendingOverwrite)
+        return QStringLiteral("Decide first whether to overwrite \"%1\".").arg(overwriteTarget());
     const QString path = pathFromUrl(url);
     // Decoded into a separate DocumentData on the worker; the open document is only replaced when
     // that succeeds (onOpenFinished).
@@ -545,8 +594,7 @@ void CanvasItem::resolveOpenConflict(bool useOpenedFile)
 void CanvasItem::applyOpened(const DocumentData &document, const QString &path, const QUrl &url)
 {
     replaceDocument(LayeredDocument(document));
-    m_filePath = path;
-    m_fileUrl = url;
+    setFile(path, url);
     emit fileChanged();
 }
 
@@ -569,6 +617,10 @@ QString CanvasItem::startSave(const QString &path, const QUrl &url)
 {
     if (m_open.id)
         return QStringLiteral("Wait until the file has finished opening.");
+    if (m_exportId)
+        return QStringLiteral("Wait until the PNG export has finished.");
+    if (m_pendingOverwrite)
+        return QStringLiteral("Decide first whether to overwrite \"%1\".").arg(overwriteTarget());
     if (m_save.id) {
         if (path == m_save.path) {
             // Saved again after the running save, from a newer snapshot: newer data always lands last.
@@ -584,7 +636,14 @@ QString CanvasItem::startSave(const QString &path, const QUrl &url)
         commitLayerOpacity(int(m_opacityDragLayerId), m_document.layer(m_document.indexOf(m_opacityDragLayerId)).opacity);
 
     // Immutable snapshot (copy-on-write images); editing continues while the worker writes it.
-    const quint64 id = m_io.save(m_document.snapshot(), path);
+    SafeSave::Options options;
+    if (SafeSave::isProviderPath(path)) {
+        options.allowOverwrite = m_overwriteConfirmed.contains(path);
+        options.localCopy = makeLocalCopy();
+        if (path == m_filePath)
+            options.name = documentTitle(); // still known if the provider has lost the document
+    }
+    const quint64 id = m_io.save(m_document.snapshot(), path, options);
     m_firstEditAfterSnapshot = true;
     if (!id)
         return QStringLiteral("Another file operation is still running.");
@@ -593,7 +652,73 @@ QString CanvasItem::startSave(const QString &path, const QUrl &url)
     return {};
 }
 
-void CanvasItem::onSaveFinished(quint64 id, const QString &path, const QString &error, qint64 workerMs)
+QString CanvasItem::stagingDirectory() const
+{
+    if (!m_stagingDirectory.isEmpty())
+        return m_stagingDirectory;
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("staging"));
+}
+
+SafeSave::LocalCopy CanvasItem::makeLocalCopy()
+{
+    SafeSave::LocalCopy copy;
+    if (m_recovery && m_recovery->isStarted()) {
+        // The crash-recovery file receives exactly the state being saved before the destination
+        // is touched. It is deleted only once that state is saved and nothing newer needs it
+        // (onSaveFinished), so after a crash during the write the next start offers it.
+        RecoveryManager *recovery = m_recovery;
+        const RecoveryManager::WriteToken token = m_recovery->reserveWrite();
+        const RecoveryFile::Metadata metadata = recoveryMetadata();
+        copy.keep = [recovery, token, metadata](const QByteArray &project) {
+            return recovery->writeProject(token, project, metadata);
+        };
+        return copy;
+    }
+    // Without crash recovery: a plain project file in private storage, kept if the save fails.
+    const QString file = QDir(stagingDirectory())
+                             .filePath(QStringLiteral("unsaved-%1.drawapp")
+                                           .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss-zzz"))));
+    copy.keep = [file](const QByteArray &project) -> QString {
+        if (!QDir().mkpath(QFileInfo(file).absolutePath()))
+            return QStringLiteral("the folder for it could not be created");
+        QSaveFile out(file);
+        if (!out.open(QIODevice::WriteOnly) || out.write(project) != project.size() || !out.commit())
+            return out.errorString();
+        QFile check(file);
+        if (!check.open(QIODevice::ReadOnly) || check.readAll() != project)
+            return QStringLiteral("it could not be read back correctly");
+        return {};
+    };
+    copy.release = [file] { QFile::remove(file); };
+    return copy;
+}
+
+QString CanvasItem::overwriteTarget() const
+{
+    return m_pendingOverwrite ? SafeSave::displayName(m_pendingOverwrite->path) : QString();
+}
+
+QString CanvasItem::confirmOverwrite()
+{
+    if (!m_pendingOverwrite)
+        return QStringLiteral("There is nothing waiting to be overwritten.");
+    const PendingOverwrite pending = *m_pendingOverwrite;
+    m_pendingOverwrite.reset();
+    emit overwriteConfirmationChanged();
+    m_overwriteConfirmed.insert(pending.path);
+    return startSave(pending.path, pending.url);
+}
+
+void CanvasItem::cancelOverwrite()
+{
+    if (!m_pendingOverwrite)
+        return;
+    m_pendingOverwrite.reset();
+    emit overwriteConfirmationChanged();
+    emit saveFinished(false, {}); // cancelled: nothing was written
+}
+
+void CanvasItem::onSaveFinished(quint64 id, const QString &path, const SafeSave::Result &result, qint64 workerMs)
 {
     Q_UNUSED(path);
     if (id != m_save.id)
@@ -602,23 +727,41 @@ void CanvasItem::onSaveFinished(quint64 id, const QString &path, const QString &
     const bool queued = m_saveQueued;
     m_save = {};
     m_saveQueued = false;
-    if (m_statsEnabled)
-        qInfo().noquote() << QStringLiteral("[file] save finished in %1 ms on the worker%2")
+    if (m_statsEnabled || result.viaProvider)
+        qInfo().noquote() << QStringLiteral("[file] save %1 in %2 ms on the worker%3")
+                                 .arg(result.ok() ? QStringLiteral("finished")
+                                      : result.status == SafeSave::Status::NeedsOverwriteConfirmation
+                                          ? QStringLiteral("waits for overwrite confirmation")
+                                          : QStringLiteral("failed"))
                                  .arg(workerMs)
-                                 .arg(error.isEmpty() ? QString() : QStringLiteral(" (failed)"));
-    if (!error.isEmpty()) {
-        // The previous file is intact (atomic replace), the document stays unsaved, the path is
-        // unchanged and a queued save is dropped.
+                                 .arg(result.probe.isEmpty() ? QString() : QStringLiteral("; provider: ") + result.probe);
+    if (result.status == SafeSave::Status::NeedsOverwriteConfirmation) {
+        // Nothing was written. The save resumes or ends with the user's decision.
+        m_pendingOverwrite = PendingOverwrite{done.path, done.url, result.probe};
         emit fileBusyChanged();
-        emit saveFinished(false, error);
+        emit overwriteConfirmationChanged();
+        emit overwriteConfirmationNeeded();
+        return;
+    }
+    if (!result.ok()) {
+        // The path is unchanged and a queued save is dropped. A local file is intact (atomic
+        // replace). A provider document may have been partly written: then the drawing no longer
+        // matches any saved file, so it is marked unsaved even if it was unchanged, which also
+        // keeps its recovery data.
+        if (result.destinationTouched && done.documentId == m_documentId && done.path == m_filePath) {
+            m_savedStateId = std::numeric_limits<quint64>::max();
+            emit historyChanged();
+        }
+        emit fileBusyChanged();
+        emit saveFinished(false, result.error);
         return;
     }
     if (done.documentId == m_documentId) {
         // Only the state captured in the snapshot is saved; later edits keep the document modified.
         m_savedStateId = done.stateId;
         const bool pathChanged = done.path != m_filePath;
-        m_filePath = done.path;
-        m_fileUrl = done.url;
+        if (pathChanged)
+            setFile(done.path, done.url);
         if (!needsRecovery()) {
             discardRecoveryFile();
             m_oldestUnrecoveredMs = -1;
@@ -635,14 +778,40 @@ void CanvasItem::onSaveFinished(quint64 id, const QString &path, const QString &
 
 QString CanvasItem::exportPng(const QUrl &url)
 {
+    if (fileBusy() || m_pendingOverwrite)
+        return QStringLiteral("Wait until the current file operation has finished.");
     if (m_gesture == Gesture::Stroke)
         endStroke();
     QString path = pathFromUrl(url);
     QUrl target = url;
     ensureSuffix(path, target, QStringLiteral("png"));
-    // A fresh composite of the visible layers (not the view cache). Export does not change the
-    // project file or the unsaved-changes state.
-    return ProjectFile::exportPng(m_document.snapshot().composite(), path);
+    // Composited and encoded on the worker from a snapshot. Export does not change the project
+    // file or the unsaved-changes state. An existing PNG at a provider location is overwritten
+    // without asking: the drawing itself is never at risk from an export.
+    SafeSave::Options options;
+    options.allowOverwrite = true;
+    const quint64 id = m_io.exportPng(m_document.snapshot(), path, options);
+    if (!id)
+        return QStringLiteral("Wait until the current file operation has finished.");
+    m_exportId = id;
+    m_firstEditAfterSnapshot = true;
+    emit fileBusyChanged();
+    return {};
+}
+
+void CanvasItem::onExportFinished(quint64 id, const QString &path, const SafeSave::Result &result, qint64 workerMs)
+{
+    Q_UNUSED(path);
+    if (id != m_exportId)
+        return;
+    m_exportId = 0;
+    if (m_statsEnabled || result.viaProvider)
+        qInfo().noquote() << QStringLiteral("[file] PNG export %1 in %2 ms on the worker%3")
+                                 .arg(result.ok() ? QStringLiteral("finished") : QStringLiteral("failed"))
+                                 .arg(workerMs)
+                                 .arg(result.probe.isEmpty() ? QString() : QStringLiteral("; provider: ") + result.probe);
+    emit fileBusyChanged();
+    emit exportFinished(result.ok(), result.error);
 }
 
 void CanvasItem::zoomIn()
@@ -773,8 +942,12 @@ bool CanvasItem::handleTabletEvent(QTabletEvent *event)
         if (!m_penDown)
             return false;
         m_penDown = false;
-        if (m_gesture == Gesture::Stroke)
+        if (m_gesture == Gesture::Stroke) {
+            // The lift-off position ends the line; its pressure (often near zero) is not used.
+            if (m_strokeKind == PointerKind::Pen)
+                continueStroke(pos, m_lastPressure);
             endStroke();
+        }
         else if (m_gesture == Gesture::Pan)
             endPan();
         event->accept();
@@ -820,10 +993,12 @@ void CanvasItem::mouseReleaseEvent(QMouseEvent *event)
 {
     if (ignoreMouseEvent(event))
         return;
-    if (m_gesture == Gesture::Stroke && m_strokeKind == PointerKind::Mouse)
+    if (m_gesture == Gesture::Stroke && m_strokeKind == PointerKind::Mouse) {
+        continueStroke(event->position(), 1.0);
         endStroke();
-    else if (m_gesture == Gesture::Pan)
+    } else if (m_gesture == Gesture::Pan) {
         endPan();
+    }
 }
 
 void CanvasItem::mouseUngrabEvent()
@@ -857,8 +1032,13 @@ void CanvasItem::touchEvent(QTouchEvent *event)
     }
 
     if (event->type() == QEvent::TouchCancel || active.isEmpty()) {
-        if (m_gesture == Gesture::Stroke && m_strokeKind == PointerKind::Touch)
+        if (m_gesture == Gesture::Stroke && m_strokeKind == PointerKind::Touch) {
+            // A lifted finger ends the line where it was lifted; a cancelled touch ends where the
+            // last delivered event left it.
+            if (event->type() != QEvent::TouchCancel && !event->points().isEmpty())
+                continueStroke(event->points().first().position(), 1.0);
             endStroke();
+        }
         else if (m_gesture == Gesture::Pinch)
             m_gesture = Gesture::None;
         event->accept();
@@ -940,9 +1120,16 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
     m_strokeLayerId = m_document.activeLayerId();
     m_strokeKind = kind;
     m_strokeMode = (eraserTip || m_tool == Eraser) ? BrushMode::Erase : BrushMode::Paint;
-    m_strokeColor = m_brushColor;
-    m_spacer.emplace(m_brushSize);
-    m_spacer->begin({m_view.viewToDoc(viewPos), pressure}, m_pendingDabs);
+    // Every brush setting is fixed for the whole stroke here. The smoothing distance is set in view
+    // pixels, so it feels the same at every zoom level.
+    m_compositor.emplace(m_brushColor, m_brushOpacity, m_strokeMode);
+    m_spacer.emplace(m_brushSize, StrokeSpacer::DefaultSpacing,
+                     PressureResponse{m_pressureMinSize, PressureResponse::gammaForFirmness(m_pressureFirmness)});
+    m_smoother.emplace(m_smoothing / 100.0 * MaxSmoothingRadius / m_view.zoom());
+    m_smoothed.clear();
+    m_lastPressure = pressure;
+    m_smoother->begin({m_view.viewToDoc(viewPos), pressure}, m_smoothed);
+    feedSmoothedSamples(true);
     applyPendingDabs();
 
     if (m_statsEnabled) {
@@ -955,13 +1142,16 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
 
 void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure)
 {
-    if (!m_spacer)
+    if (!m_spacer || !m_smoother)
         return;
     QElapsedTimer timer;
     if (m_statsEnabled)
         timer.start();
 
-    m_spacer->moveTo({m_view.viewToDoc(viewPos), pressure}, m_pendingDabs);
+    m_smoothed.clear();
+    m_lastPressure = pressure;
+    m_smoother->moveTo({m_view.viewToDoc(viewPos), pressure}, m_smoothed);
+    feedSmoothedSamples(false);
     applyPendingDabs();
 
     if (m_statsEnabled) {
@@ -975,15 +1165,38 @@ void CanvasItem::continueStroke(const QPointF &viewPos, qreal pressure)
 void CanvasItem::endStroke()
 {
     // However a stroke ends (release, lost grab, a second finger, an undo or save mid-stroke),
-    // the marks it made become one undo step.
+    // the smoothed line is completed to the last input position at once and the marks it made
+    // become one undo step.
     if (m_gesture == Gesture::Stroke) {
+        if (m_smoother && m_spacer) {
+            m_smoothed.clear();
+            m_smoother->finish(m_smoothed);
+            feedSmoothedSamples(false);
+            applyPendingDabs();
+        }
         commitPixels(m_strokeLayerId, std::move(m_strokeBefore),
                      m_strokeMode == BrushMode::Erase ? QStringLiteral("Eraser stroke") : QStringLiteral("Brush stroke"));
         m_strokeBefore = TileSnapshot();
     }
+    m_smoother.reset();
     m_spacer.reset();
+    m_compositor.reset();
+    m_smoothed.clear();
     m_pendingDabs.clear();
     m_gesture = Gesture::None;
+}
+
+void CanvasItem::feedSmoothedSamples(bool first)
+{
+    for (const StrokeSample &sample : m_smoothed) {
+        if (first) {
+            m_spacer->begin(sample, m_pendingDabs);
+            first = false;
+        } else {
+            m_spacer->moveTo(sample, m_pendingDabs);
+        }
+    }
+    m_smoothed.clear();
 }
 
 void CanvasItem::beginPan(const QPointF &viewPos)
@@ -1022,8 +1235,11 @@ void CanvasItem::applyPendingDabs()
     const bool firstAfterSnapshot = m_firstEditAfterSnapshot;
     if (firstAfterSnapshot)
         firstEditTimer.start();
-    const QRect changed = RasterDocument::stampDabs(m_document.pixels(index), m_pendingDabs, m_strokeColor,
-                                                    m_strokeMode, &m_strokeBefore);
+    if (!m_compositor) {
+        m_pendingDabs.clear();
+        return;
+    }
+    const QRect changed = m_compositor->addDabs(m_document.pixels(index), m_pendingDabs, m_strokeBefore);
     if (!changed.isEmpty()) {
         m_document.refreshComposite(changed);
         markContentChanged();
@@ -1062,6 +1278,8 @@ RecoveryFile::Metadata CanvasItem::recoveryMetadata() const
     meta.savedAt = QDateTime::currentDateTimeUtc();
     meta.originalPath = m_filePath;
     meta.originalUrl = m_fileUrl.toString();
+    if (!m_filePath.isEmpty())
+        meta.displayName = documentTitle();
     return meta;
 }
 
@@ -1110,7 +1328,8 @@ QString CanvasItem::recoveryDescription() const
         return {};
     const RecoveryFile::Contents &c = m_orphans.first().contents;
     const QString name = c.metadata.originalPath.isEmpty() ? QStringLiteral("Untitled")
-                                                           : QFileInfo(c.metadata.originalPath).fileName();
+                         : !c.metadata.displayName.isEmpty() ? c.metadata.displayName
+                                                             : QFileInfo(c.metadata.originalPath).fileName();
     const int layers = int(c.document.layers.size());
     QString text = QStringLiteral("DrawApp did not close normally. Unsaved artwork \"%1\" (%2 × %3 px, %4 %5) from %6 can be restored.")
                        .arg(name)
@@ -1131,9 +1350,11 @@ void CanvasItem::restoreRecovery()
     const RecoveryManager::Orphan orphan = m_orphans.takeFirst();
     m_orphans.clear(); // further orphans stay on disk for the next start
     replaceDocument(LayeredDocument(orphan.contents.document));
-    m_filePath = orphan.contents.metadata.originalPath;
-    m_fileUrl = orphan.contents.metadata.originalUrl.isEmpty() ? (m_filePath.isEmpty() ? QUrl() : QUrl::fromLocalFile(m_filePath))
-                                                               : QUrl(orphan.contents.metadata.originalUrl);
+    const RecoveryFile::Metadata &meta = orphan.contents.metadata;
+    setFile(meta.originalPath,
+            !meta.originalUrl.isEmpty() ? QUrl(meta.originalUrl)
+                                        : (meta.originalPath.isEmpty() ? QUrl() : QUrl::fromLocalFile(meta.originalPath)),
+            meta.displayName);
     // Restored artwork was never saved: no history state equals the "saved" id.
     m_savedStateId = std::numeric_limits<quint64>::max();
     const QString error = m_recovery->adopt(orphan);
@@ -1199,6 +1420,10 @@ void CanvasItem::autosaveNow()
     m_lastTickMs = now;
 
     if (!needsRecovery()) {
+        // A running save may be keeping its local copy in the recovery file; it is released when
+        // the save succeeds (onSaveFinished).
+        if (m_save.id)
+            return;
         if (m_recovery->hasRecoveryFile() || m_recovery->isWriting())
             discardRecoveryFile();
         m_oldestUnrecoveredMs = -1;

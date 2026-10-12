@@ -23,9 +23,9 @@ future feature with no work scheduled.
 ## First-release goals (planned, not done)
 
 - Common blend modes, groups and clipping for layers (Normal-blend raster layers are done).
-- Pressure-sensitive brushes with a pressure curve, smoothing and a small set of brush presets.
+- Brush presets and more brush shapes (opacity, a pressure-to-size curve and smoothing are done).
 - Selection and transform basics.
-- JPEG export (atomic project saving, crash recovery and PNG export are done).
+- JPEG export (project saving with crash recovery and PNG export are done).
 - Canvas rotation and mirroring.
 - Touch gestures on tablets (pinch zoom/pan, two-finger tap undo) with palm rejection.
 - Interface that works on phone, tablet and desktop sizes.
@@ -39,6 +39,10 @@ future feature with no work scheduled.
 - Milestone 2: crash recovery (10 s autosave to a separate recovery file, restore/discard on start).
 - Milestone 3: raster layers (Normal blending, opacity, visibility, lock) with a layer panel, undo for
   every layer operation, a layered project format (older files still open) and layered recovery.
+- Milestone 4: saving, opening and exporting in the background; Android tested on an emulator.
+- Milestone 5: safer saving to Android storage providers (overwrite warning, Save a Copy, a local
+  copy kept until the file is written and checked); brush opacity that stays even within a
+  stroke, a pressure-to-size response with a live preview, and optional smoothing.
 
 See ROADMAP.md for acceptance status.
 

@@ -26,6 +26,8 @@ ApplicationWindow {
     property bool closeConfirmed: false
     // The window was closed during a save or open; close again once it has finished.
     property bool closeWhenIdle: false
+    // "Save a Copy" was chosen instead of an overwrite: the cancelled save is not an outcome.
+    property bool savingCopy: false
 
     function showError(message) {
         errorDialog.text = message
@@ -86,6 +88,10 @@ ApplicationWindow {
     Connections {
         target: canvas
         function onSaveFinished(ok, error) {
+            if (!ok && !error && window.savingCopy) {
+                window.savingCopy = false // the copy is saved through the Save As dialog instead
+                return
+            }
             const then = window.afterSave
             window.afterSave = null
             if (!ok) {
@@ -106,6 +112,15 @@ ApplicationWindow {
             window.closeIfWaiting()
         }
         function onOpenConflict() { openConflictDialog.open() }
+        // The pending action (afterSave) stays until the user decides.
+        function onOverwriteConfirmationNeeded() { overwriteDialog.open() }
+        function onExportFinished(ok, error) {
+            if (!ok && error)
+                window.showError(error)
+            else if (ok)
+                window.showNotice("PNG exported.")
+            window.closeIfWaiting()
+        }
     }
 
     function closeIfWaiting() {
@@ -171,7 +186,7 @@ ApplicationWindow {
                     MenuItem { text: "Save   (Ctrl+S)"; enabled: !canvas.opening; onTriggered: window.saveDocument(null) }
                     MenuItem { text: "Save As…   (Ctrl+Shift+S)"; enabled: !canvas.fileBusy; onTriggered: window.saveAsDocument(null) }
                     MenuSeparator {}
-                    MenuItem { text: "Export PNG…   (Ctrl+Shift+E)"; onTriggered: exportDialog.open() }
+                    MenuItem { text: "Export PNG…   (Ctrl+Shift+E)"; enabled: !canvas.fileBusy; onTriggered: exportDialog.open() }
                 }
             }
             ToolButton {
@@ -231,6 +246,178 @@ ApplicationWindow {
                 width: 48
                 height: sizeSlider.height
                 verticalAlignment: Text.AlignVCenter
+            }
+            ToolButton {
+                id: brushSettingsButton
+                objectName: "brushSettingsButton"
+                text: "Brush… " + Math.round(canvas.brushOpacity * 100) + "%"
+                checkable: true
+                checked: brushPopup.visible
+                onClicked: brushPopup.visible ? brushPopup.close() : brushPopup.open()
+                ToolTip.visible: hovered
+                ToolTip.text: "Opacity, pen pressure and smoothing"
+
+                Popup {
+                    id: brushPopup
+                    objectName: "brushPopup"
+                    y: parent.height
+                    // Inside the window on small screens; scrolls when taller than the window.
+                    margins: 8
+                    width: Math.min(window.width - 16, 380)
+                    height: Math.min(brushColumn.implicitHeight + topPadding + bottomPadding,
+                                     window.height - 24 - brushSettingsButton.height)
+                    padding: 10
+                    // Modal (without dimming): a tap outside closes it without painting.
+                    modal: true
+                    dim: false
+                    onClosed: canvas.forceActiveFocus()
+
+                    ScrollView {
+                        anchors.fill: parent
+                        contentWidth: availableWidth
+                        clip: true
+
+                        ColumnLayout {
+                            id: brushColumn
+                            width: parent.width
+                            spacing: 4
+
+                            BrushPreview {
+                                objectName: "brushPreview"
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 104
+                                brushSize: canvas.brushSize
+                                color: canvas.brushColor
+                                brushOpacity: canvas.brushOpacity
+                                pressureMinSize: canvas.pressureMinSize
+                                pressureFirmness: canvas.pressureFirmness
+                                smoothing: canvas.smoothing
+                                eraser: canvas.tool === CanvasItem.Eraser
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                font.pixelSize: 11
+                                text: "Preview: pressure rises and falls along the stroke; the box shows size against pressure."
+                            }
+
+                            GridLayout {
+                                Layout.fillWidth: true
+                                columns: 3
+                                columnSpacing: 6
+                                rowSpacing: 0
+
+                                Label { text: "Opacity" }
+                                Slider {
+                                    Layout.minimumHeight: 32 // a comfortable touch target
+                                    objectName: "brushOpacitySlider"
+                                    Layout.fillWidth: true
+                                    from: 1
+                                    to: 100
+                                    stepSize: 1
+                                    value: Math.round(canvas.brushOpacity * 100)
+                                    onMoved: canvas.brushOpacity = value / 100
+                                }
+                                Label { text: Math.round(canvas.brushOpacity * 100) + "%"; Layout.preferredWidth: 44 }
+
+                                Label { text: "Size" }
+                                Slider {
+                                    Layout.minimumHeight: 32
+                                    Layout.fillWidth: true
+                                    from: 1
+                                    to: 256
+                                    stepSize: 1
+                                    value: canvas.brushSize
+                                    onMoved: canvas.brushSize = Math.round(value)
+                                }
+                                Label { text: canvas.brushSize + " px"; Layout.preferredWidth: 44 }
+
+                                Label {
+                                    Layout.columnSpan: 3
+                                    Layout.topMargin: 6
+                                    text: "Pen pressure"
+                                    font.bold: true
+                                }
+                                Label { text: "Lightest" }
+                                Slider {
+                                    Layout.minimumHeight: 32 // a comfortable touch target
+                                    objectName: "pressureMinSlider"
+                                    Layout.fillWidth: true
+                                    from: 0
+                                    to: 100
+                                    stepSize: 1
+                                    value: Math.round(canvas.pressureMinSize * 100)
+                                    onMoved: canvas.pressureMinSize = value / 100
+                                    // Delayed, so the tip does not cover the next slider while this one is used.
+                                    ToolTip.delay: 800
+                                    ToolTip.visible: hovered && !pressed
+                                    ToolTip.text: "Size at the lightest pressure, as a share of the brush size (100% = pressure does not change size)"
+                                }
+                                Label { text: Math.round(canvas.pressureMinSize * 100) + "%"; Layout.preferredWidth: 44 }
+
+                                Label { text: "Response" }
+                                Slider {
+                                    Layout.minimumHeight: 32 // a comfortable touch target
+                                    objectName: "pressureFirmnessSlider"
+                                    Layout.fillWidth: true
+                                    from: -100
+                                    to: 100
+                                    stepSize: 5
+                                    value: Math.round(canvas.pressureFirmness * 100)
+                                    onMoved: canvas.pressureFirmness = value / 100
+                                    // Delayed, so the tip does not cover the next slider while this one is used.
+                                    ToolTip.delay: 800
+                                    ToolTip.visible: hovered && !pressed
+                                    ToolTip.text: "Soft: light pressure already draws large. Firm: needs more pressure."
+                                }
+                                Label {
+                                    Layout.preferredWidth: 44
+                                    text: canvas.pressureFirmness < -0.02 ? "Soft" : (canvas.pressureFirmness > 0.02 ? "Firm" : "Linear")
+                                }
+
+                                Label {
+                                    Layout.columnSpan: 3
+                                    Layout.topMargin: 6
+                                    text: "Smoothing"
+                                    font.bold: true
+                                }
+                                Label { text: "Strength" }
+                                Slider {
+                                    Layout.minimumHeight: 32 // a comfortable touch target
+                                    objectName: "smoothingSlider"
+                                    Layout.fillWidth: true
+                                    from: 0
+                                    to: 100
+                                    stepSize: 1
+                                    value: canvas.smoothing
+                                    onMoved: canvas.smoothing = Math.round(value)
+                                    // Delayed, so the tip does not cover the next slider while this one is used.
+                                    ToolTip.delay: 800
+                                    ToolTip.visible: hovered && !pressed
+                                    ToolTip.text: "The brush trails the pen by up to " + Math.round(canvas.smoothing * 0.4)
+                                                  + " screen pixels and catches up when you lift it"
+                                }
+                                Label { text: canvas.smoothing === 0 ? "Off" : canvas.smoothing; Layout.preferredWidth: 44 }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                font.pixelSize: 11
+                                text: "Mouse and touch have no pressure and always draw at full size. "
+                                      + "Settings apply from the next stroke."
+                            }
+                            Button {
+                                text: "Reset brush settings"
+                                onClicked: {
+                                    canvas.brushOpacity = 1
+                                    canvas.pressureMinSize = 0.1
+                                    canvas.pressureFirmness = 0
+                                    canvas.smoothing = 0
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             ToolSeparator {}
@@ -330,7 +517,7 @@ ApplicationWindow {
                 // that is about to be replaced (C++ still detects it, see openConflict).
                 enabled: !unsavedDialog.visible && !errorDialog.visible && !recoveryDialog.visible
                          && !openConflictDialog.visible && !canvas.opening
-                         && !renameDialog.visible
+                         && !renameDialog.visible && !overwriteDialog.visible
                 onNotice: (message) => {
                     noticeLabel.text = message
                     noticeBanner.visible = true
@@ -611,10 +798,69 @@ ApplicationWindow {
         nameFilters: ["PNG image (*.png)"]
         currentFolder: StandardPaths.writableLocation(StandardPaths.PicturesLocation)
         onAccepted: {
-            const error = canvas.exportPng(selectedFile)
+            const error = canvas.exportPng(selectedFile) // the result arrives through onExportFinished
             if (error)
                 window.showError(error)
         }
+    }
+
+    Dialog {
+        id: overwriteDialog
+        objectName: "overwriteDialog"
+        anchors.centerIn: parent
+        width: Math.min(window.width - 32, 500)
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        title: "Overwrite \"" + canvas.overwriteTarget + "\"?"
+        footer: DialogButtonBox {
+            Button { text: "Save a Copy…"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: overwriteDialog.saveCopy() }
+            Button { text: "Overwrite"; DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole }
+            Button { text: "Cancel"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        }
+        ColumnLayout {
+            width: parent.width
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "This file is kept by a storage app that does not let DrawApp replace files safely. "
+                      + "Overwriting writes over the existing file directly. If that is interrupted (for example "
+                      + "the storage fills up or the app is closed), the file there can be left damaged.\n\n"
+                      + "Your drawing stays open in DrawApp either way, and a copy is kept on this device until "
+                      + "the file has been written and checked.\n\n"
+                      + "Save a Copy creates a new file instead and leaves this one unchanged; you then continue "
+                      + "in the new file."
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                font.pixelSize: 11
+                color: window.palette.placeholderText
+                visible: canvas.overwriteDetails !== ""
+                text: "Storage details: " + canvas.overwriteDetails
+            }
+        }
+        function saveCopy() {
+            window.afterSaveAs = window.afterSave
+            window.afterSave = null
+            window.savingCopy = true
+            overwriteDialog.close()
+            canvas.cancelOverwrite()
+            saveDialog.open()
+        }
+        onDiscarded: {
+            overwriteDialog.close()
+            const error = canvas.confirmOverwrite()
+            if (error) {
+                window.afterSave = null
+                window.showError(error)
+            }
+        }
+        onRejected: {
+            window.closeWhenIdle = false
+            if (canvas.overwriteConfirmationPending)
+                canvas.cancelOverwrite()
+        }
+        onClosed: canvas.forceActiveFocus()
     }
 
     Dialog {
@@ -760,7 +1006,7 @@ ApplicationWindow {
     Shortcut { sequences: [StandardKey.Open]; onActivated: window.openDocument() }
     Shortcut { sequences: [StandardKey.Save]; onActivated: window.saveDocument(null) }
     Shortcut { sequences: ["Ctrl+Shift+S"]; onActivated: window.saveAsDocument(null) }
-    Shortcut { sequences: ["Ctrl+Shift+E"]; onActivated: exportDialog.open() }
+    Shortcut { sequences: ["Ctrl+Shift+E"]; enabled: !canvas.fileBusy; onActivated: exportDialog.open() }
     Shortcut { sequences: ["Ctrl+Shift+N"]; enabled: !canvas.opening; onActivated: canvas.addLayer() }
     Shortcut { sequence: "B"; enabled: !canvas.opening; onActivated: canvas.tool = CanvasItem.Brush }
     Shortcut { sequence: "E"; enabled: !canvas.opening; onActivated: canvas.tool = CanvasItem.Eraser }

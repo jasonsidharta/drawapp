@@ -52,6 +52,20 @@ public:
     bool requestWrite(const DocumentData &snapshot, const RecoveryFile::Metadata &metadata);
     // Writes synchronously in this thread after any in-flight write ends (used at shutdown).
     QString writeNow(const DocumentData &snapshot, const RecoveryFile::Metadata &metadata);
+
+    // Keeping the state being saved recoverable while a save writes to a destination that cannot
+    // be replaced atomically: reserveWrite() on the UI thread when the save starts, then
+    // writeProject() from the save worker with the encoded project. writeProject commits like any
+    // recovery write (a newer write of the same document wins) and reads the file back.
+    struct WriteToken
+    {
+        quint64 generation = 0;
+        quint64 sequence = 0;
+        bool valid = false;
+    };
+    WriteToken reserveWrite();
+    // Thread-safe. Empty on success, otherwise the reason.
+    QString writeProject(const WriteToken &token, const QByteArray &project, const RecoveryFile::Metadata &metadata);
     // Invalidates in-flight writes and deletes this session's recovery file.
     void discard();
     // Normal exit with nothing to recover: discard, then remove the lock.
@@ -81,10 +95,12 @@ private:
     {
         bool committed = false;
         bool stale = false;
+        bool discarded = false; // stale because the recovery data was discarded after the request
         QString error;
     };
     WriteOutcome writeAndCommit(const DocumentData &snapshot, const RecoveryFile::Metadata &metadata,
                                 quint64 generation, quint64 sequence);
+    WriteOutcome commitBytes(const QByteArray &bytes, quint64 generation, quint64 sequence, bool readBack);
     QString sessionBase() const;
 
     QString m_directory;

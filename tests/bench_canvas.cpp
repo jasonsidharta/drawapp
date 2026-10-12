@@ -61,6 +61,9 @@ DocumentData makeDocument(int layers)
     return doc;
 }
 
+qreal g_opacity = 1.0;
+int g_smoothing = 0;
+
 void run(int layers)
 {
     QTemporaryDir dir;
@@ -79,6 +82,8 @@ void run(int layers)
     if (!QTest::qWaitFor([&] { return opened.count() > 0; }, 30000))
         return;
     canvas->setBrushSize(12);
+    canvas->setBrushOpacity(g_opacity);
+    canvas->setSmoothing(g_smoothing);
 
     RecoveryManager recovery(dir.filePath("recovery"));
     canvas->setAutosaveInterval(1000);
@@ -90,7 +95,7 @@ void run(int layers)
     QObject::connect(&recovery, &RecoveryManager::writeFinished,
                      [&](bool, bool, const QString &, quint64, quint64, qint64 ms) { recoveryWorker.push_back(double(ms)); });
     QObject::connect(&canvas->projectIo(), &ProjectIo::saveFinished,
-                     [&](quint64, const QString &, const QString &, qint64 ms) { saveWorker.push_back(double(ms)); });
+                     [&](quint64, const QString &, const SafeSave::Result &, qint64 ms) { saveWorker.push_back(double(ms)); });
     QElapsedTimer saveTotal;
     double saveTotalMs = -1, saveRequestMs = -1;
     QObject::connect(canvas, &CanvasItem::saveFinished, [&](bool, const QString &) {
@@ -163,8 +168,14 @@ void run(int layers)
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
-    std::printf("Platform: %s. Synthetic mouse strokes at 250 Hz; autosave every 1 s; one async save at ~5 s.\n",
-                qPrintable(QGuiApplication::platformName()));
+    // Usage: bench_canvas [brush opacity 0..1] [smoothing 0..100]
+    if (argc > 1)
+        g_opacity = std::atof(argv[1]);
+    if (argc > 2)
+        g_smoothing = std::atoi(argv[2]);
+    std::printf("Platform: %s. Synthetic mouse strokes at 250 Hz; autosave every 1 s; one async save at ~5 s; "
+                "brush 12 px, opacity %.0f %%, smoothing %d.\n",
+                qPrintable(QGuiApplication::platformName()), g_opacity * 100, g_smoothing);
     for (int layers : {1, 5, 10})
         run(layers);
     return 0;

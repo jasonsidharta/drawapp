@@ -3,16 +3,29 @@
 #include <algorithm>
 #include <cmath>
 
-StrokeSpacer::StrokeSpacer(qreal brushSize, qreal spacing)
+qreal PressureResponse::gammaForFirmness(qreal firmness)
+{
+    return std::pow(MaxGamma, std::clamp(firmness, -1.0, 1.0));
+}
+
+qreal PressureResponse::sizeFactor(qreal pressure) const
+{
+    const qreal p = std::clamp(pressure, 0.0, 1.0);
+    const qreal min = std::clamp(minFraction, 0.0, 1.0);
+    const qreal g = std::clamp(gamma, MinGamma, MaxGamma);
+    return min + (1.0 - min) * std::pow(p, g);
+}
+
+StrokeSpacer::StrokeSpacer(qreal brushSize, qreal spacing, PressureResponse response)
     : m_brushSize(std::max(MinDiameter, brushSize))
     , m_spacing(std::max(0.01, spacing))
+    , m_response(response)
 {
 }
 
 qreal StrokeSpacer::diameterFor(qreal pressure) const
 {
-    const qreal p = std::clamp(pressure, 0.0, 1.0);
-    return std::max(MinDiameter, m_brushSize * (MinPressureFraction + (1.0 - MinPressureFraction) * p));
+    return std::max(MinDiameter, m_brushSize * m_response.sizeFactor(pressure));
 }
 
 void StrokeSpacer::begin(const StrokeSample &sample, std::vector<Dab> &out)

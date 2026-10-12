@@ -24,20 +24,29 @@ src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
                    DocumentData {size, layers, activeLayerId}; compositeLayers(); shared limits
   LayeredDocument  the open document: ordered layers (index 0 = bottom), active layer, id
                    allocation, cached composite of the visible layers
-  RasterDocument   raster operations on one image: stampDabs (brush/eraser), clear
+  RasterDocument   raster operations on one image: stampDabs (test fixtures), clear
+  StrokeSmoother   distance-based ("pull string") smoothing of input samples
+  StrokeSpacer     evenly spaced dabs; PressureResponse (pressure -> size curve)
+  StrokeCompositor uniform-opacity stroke rendering into a layer (coverage mask + undo tiles)
   TileSnapshot     copies of the 64x64 tiles an edit touched; swap = undo/redo
   UndoHistory      UndoCommand (pixels / layer presence / properties / move) + linear history
                    under one byte budget; state ids for "unsaved"
-  ProjectFile      .drawapp v2 (layered) encode/decode, v1 reader, safe writes, PNG export
+  ProjectFile      .drawapp v2 (layered) encode/decode/verify, v1 reader, local safe writes
+  SafeSave         writing projects and exports: local files atomically, provider documents
+                   with a local copy, probing, space reservation and read-back
+  DocumentProvider destination access for content:// documents (Android: ContentResolver via
+                   JNI in AndroidDocumentProvider.cpp; desktop: QFile stand-in; tests: a fake)
+  ProjectIo        one worker thread for save, open and PNG export
   RecoveryFile     .drawrecovery v2 (metadata + embedded layered project), v1 reader
   RecoveryManager  session lock, orphan discovery, one-at-a-time worker writes with stale checks
-  ViewTransform, Pressure.h, StrokeSpacer, ViewRenderer   (input, spacing, view; unchanged)
+  ViewTransform, Pressure.h, ViewRenderer   (view and input policy; unchanged)
 src/app/    (static QML module "drawapp_ui", URI DrawApp, used by the app and tst_ui)
   CanvasItem       QQuickPaintedItem; input, strokes, layer commands, history, files, recovery
-  Main.qml         window, toolbar, File menu, layer panel, dialogs, notices, shortcuts
+  BrushPreview     live preview of the brush settings (same smoother/spacer/compositor)
+  Main.qml         window, toolbar, brush settings, File menu, layer panel, dialogs, shortcuts
   main.cpp         application setup (in the drawapp executable)
 tests/             tst_core, tst_document, tst_recovery (headless); tst_canvas, tst_ui (window,
-                   offscreen under ctest); bench_core
+                   offscreen under ctest); FakeProvider.h; bench_core, bench_canvas
 ```
 
 ## Layers
@@ -70,12 +79,32 @@ tests/             tst_core, tst_document, tst_recovery (headless); tst_canvas, 
 1. **Input** reaches `CanvasItem`: mouse (left draws; middle or Space + left pans), pen (window
    event filter, because `QQuickItem` has no tablet handler), touch (one finger draws, two pan and
    zoom), wheel (zoom about the cursor).
-2. **Pressure** only for pens reporting the `Pressure` capability; everything else uses 1.0.
+2. **Pressure** only for pens reporting the `Pressure` capability; everything else uses 1.0, so
+   mouse and touch always draw at full size whatever the pressure settings.
 3. **Coordinates** go through `viewToDoc`; document pixels never depend on the view.
-4. **Spacing**: a dab every `max(0.5 px, 0.15 × last dab diameter)`.
-5. **Raster**: `RasterDocument::stampDabs(layerImage, …)` captures the tiles under each dab into
-   the stroke's `TileSnapshot`, draws the dabs, and returns the changed rect.
-6. **Composite and repaint**: the composite is refreshed for that rect, which is then repainted.
+4. **Settings** are captured when the stroke starts: size, color, opacity, pressure response,
+   smoothing, tool and layer. Changing them mid-stroke affects the next stroke.
+5. **Smoothing** (`StrokeSmoother`, optional): the brush point hangs on a string of length
+   `smoothing / 100 × 40` view pixels (converted to document pixels at stroke start) and moves only
+   when the pointer pulls the string tight. Input segments are walked in 0.5 px steps, so the
+   result depends on the path, not on the event rate or speed. The lag is spatial, not temporal:
+   no timers and no delay when the pointer stops. When the stroke ends (release, lost grab,
+   cancelled touch, or an undo/save mid-stroke), the line is completed straight to the last input
+   position. The release event's position is used, but not its pressure, since pens often report
+   near zero at lift-off.
+6. **Spacing and pressure** (`StrokeSpacer`): a dab every `max(0.5 px, 0.15 × last dab diameter)`,
+   diameter `size × (min + (1 − min) × p^γ)`, with `min` = "Lightest" (default 10 %) and
+   γ = 3^firmness (Soft 1/3 … Linear 1 … Firm 3).
+7. **Raster** (`StrokeCompositor`): each dab's anti-aliased coverage goes into a per-stroke mask,
+   keeping the maximum, never the sum. Pixels under the stroke are recomputed from the layer as it
+   was before the stroke, which the stroke's undo `TileSnapshot` holds anyway:
+   paint = `before` under `(color, opacity × coverage)`; erase = `before × (1 − opacity × coverage)`.
+   **Opacity is therefore uniform within a stroke**: overlapping dabs, slow segments and
+   self-crossings do not darken. Separate strokes build up, since the next stroke's "before"
+   includes the previous one. At 100 % the result is the familiar opaque stroke. The mask
+   allocates 4 KiB per 64 × 64 tile the stroke touches.
+8. **Composite and repaint**: the composite is refreshed for the changed rect, which is then
+   repainted. One stroke is one undo step (the `TileSnapshot`), as before.
 
 ## Undo and redo
 
@@ -112,16 +141,41 @@ Defined in `src/core/ProjectFile.h`.
   checksum, metadata (unique non-zero ids, names ≤ 256 characters, opacity 0–1, block sizes that
   add up), each block's declared raw size before decompressing, and premultiplied validity.
   An unknown active layer id falls back to the top layer.
-- **Saving** encodes in memory and writes through `QSaveFile` (atomic replace). `content://` URIs
-  cannot be replaced atomically and are written directly; this worked on the Android emulator.
-  **Opening** decodes into a separate `DocumentData`; only a fully valid document replaces the
-  open one.
+- **Saving**: see "Save guarantees" below. **Opening** decodes into a separate `DocumentData`;
+  only a fully valid document replaces the open one.
+
+## Save guarantees: local files vs Android document providers (milestone 5)
+
+Every save first encodes the project in memory and checks the bytes with
+`ProjectFile::verify`: structure, SHA-256, and every layer block decompressed to the right
+size, one layer at a time. Bytes that fail the check are never written. Then:
+
+| | Local file (desktop path) | Android storage-provider document (`content://`) |
+|---|---|---|
+| How it is written | `QSaveFile`: temporary file next to the destination, then rename over it | In place: the storage access framework gives access to that one document only, with no way to create a sibling file and rename it over |
+| Old contents if the write fails or is interrupted | **Intact** (atomic replace) | Intact if the failure happens before writing starts (access, space, reservation, local copy). **Can be damaged** if it happens during the write |
+| Free space | Checked first (`QStorageInfo`, needs file size + 1 MiB); ENOSPC during the write is reported | Checked first with the free space the provider's file descriptor reports (`fstatvfs`); then the full size is reserved with `posix_fallocate`, so "storage full" is found before any byte changes, where the storage supports it |
+| Overwriting existing contents | Normal Save | Asked first, once per document per session: **Overwrite** / **Save a Copy…** (Save As to a new document) / **Cancel**. A document the picker has just created (empty) is not asked about |
+| Local copy while writing | Not needed (old file intact) | The exact state being saved is written to the crash-recovery file (or, without recovery, `<app data>/staging/unsaved-*.drawapp`) and read back **before** the destination is touched. It is released only after the destination has been written and read back |
+| After writing | Rename | `ftruncate` + `fsync`, then the document is **read back and compared**; a mismatch is a failure |
+| Access revoked / document deleted | Open error | Found by the probe before writing (SecurityException / FileNotFoundException), so nothing is touched |
+| Drawing after any failure | Open, unsaved | Open, unsaved, recoverable. If the failure may have damaged the file the drawing came from, the drawing is marked unsaved even if it had no changes, so the recovery data is kept |
+
+Not covered on either side: OS crashes and power loss beyond what `fsync` provides; a provider
+that reports success but stores something else later (the read-back only proves what the
+provider returned at that moment); cloud providers that upload asynchronously after `close()`.
+Stream-only providers (no seekable file) get no space reservation and a truncating write.
+
+PNG export uses the same paths. It is not asked about before overwriting, because the drawing
+itself is never at risk from an export, and it keeps no local copy.
 
 ## Asynchronous save and open (milestone 4)
 
-`ProjectIo` (src/core/ProjectIo.h) owns a one-thread `QThreadPool`. `save(snapshot, path)` and
-`open(path)` run `ProjectFile::save` / `load` there and deliver `saveFinished` / `openFinished`
-through a queued call back on the UI thread. Only one operation runs at a time.
+`ProjectIo` (src/core/ProjectIo.h) owns a one-thread `QThreadPool`. `save(snapshot, path,
+options)`, `open(path)` and `exportPng(snapshot, path, options)` run `SafeSave::saveProject`,
+`ProjectFile::load` and the PNG encode + `SafeSave::writeExport` there, and deliver
+`saveFinished` / `openFinished` / `exportFinished` through a queued call back on the UI thread.
+Only one operation runs at a time.
 
 `CanvasItem` drives it as a small state machine:
 - **Save** takes `LayeredDocument::snapshot()`. This is the same copy-on-write value used for
@@ -140,14 +194,21 @@ through a queued call back on the UI thread. Only one operation runs at a time.
 - **Main.qml** chains actions after a save (`afterSave`). New, Open and Close run only after the
   requested save succeeded, and prompt again if the document changed while it ran. A failed or
   cancelled save cancels the action. Closing during a save is deferred until it finishes. The
-  footer shows a busy indicator and "Saving…" / "Opening…".
-- PNG export is still synchronous (79–350 ms for 1–10 layers).
+  footer shows a busy indicator and "Saving…" / "Opening…" / "Exporting PNG…".
+- **Overwrite confirmation** (provider documents): the worker probes the destination before
+  writing anything. If it has contents and the user has not confirmed this document in this
+  session, the save ends with `NeedsOverwriteConfirmation`. `CanvasItem` keeps the request and
+  emits `overwriteConfirmationNeeded`, and `afterSave` stays pending. `confirmOverwrite()`
+  restarts the save. `cancelOverwrite()` reports a cancelled save. "Save a Copy…" cancels and
+  opens Save As, keeping the pending action.
+- During a save, autosave does not delete the recovery file even when nothing is unsaved: it may
+  be the save's local copy.
 
 ## PNG export
 
 A fresh composite of the visible layers with their opacity (not the view cache, no checkerboard,
-no view transform), written as straight-alpha PNG at document resolution through the same safe
-write path. It does not change the project path or the unsaved state.
+no view transform), composited, encoded and written on the file worker (milestone 5; earlier it
+blocked the UI thread for 79–350 ms). It does not change the project path or the unsaved state.
 
 ## Crash recovery
 
@@ -187,6 +248,10 @@ physical device. iOS is unverified.
 | Lock = pixel lock only | Predictable: lock prevents accidental painting, not organising layers |
 | Static QML module (`drawapp_ui`) | The UI test loads the real Main.qml |
 | Per-session recovery files with `QLockFile`; generation-gated commits | From milestone 2 |
+| Uniform stroke opacity via a max-coverage mask recomposited from the undo tiles | No extra full-size buffer (the undo snapshot already holds the pre-stroke pixels); per-event cost measured equal or lower than the QPainter dabs it replaces |
+| Distance-based smoothing, not time-based | Independent of event rate and timestamps (tested); no latency when the pen stops; deterministic in tests |
+| Provider saves keep the local copy in the recovery file | Survives a crash during the write and is offered by the existing Restore prompt; no second staging mechanism when recovery runs |
+| Provider access through raw JNI for throwing calls | `QJniObject` clears Java exceptions without reporting their type; the type distinguishes revoked access from other errors |
 | MinGW 15.1 from MinGW-Builds (GitHub), SHA-256 pinned | Qt's repository metadata points at 13.1 but Qt was built with 15.1 |
 
 ## Limitations (known)
@@ -194,11 +259,15 @@ physical device. iOS is unverified.
 - **Crash recovery has a loss window** (interval + write time; it grows with layer count because
   the worker re-encodes every layer: about 0.37 s per write at 5 layers and 0.8 s at 10, measured).
   Only process kills were tested; OS crash or power loss may lose unflushed data.
-- Save and open run on a worker, but they still take about 0.35 s / 0.12 s at 5 layers and
-  0.75 s / 0.24 s at 10 layers (2048 × 1536, representative content). During that time other
-  file operations wait. PNG export still blocks the UI thread.
-- Saving to an Android `content://` URI is not atomic: a failed write can damage that file. The
-  document and recovery data are kept, and the document stays marked as unsaved.
+- Save, open and export run on a worker, but take about 0.35–0.55 s / 0.12–0.15 s at 5 layers
+  and 0.75–1.4 s / 0.24–0.36 s at 10 layers (2048 × 1536, representative content; verification
+  adds 0.1–0.22 s). During that time other file operations wait.
+- Saving to an Android `content://` document is not atomic: a write that fails part way can
+  damage that file (see "Save guarantees"). The drawing and a local copy are kept.
+- Brush: round dabs only, Normal blending, no texture, no pressure → opacity, no tilt; smoothing
+  cuts corners by design (by up to the string length) and is not a curve fitter.
+- When a touch is cancelled by the system, a move that Qt Quick was still holding back for the
+  next frame is lost; the stroke ends at the last move that arrived.
 - A full composite rebuild (visibility, opacity, order) takes about 5.6 ms at 5 layers and 12 ms
   at 10; an opacity drag recomposites on every slider move.
 - Memory: 12 MiB per layer plus the 12 MiB composite, plus up to 128 MiB of history.
@@ -210,7 +279,8 @@ physical device. iOS is unverified.
 ## Future requirements (noted, not built)
 
 More blend modes, groups, clipping and masks; tiled or sparse layer storage if memory requires
-it; background PNG export; incremental recovery writes (only changed layers); the document model may
+it; folder-based saving (ACTION_OPEN_DOCUMENT_TREE) that would allow a temporary sibling document
+and rename on providers that support it; incremental recovery writes (only changed layers); the document model may
 later hold editable strokes.
 
 ## Licensing notes

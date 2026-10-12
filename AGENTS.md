@@ -78,6 +78,28 @@ push. Never commit build outputs, APKs/AABs, keystores or other credentials (see
 - New/Open/Close after a requested save wait for its success. Every new file action must check
   `fileBusy`. Test races with `ProjectIo::setBeforeFinishHookForTesting`.
 
+## Save safety invariants (milestone 5)
+
+- Every project write goes through `SafeSave`: encode, `ProjectFile::verify`, then either an
+  atomic local write or the provider path. Never write a `content://` document any other way
+  (`ProjectFile::writeFileSafely` refuses them).
+- Provider path order: probe → overwrite confirmation → encode/verify → local copy written **and
+  read back** → space check → reserved write → read-back compare → release the copy. Do not
+  touch the destination before the local copy succeeded.
+- Do not describe a provider save as atomic, and do not claim more than ARCHITECTURE.md "Save
+  guarantees" says. Test provider behaviour with `tests/FakeProvider.h`.
+- While a save runs, autosave must not delete the recovery file (it may be the save's copy).
+
+## Brush invariants (milestone 5)
+
+- Pipeline per stroke: `StrokeSmoother` → `StrokeSpacer` → `StrokeCompositor`, all created in
+  `beginStroke` from the settings at that moment; never read live settings mid-stroke.
+- The compositor recomputes pixels from the stroke's undo `TileSnapshot`; anything that changes
+  the layer mid-stroke must end the stroke first (as undo, save and layer actions already do).
+- Pressure stays behind `effectivePressure`: mouse and touch are 1.0, whatever the response
+  curve says. Smoothing is distance-based; do not add timers or time-based filters to it.
+- `endStroke` completes the smoothed tail; keep it the only place a stroke ends.
+
 ## Conventions
 
 C++17, Qt types, `m_` members, one class per file pair (namespaces like `ProjectFile` excepted).

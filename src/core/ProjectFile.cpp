@@ -268,6 +268,47 @@ QByteArray ProjectFile::encodeVersion1(const QImage &image)
     return out;
 }
 
+QString ProjectFile::verify(const QByteArray &data)
+{
+    // The structure checks of decode() for version 2, but each layer block is only decompressed
+    // and measured, one at a time, so a large project does not need its decoded size in memory.
+    if (data.size() < HeaderSize || std::memcmp(data.constData(), Magic, sizeof(Magic)) != 0)
+        return damaged(QStringLiteral("header is missing"));
+    if (qFromLittleEndian<quint32>(data.constData() + 8) != CurrentVersion)
+        return damaged(QStringLiteral("unexpected format version"));
+    const quint32 width = qFromLittleEndian<quint32>(data.constData() + 12);
+    const quint32 height = qFromLittleEndian<quint32>(data.constData() + 16);
+    const quint32 layerCount = qFromLittleEndian<quint32>(data.constData() + 20);
+    const quint32 metaSize = qFromLittleEndian<quint32>(data.constData() + 24);
+    const quint64 payloadSize = qFromLittleEndian<quint64>(data.constData() + 28);
+    if (width == 0 || height == 0 || layerCount == 0 || !sizeWithinLimits(width, height, layerCount))
+        return damaged(QStringLiteral("invalid canvas size or layer count"));
+    if (payloadSize != quint64(data.size() - HeaderSize) || metaSize == 0 || metaSize > payloadSize)
+        return damaged(QStringLiteral("unexpected file length"));
+    const QByteArrayView payload(data.constData() + HeaderSize, data.size() - HeaderSize);
+    if (QCryptographicHash::hash(payload, QCryptographicHash::Sha256) != data.mid(36, 32))
+        return damaged(QStringLiteral("checksum mismatch"));
+    QJsonParseError parseError;
+    const QJsonDocument json = QJsonDocument::fromJson(payload.first(metaSize).toByteArray(), &parseError);
+    const QJsonArray layers = json.object().value(QStringLiteral("layers")).toArray();
+    if (parseError.error != QJsonParseError::NoError || quint32(layers.size()) != layerCount)
+        return damaged(QStringLiteral("layer information is not valid"));
+    const qsizetype rawSize = qsizetype(width) * height * 4;
+    qint64 offset = metaSize;
+    for (const QJsonValue &value : layers) {
+        const qint64 blockSize = qint64(value.toObject().value(QStringLiteral("compressedSize")).toDouble(-1));
+        if (blockSize < 4 || offset + blockSize > qint64(payload.size()))
+            return damaged(QStringLiteral("invalid layer data size"));
+        const QByteArray block = payload.sliced(offset, blockSize).toByteArray();
+        if (qFromBigEndian<quint32>(block.constData()) != quint32(rawSize) || qUncompress(block).size() != rawSize)
+            return damaged(QStringLiteral("pixel data cannot be decompressed"));
+        offset += blockSize;
+    }
+    if (offset != qint64(payload.size()))
+        return damaged(QStringLiteral("unexpected data after the last layer"));
+    return {};
+}
+
 ProjectFile::LoadResult ProjectFile::decode(const QByteArray &data)
 {
     if (data.size() < 8 || std::memcmp(data.constData(), Magic, sizeof(Magic)) != 0)
@@ -286,14 +327,8 @@ ProjectFile::LoadResult ProjectFile::decode(const QByteArray &data)
 QString ProjectFile::writeFileSafely(const QString &path, const QByteArray &bytes)
 {
     const QString name = displayName(path);
-    if (isContentUri(path)) {
-        QFile file(path);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-            return QStringLiteral("Could not open \"%1\" for writing: %2").arg(name, file.errorString());
-        if (file.write(bytes) != bytes.size() || !file.flush())
-            return QStringLiteral("Could not write \"%1\": %2").arg(name, file.errorString());
-        return {};
-    }
+    if (isContentUri(path)) // cannot be replaced atomically: SafeSave handles these
+        return QStringLiteral("\"%1\" is a storage-provider document; it must be written through SafeSave.").arg(name);
 
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))

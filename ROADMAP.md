@@ -62,18 +62,41 @@ on the offscreen platform), Android at runtime.
 | Windows on-screen checklist | Written, **not run** | BUILD.md "Testing layers" and "Testing file operations". Desktop automation needs an agreed idle period |
 | Linux / iOS | Blocked | Linux: sudo password for packages (Qt fetch prepared). iOS: no macOS/Xcode |
 
-## Milestone 5: hardware validation (next)
+## Milestone 5: Android save safety and brush control (done; device validation pending)
 
-- Run the Windows on-screen checklists (layers, file operations) with real mouse and pen input.
-- Windows pen device (Windows Ink) and a physical Android tablet with stylus, plus finger touch:
-  pressure range, event rate, synthesized mouse events, palm contacts, and the milestone 4
-  Android checks repeated on hardware.
-- End-to-end latency measurement (needs hardware or a high-speed camera).
-- Unblock Linux (WSL packages) and run the same tests.
+| Criterion | Status | How verified |
+|---|---|---|
+| Project encoded and verified, and a local copy kept and read back in private storage, before a provider document is touched | Done | `ProjectFile::verify`; `providerWriteInterruptedKeepsTheDrawingAndARecoverableCopy` checks that the recovery file held the exact state when the write began; `writeProjectKeepsTheSavedStateRecoverable` |
+| Staging not called atomic replacement; guarantees documented per destination type | Done | ARCHITECTURE.md "Save guarantees" |
+| Safe replacement where supported | Local files: atomic (`QSaveFile`). Provider documents: none is available with a single-document grant. A folder grant would allow sibling-and-rename; not built | Provider capabilities probed and logged (emulator: seekable file, flags write/rename/delete) |
+| Overwrite risk explained before an explicit overwrite; clear Save Copy path | Done | `providerOverwriteIsConfirmedFirst`, `overwriteOfAProviderDocumentIsConfirmed` (UI); emulator: Cancel, Overwrite and Save a Copy (original's hash unchanged) |
+| Local copy kept until the destination is written and read back; failure keeps the drawing and recovery data | Done | `providerFailuresBeforeWritingLeaveTheDocumentUntouched`, `providerWriteInterrupted…`, `providerSaveWithoutRecoveryUsesAStagingCopy` |
+| Insufficient space, revoked access, interrupted writes | Done | Fake provider tests for all three; emulator: full storage (refused before writing, hash unchanged) and deleted document. `posix_fallocate` reservation worked on the emulator's provider |
+| Large reads and writes off the UI thread | Done | Save, open and now PNG export run on the worker (`exportToAProviderDocument`, `tst_ui` export) |
+| Brush opacity, uniform within a stroke; strokes build up | Done | `strokeOpacityIsUniformWithinAStroke`, `separateStrokesBuildUpOpacity`, `translucentStrokesAreUniformAndOneUndoStepEach`; emulator screenshot and exported PNG |
+| Pressure-to-size response with live preview, existing pressure policy reused | Done | `pressureResponseCurve`, `penPressureResponseSettings` (synthetic tablet events), `BrushPreview` in the popup |
+| Smoothing: Off + strength, independent of event rate, clean tail at pen-up, usable without pressure | Done | `smoothingDoesNotDependOnEventRate` (core and canvas), `smoothedStrokeEndsWhereThePenIsLifted`, `penLiftOffEndsTheLine`, `interruptedTouchStrokeIsCompleted`, `dotsAndSharpTurns` |
+| Compact brush settings usable with mouse and touch | Done | `brushSettingsPopup` (`tst_ui`), emulator by touch; 32 px slider rows |
+| Settings captured at stroke start; one undo step per stroke; layers, erasing, saving and recovery | Done | `brushSettingsAreCapturedAtStrokeStart`, `translucentStrokeOnAPaintedLayer` (eraser too), `translucentPaintingWhileSavingAndAutosaving`, `compositorUndoRestoresExactly` |
+| Smoothing overhead and first-stroke-after-autosave stall measured | Done, on a loaded machine | BENCHMARKS.md milestone 5 (CPU time, not pen latency) |
+| Physical pen pressure, palm rejection, tablet performance | **Not validated** | Simulated input only; instructions in BUILD.md |
+| Windows on-screen session | **Pending** | Short checklist in BUILD.md; needs an agreed idle period |
+| Linux / iOS | Blocked | Linux: one `sudo apt install` command for the owner (BUILD.md). iOS: Mac with Xcode 16+ |
+
+## Milestone 6: hardware validation (next)
+
+- Run the short Windows on-screen checklist with real mouse input (and a pen if available).
+- A physical Android tablet with stylus: pen pressure range and response settings, palm contacts,
+  brush settings by finger, saving to Downloads and to a cloud provider (overwrite prompt,
+  Save a Copy), lifecycle and recovery; repeat the milestone 4–5 emulator checks on hardware.
+- End-to-end latency measurement (needs hardware or a high-speed camera), including how the
+  smoothing's spatial lag feels.
+- Linux once the packages are installed; iOS when a Mac is available.
 
 ## Later (unordered)
 
-Background export and incremental recovery writes (only changed layers); more blend modes,
+Folder-based saving with sibling-and-rename on providers that allow it; incremental recovery
+writes (only changed layers); pressure to opacity, brush textures and tilt; more blend modes,
 groups, clipping, masks; drag-and-drop layer reordering; canvas rotation and mirroring;
 smoothing/stabilizer; brush presets; selection and transform; iOS build (needs macOS and a
 licensing decision); Play Store AAB with an upload key and release pipeline.

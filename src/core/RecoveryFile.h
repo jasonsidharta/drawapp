@@ -31,6 +31,7 @@ struct Metadata
     QDateTime savedAt;        // UTC time the snapshot was taken
     QString originalPath;     // project file the artwork belongs to, empty if untitled
     QString originalUrl;
+    QString displayName;      // name shown to the user (a content URI may no longer resolve to one)
 };
 
 struct Contents
@@ -44,6 +45,8 @@ struct Contents
 };
 
 QByteArray encode(const DocumentData &document, const Metadata &metadata);
+// The same container around an already encoded version 2 project (ProjectFile::encode output).
+QByteArray encodeProject(const QByteArray &project, const Metadata &metadata);
 // Writes the version 1 container with a single-layer project (kept to test reading older files).
 QByteArray encodeVersion1(const QImage &image, const Metadata &metadata);
 Contents decode(const QByteArray &data);

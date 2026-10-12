@@ -5,6 +5,8 @@
 #include "ProjectIo.h"
 #include "RasterDocument.h"
 #include "RecoveryManager.h"
+#include "StrokeCompositor.h"
+#include "StrokeSmoother.h"
 #include "StrokeSpacer.h"
 #include "TileSnapshot.h"
 #include "UndoHistory.h"
@@ -15,6 +17,7 @@
 #include <QPointer>
 #include <QQuickPaintedItem>
 #include <QQuickWindow>
+#include <QSet>
 #include <QTimer>
 #include <QUrl>
 #include <QVariantList>
@@ -30,6 +33,13 @@ class CanvasItem : public QQuickPaintedItem
     QML_ELEMENT
     Q_PROPERTY(int brushSize READ brushSize WRITE setBrushSize NOTIFY brushSizeChanged)
     Q_PROPERTY(QColor brushColor READ brushColor WRITE setBrushColor NOTIFY brushColorChanged)
+    // Brush settings, captured when a stroke starts. Opacity is uniform within a stroke (see
+    // StrokeCompositor); pressure settings only matter for pens that report pressure.
+    Q_PROPERTY(qreal brushOpacity READ brushOpacity WRITE setBrushOpacity NOTIFY brushSettingsChanged)
+    Q_PROPERTY(qreal pressureMinSize READ pressureMinSize WRITE setPressureMinSize NOTIFY brushSettingsChanged)
+    Q_PROPERTY(qreal pressureFirmness READ pressureFirmness WRITE setPressureFirmness NOTIFY brushSettingsChanged)
+    // 0 = off .. 100; the pull-string length is smoothing / 100 × MaxSmoothingRadius view pixels.
+    Q_PROPERTY(int smoothing READ smoothing WRITE setSmoothing NOTIFY brushSettingsChanged)
     Q_PROPERTY(Tool tool READ tool WRITE setTool NOTIFY toolChanged)
     Q_PROPERTY(qreal zoom READ zoom NOTIFY viewChanged)
     Q_PROPERTY(QSize documentSize READ documentSize NOTIFY documentChanged)
@@ -56,6 +66,10 @@ class CanvasItem : public QQuickPaintedItem
     Q_PROPERTY(bool fileBusy READ fileBusy NOTIFY fileBusyChanged)
     Q_PROPERTY(QString fileBusyText READ fileBusyText NOTIFY fileBusyChanged)
     Q_PROPERTY(bool opening READ isOpening NOTIFY fileBusyChanged)
+    // A save to a storage-provider document is waiting for the user to confirm the overwrite.
+    Q_PROPERTY(bool overwriteConfirmationPending READ overwriteConfirmationPending NOTIFY overwriteConfirmationChanged)
+    Q_PROPERTY(QString overwriteTarget READ overwriteTarget NOTIFY overwriteConfirmationChanged)
+    Q_PROPERTY(QString overwriteDetails READ overwriteDetails NOTIFY overwriteConfirmationChanged)
 
 public:
     enum Tool { Brush, Eraser };
@@ -63,6 +77,8 @@ public:
 
     static constexpr int MinBrushSize = 1;
     static constexpr int MaxBrushSize = 256;
+    static constexpr qreal MinBrushOpacity = 0.01;
+    static constexpr qreal MaxSmoothingRadius = 40.0; // view pixels at smoothing 100
 
     explicit CanvasItem(QQuickItem *parent = nullptr);
 
@@ -72,6 +88,14 @@ public:
     void setBrushColor(const QColor &color);
     Tool tool() const { return m_tool; }
     void setTool(Tool tool);
+    qreal brushOpacity() const { return m_brushOpacity; }
+    void setBrushOpacity(qreal opacity);
+    qreal pressureMinSize() const { return m_pressureMinSize; }
+    void setPressureMinSize(qreal fraction);
+    qreal pressureFirmness() const { return m_pressureFirmness; }
+    void setPressureFirmness(qreal firmness);
+    int smoothing() const { return m_smoothing; }
+    void setSmoothing(int smoothing);
     qreal zoom() const { return m_view.zoom(); }
     QSize documentSize() const { return m_document.size(); }
     QString inputStatus() const { return m_inputStatus; }
@@ -97,11 +121,22 @@ public:
     Q_INVOKABLE QString openFile(const QUrl &url);
     Q_INVOKABLE QString saveFile();
     Q_INVOKABLE QString saveFileAs(const QUrl &url);
-    // Synchronous; returns an empty string on success, otherwise a message.
+    // Also on the worker; the outcome arrives through exportFinished.
     Q_INVOKABLE QString exportPng(const QUrl &url);
-    bool fileBusy() const { return m_save.id != 0 || m_open.id != 0; }
+    bool fileBusy() const { return m_save.id != 0 || m_open.id != 0 || m_exportId != 0; }
     QString fileBusyText() const;
     bool isOpening() const { return m_open.id != 0; }
+    // After overwriteConfirmationNeeded: overwrite the document (asked once per file per session),
+    // or give up this save (saveFinished reports it as cancelled).
+    Q_INVOKABLE QString confirmOverwrite();
+    Q_INVOKABLE void cancelOverwrite();
+    bool overwriteConfirmationPending() const { return m_pendingOverwrite.has_value(); }
+    QString overwriteTarget() const;
+    QString overwriteDetails() const { return m_pendingOverwrite ? m_pendingOverwrite->details : QString(); }
+    // Where a local copy of a project is kept while saving to a storage provider if crash recovery
+    // is not running (default: <app data>/staging).
+    void setStagingDirectory(const QString &directory) { m_stagingDirectory = directory; }
+    QString stagingDirectory() const;
     // After openConflict: true replaces the drawing with the opened file, false keeps the drawing.
     Q_INVOKABLE void resolveOpenConflict(bool useOpenedFile);
     bool hasOpenConflict() const { return m_conflict.has_value(); }
@@ -159,6 +194,7 @@ public:
 signals:
     void brushSizeChanged();
     void brushColorChanged();
+    void brushSettingsChanged();
     void toolChanged();
     void viewChanged();
     void inputStatusChanged();
@@ -173,6 +209,11 @@ signals:
     // ok = false with an empty error means the operation was cancelled.
     void saveFinished(bool ok, const QString &error);
     void openFinished(bool ok, const QString &error);
+    void exportFinished(bool ok, const QString &error);
+    // The save target is an existing storage-provider document that cannot be replaced safely;
+    // see confirmOverwrite / cancelOverwrite. saveFinished follows only after that decision.
+    void overwriteConfirmationNeeded();
+    void overwriteConfirmationChanged();
     // An opened file is ready but the drawing changed while it was loading; see resolveOpenConflict.
     void openConflict();
     void recoverySnapshotTaken();
@@ -221,9 +262,13 @@ private:
     RecoveryFile::Metadata recoveryMetadata() const;
     void replaceDocument(const LayeredDocument &document);
     QString startSave(const QString &path, const QUrl &url);
-    void onSaveFinished(quint64 id, const QString &path, const QString &error, qint64 workerMs);
+    SafeSave::LocalCopy makeLocalCopy();
+    void onSaveFinished(quint64 id, const QString &path, const SafeSave::Result &result, qint64 workerMs);
+    void onExportFinished(quint64 id, const QString &path, const SafeSave::Result &result, qint64 workerMs);
+    void feedSmoothedSamples(bool first);
     void onOpenFinished(quint64 id, const QString &path, const ProjectFile::LoadResult &result, qint64 workerMs);
     void applyOpened(const DocumentData &document, const QString &path, const QUrl &url);
+    void setFile(const QString &path, const QUrl &url, const QString &knownName = QString());
     void updateDocumentRect(const QRect &docRect);
     void viewModified();
     void setInputStatus(const QString &status);
@@ -238,6 +283,7 @@ private:
     quint64 m_savedStateId = 0;
     QString m_filePath;
     QUrl m_fileUrl;
+    QString m_fileName; // display name, see setFile
 
     struct SaveRequest
     {
@@ -261,11 +307,21 @@ private:
         QString path;
         QUrl url;
     };
+    struct PendingOverwrite
+    {
+        QString path;
+        QUrl url;
+        QString details; // what the storage provider reported
+    };
     ProjectIo m_io;
     SaveRequest m_save;
     bool m_saveQueued = false; // Save pressed again during a save to the same file
     OpenRequest m_open;
+    quint64 m_exportId = 0;
     std::optional<OpenConflict> m_conflict;
+    std::optional<PendingOverwrite> m_pendingOverwrite;
+    QSet<QString> m_overwriteConfirmed; // provider documents the user agreed to overwrite (this session)
+    QString m_stagingDirectory;
 
     RecoveryManager *m_recovery = nullptr;
     QTimer m_autosaveTimer;
@@ -292,13 +348,22 @@ private:
     int m_brushSize = 12;
     QColor m_brushColor = QColor(20, 20, 20);
     Tool m_tool = Brush;
+    qreal m_brushOpacity = 1.0;
+    qreal m_pressureMinSize = StrokeSpacer::MinPressureFraction;
+    qreal m_pressureFirmness = 0.0;
+    int m_smoothing = 0;
 
     Gesture m_gesture = Gesture::None;
     PointerKind m_strokeKind = PointerKind::Mouse;
     BrushMode m_strokeMode = BrushMode::Paint;
-    QColor m_strokeColor;
+    // The stroke pipeline, created with the settings at stroke start:
+    // input samples -> smoother -> spacer (dabs) -> compositor (layer pixels).
+    std::optional<StrokeSmoother> m_smoother;
     std::optional<StrokeSpacer> m_spacer;
+    std::optional<StrokeCompositor> m_compositor;
+    std::vector<StrokeSample> m_smoothed;
     std::vector<Dab> m_pendingDabs;
+    qreal m_lastPressure = 1.0;
     QPointF m_lastPanPos;
     bool m_spaceHeld = false;
 

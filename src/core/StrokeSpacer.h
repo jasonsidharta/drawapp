@@ -15,6 +15,21 @@ struct Dab
     qreal diameter; // document pixels
 };
 
+// How pen pressure maps to dab size: size = brush size × (minFraction + (1 − minFraction) × p^gamma).
+// Input without pressure arrives as 1.0 (effectivePressure), so it always draws at full size.
+struct PressureResponse
+{
+    static constexpr qreal MinGamma = 1.0 / 3.0;
+    static constexpr qreal MaxGamma = 3.0;
+
+    qreal minFraction = 0.1; // size at the lightest pressure, as a fraction of the brush size
+    qreal gamma = 1.0;       // < 1: light pressure already gives a large size; > 1: needs firmer pressure
+
+    // Firmness −1 (soft) .. 0 (linear) .. 1 (firm), as shown in the brush settings.
+    static qreal gammaForFirmness(qreal firmness);
+    qreal sizeFactor(qreal pressure) const;
+};
+
 // Turns a sequence of input samples into evenly spaced dabs so strokes stay continuous
 // however sparse the input events are. The distance travelled since the last dab carries
 // across samples, so splitting a segment into many small moves yields the same dabs.
@@ -23,12 +38,12 @@ class StrokeSpacer
 public:
     // Spacing between dab centers as a fraction of the last dab's diameter.
     static constexpr qreal DefaultSpacing = 0.15;
-    // Diameter at zero pressure as a fraction of the brush size.
+    // Diameter at zero pressure as a fraction of the brush size (the default response).
     static constexpr qreal MinPressureFraction = 0.1;
     static constexpr qreal MinDiameter = 1.0;
     static constexpr qreal MinStep = 0.5;
 
-    explicit StrokeSpacer(qreal brushSize, qreal spacing = DefaultSpacing);
+    explicit StrokeSpacer(qreal brushSize, qreal spacing = DefaultSpacing, PressureResponse response = {});
 
     qreal diameterFor(qreal pressure) const;
 
@@ -40,6 +55,7 @@ public:
 private:
     qreal m_brushSize;
     qreal m_spacing;
+    PressureResponse m_response;
     StrokeSample m_last;
     qreal m_lastDabDiameter = 1;
     qreal m_sinceLastDab = 0;

@@ -39,6 +39,8 @@ QByteArray container(quint32 version, const RecoveryFile::Metadata &metadata, co
     json[QStringLiteral("savedAt")] = metadata.savedAt.toUTC().toString(Qt::ISODateWithMs);
     json[QStringLiteral("originalPath")] = metadata.originalPath;
     json[QStringLiteral("originalUrl")] = metadata.originalUrl;
+    if (!metadata.displayName.isEmpty())
+        json[QStringLiteral("displayName")] = metadata.displayName;
     const QByteArray meta = QJsonDocument(json).toJson(QJsonDocument::Compact);
 
     QByteArray out;
@@ -60,6 +62,11 @@ QByteArray container(quint32 version, const RecoveryFile::Metadata &metadata, co
 QByteArray RecoveryFile::encode(const DocumentData &document, const Metadata &metadata)
 {
     return container(CurrentVersion, metadata, ProjectFile::encode(document));
+}
+
+QByteArray RecoveryFile::encodeProject(const QByteArray &project, const Metadata &metadata)
+{
+    return container(CurrentVersion, metadata, project);
 }
 
 QByteArray RecoveryFile::encodeVersion1(const QImage &image, const Metadata &metadata)
@@ -111,6 +118,7 @@ RecoveryFile::Contents RecoveryFile::decode(const QByteArray &data)
     c.metadata.savedAt = QDateTime::fromString(json.value(QStringLiteral("savedAt")).toString(), Qt::ISODateWithMs);
     c.metadata.originalPath = json.value(QStringLiteral("originalPath")).toString();
     c.metadata.originalUrl = json.value(QStringLiteral("originalUrl")).toString();
+    c.metadata.displayName = json.value(QStringLiteral("displayName")).toString(); // optional, milestone 5
     return c;
 }
 

@@ -213,9 +213,82 @@ Pixel Tablet AVD, Android 16 (API 36, google_apis x86_64 image), emulator 36.6.1
 
 These are properties of this emulator setup and say nothing about a phone or tablet.
 
+## Milestone 5: brush engine, smoothing and save verification, 2026-10-12, same machine
+
+**Conditions:** the machine was in use. Windows reported 23–38 % CPU load before some runs, and one
+10-layer `bench_canvas` run took 18.8 s for 12 s of strokes. Absolute file times are therefore
+noisier than in earlier milestones; for example, the unchanged `ProjectFile::save` of 10 layers
+measured 0.73 s in milestone 4 and 1.4 s here. Compare only rows measured in the same run. All
+times are **CPU time on the calling thread, not pen-to-display latency**.
+
+### Brush engine per input event (`bench_core 30`, two runs: run 1 / run 2)
+
+Same 1000-event zig-zag stroke on one opaque 2048 × 1536 layer, with undo capture and composite
+refresh, as `CanvasItem` runs it. The "milestone 4 path" is the previous QPainter dab stamping.
+
+| Variant | median ms | p95 ms | max ms |
+|---|---|---|---|
+| milestone 4 path, 12 px | 0.0075 / 0.0097 | 0.025 / 0.030 | 0.11 / 0.11 |
+| compositor, 12 px, 100 %, smoothing off | 0.0044 / 0.0055 | 0.011 / 0.014 | 0.11 / 0.22 |
+| compositor, 12 px, 50 %, smoothing off | 0.0044 / 0.0057 | 0.011 / 0.014 | 0.17 / 0.14 |
+| compositor, 12 px, 50 %, smoothing 20 px string | 0.0048 / 0.0066 | 0.012 / 0.022 | 0.15 / 0.22 |
+| milestone 4 path, 128 px | 0.0041 / 0.0082 | 0.030 / 0.066 | 1.40 / 0.28 |
+| compositor, 128 px, 50 % | 0.0037 / 0.0055 | 0.095 / 0.131 | 0.46 / 0.52 |
+| smoothing only, string 0 / 20 / 80 px (no painting) | 0.0000 / 0.0003 / 0.0003 | ≤ 0.0004 | ≤ 0.011 |
+
+- The uniform-opacity compositor costs no more per event than the dab stamping it replaces. It
+  was 30–45 % lower at 12 px in both runs; at 128 px the p95 is higher (0.10–0.13 ms against
+  0.03–0.07 ms), because each event recomputes whole dab rectangles.
+- Smoothing adds about 0.0002–0.0003 ms per event. Its 0.5 px walking steps cost about the
+  same for 20 and 80 px strings.
+- The mask used 94 tiles (376 KiB) for the 12 px zig-zag and 184 tiles (736 KiB) at 128 px,
+  freed when the stroke ends.
+- At 128 px most events add no dab, since the spacing is 19 px; the medians mostly measure events
+  without painting.
+
+### Saving with verification (`bench_core`, run 2)
+
+| Operation (median ms) | 1 layer | 5 layers | 10 layers |
+|---|---|---|---|
+| `ProjectFile::verify` of the encoded project (checksum + decompress each layer, worker) | 13.7 | 98.2 | 223.9 |
+| App save to a local file: `SafeSave` = encode + verify + space check + atomic write (worker) | 75.6 | 548.3 | 1237.5 |
+| Encode + atomic write alone (as in milestone 4), same run | 61.9 | 384.1 | 1407.5 |
+
+Measured alone, verification costs 16–26 % of the encode + write time from the same run. The
+complete `SafeSave` rows are too noisy to show that difference directly: 1 layer +22 %, 5 layers
++43 %, 10 layers −12 %; the 10-layer rows varied by 2× between repetitions (p95 2.5 s). Saves
+run on the worker, so this is time before "Saving…" ends, not a UI pause.
+
+### First stroke after an autosave, largest UI stall (`bench_canvas`)
+
+Real `CanvasItem`, offscreen, synthetic mouse strokes at 250 Hz, autosave every 1 s, one
+async save at about 5 s. Each run covers documents with 1, 5 and 10 layers.
+
+| Run | First event after a snapshot, median ms (1 / 5 / 10 layers) | Largest UI stall, ms (1 / 5 / 10) | Ordinary event, median ms |
+|---|---|---|---|
+| Defaults (100 %, smoothing off) | 3.0 / 5.1 / 3.5 | 6.6 / 7.2 / 5.9 | 0.09–0.10 |
+| 50 % opacity, smoothing 50, run A | 5.6 / 3.2 / 4.9 | 27.2 / 4.5 / 7.7 | 0.10–0.16 |
+| 50 % opacity, smoothing 50, run B | 5.3 / 3.1 / 3.1 | 9.2 / 10.0 / 10.7 | 0.12–0.24 |
+
+The largest stall is still the first edit after a snapshot: one layer copy plus the redraw. It was
+3.7–4.7 ms in milestone 4 on a quieter machine and 5.9–10.7 ms here, with a single 27 ms outlier
+in run A that did not recur in run B. With today's load, a real increase cannot be separated
+from noise. In `bench_core`, where noise is lower, the layer copy measured 2.5–3.7 ms (2.1–2.2 ms
+in milestone 4). The save worker in `bench_canvas` took 55 / 541 / 1186 ms with verification.
+This number has not been measured on a quiet machine.
+
+### Android emulator (not a performance measure)
+
+On the x86_64 emulator, provider saves of a one-layer drawing took 0.75–2.6 s on the worker. That
+covers encode, verify, recovery copy with read-back, probe, reservation, write and read-back.
+`posix_fallocate` succeeded on the Downloads provider's file descriptor. These numbers describe
+the emulator, not a phone.
+
 ## Not measured yet
 
-- End-to-end latency from pen contact to photons (needs hardware or a high-speed camera).
+- End-to-end latency from pen contact to photons (needs hardware or a high-speed camera). The
+  smoothing adds a spatial lag (up to the string length) by design, but no time delay; how that
+  feels with a real pen is unmeasured.
 - Scene-graph texture upload cost per frame for `QQuickPaintedItem`.
 - Physical Android devices, iOS, Linux, real pen hardware, larger canvases, battery.
 - On-screen Windows memory and timing with a real GPU surface for layers and async save.

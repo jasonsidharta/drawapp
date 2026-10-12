@@ -722,6 +722,36 @@ private slots:
         QVERIFY(!ProjectFile::save(first, dir.filePath("no/such/folder/x.drawapp")).isEmpty());
     }
 
+    // --- verification before writing (milestone 5) ---
+    void verifyAcceptsEncodedProjectsAndRejectsDamage()
+    {
+        const QByteArray good = ProjectFile::encode(threeLayerDocument(QSize(50, 40)));
+        QCOMPARE(ProjectFile::verify(good), QString());
+        QByteArray flipped = good;
+        flipped[flipped.size() - 20] = char(flipped[flipped.size() - 20] ^ 0x10);
+        QVERIFY(!ProjectFile::verify(flipped).isEmpty());               // checksum
+        QVERIFY(!ProjectFile::verify(good.left(good.size() - 1)).isEmpty()); // cut short
+        QVERIFY(!ProjectFile::verify(good.left(30)).isEmpty());
+        QVERIFY(!ProjectFile::verify(QByteArray("DRAWAPP\n")).isEmpty());
+
+        // A layer block that does not decompress, behind a correct checksum.
+        QByteArray badBlock = good;
+        const quint32 metaSize = qFromLittleEndian<quint32>(badBlock.constData() + 24);
+        const qsizetype blockStart = ProjectFile::HeaderSize + metaSize;
+        badBlock[blockStart + 6] = char(badBlock[blockStart + 6] ^ 0x55);
+        const QByteArray payload = badBlock.mid(ProjectFile::HeaderSize);
+        const QByteArray digest = QCryptographicHash::hash(payload, QCryptographicHash::Sha256);
+        badBlock.replace(36, 32, digest);
+        QVERIFY(!ProjectFile::verify(badBlock).isEmpty());
+        QVERIFY(!ProjectFile::decode(badBlock).ok()); // decode agrees
+    }
+
+    void localFilesAreNeverWrittenInPlace()
+    {
+        // ProjectFile's direct writer is for local files only: content URIs must go through SafeSave.
+        QVERIFY(!ProjectFile::writeFileSafely(QStringLiteral("content://x/y"), "abc").isEmpty());
+    }
+
     // --- PNG export ---
     void pngExportMatchesDocumentPixels()
     {

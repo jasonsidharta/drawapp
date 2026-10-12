@@ -46,17 +46,20 @@ QByteArray encode(const DocumentData &document);
 // Writes the version 1 single-raster format (kept to test reading older files).
 QByteArray encodeVersion1(const QImage &image);
 LoadResult decode(const QByteArray &data);
+// Checks bytes produced by encode() (structure, checksum, every layer block decompresses to the
+// right size) without keeping the decoded layers. Empty on success, otherwise the reason.
+QString verify(const QByteArray &data);
 
-// path is a local file path or, on Android, a content:// URI string.
-// These return an empty string on success, otherwise a user-facing message.
+// load() takes a local file path or, on Android, a content:// URI string. The app saves and
+// exports through SafeSave (src/core/SafeSave.h); save() and exportPng() here write local files
+// only. These return an empty string on success, otherwise a user-facing message.
 QString save(const DocumentData &document, const QString &path);
 LoadResult load(const QString &path);
 // Writes the image as PNG with straight (non-premultiplied) alpha at its own resolution.
 QString exportPng(const QImage &image, const QString &path);
 
-// Writes bytes through a temporary file that atomically replaces path, so a failed write leaves
-// any previous file intact. Content URIs (Android storage access framework) cannot be replaced
-// atomically and are written directly.
+// Writes bytes through a temporary file that atomically replaces the local file at path, so a
+// failed write leaves any previous file intact. Refuses content URIs (see SafeSave).
 QString writeFileSafely(const QString &path, const QByteArray &bytes);
 
 } // namespace ProjectFile

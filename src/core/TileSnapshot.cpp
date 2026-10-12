@@ -52,7 +52,7 @@ void TileSnapshot::captureNonTransparent(const QImage &image)
 
 void TileSnapshot::captureTile(const QImage &image, int column, int row)
 {
-    if (!m_keys.insert(tileKey(column, row)).second)
+    if (!m_index.emplace(tileKey(column, row), m_tiles.size()).second)
         return;
     const QPoint origin(column * TileSize, row * TileSize);
     Tile tile{origin, image.copy(tileRect(image, origin))};
@@ -60,10 +60,17 @@ void TileSnapshot::captureTile(const QImage &image, int column, int row)
     m_tiles.push_back(std::move(tile));
 }
 
+const QImage *TileSnapshot::storedTile(int column, int row) const
+{
+    const auto it = m_index.find(tileKey(column, row));
+    return it == m_index.end() ? nullptr : &m_tiles[it->second].pixels;
+}
+
 void TileSnapshot::dropUnchanged(const QImage &image)
 {
     std::vector<Tile> kept;
     kept.reserve(m_tiles.size());
+    m_index.clear();
     for (Tile &tile : m_tiles) {
         const QRect r = tileRect(image, tile.origin);
         const qsizetype rowBytes = qsizetype(r.width()) * 4;
@@ -74,8 +81,8 @@ void TileSnapshot::dropUnchanged(const QImage &image)
         }
         if (same) {
             m_bytes -= tile.pixels.sizeInBytes();
-            m_keys.erase(tileKey(tile.origin.x() / TileSize, tile.origin.y() / TileSize));
         } else {
+            m_index.emplace(tileKey(tile.origin.x() / TileSize, tile.origin.y() / TileSize), kept.size());
             kept.push_back(std::move(tile));
         }
     }

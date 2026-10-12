@@ -3,7 +3,7 @@
 #include <QImage>
 #include <QPoint>
 #include <QRect>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 // Copies of selected 64x64 tiles of an image. An edit captures the tiles it is about to change
@@ -26,6 +26,8 @@ public:
     bool isEmpty() const { return m_tiles.empty(); }
     int tileCount() const { return int(m_tiles.size()); }
     qsizetype byteSize() const { return m_bytes; }
+    // The stored pixels of the tile at (column, row), or nullptr if it was not captured.
+    const QImage *storedTile(int column, int row) const;
 
 private:
     struct Tile
@@ -38,6 +40,6 @@ private:
     static QRect tileRect(const QImage &image, const QPoint &origin);
 
     std::vector<Tile> m_tiles;
-    std::unordered_set<qint64> m_keys;
+    std::unordered_map<qint64, size_t> m_index; // tile key -> position in m_tiles
     qsizetype m_bytes = 0;
 };

@@ -57,73 +57,32 @@ Environment variables for testing and measurement:
 The deploy step warns that translations are missing because `qttranslations` is not downloaded.
 This is harmless for now.
 
-## Manual check on Windows
+## Outstanding Windows desktop check (needs an agreed idle period)
 
-Run `dist\windows-mingw\bin\drawapp.exe` (after the install step above), then:
+Everything below is covered by automated tests on the offscreen platform (`tst_canvas`,
+`tst_ui`). What is still missing is one session with real mouse input, a real GPU surface and,
+if one is available, a real pen. Run `dist\windows-mingw\bin\drawapp.exe` after the install step
+above. A "heavy" drawing means 10 layers, each painted over most of the canvas with a large brush,
+so that a save takes about 1 s.
 
-1. Draw a stroke; the title shows `*Untitled`. Ctrl+Z removes it, Ctrl+Y (or Ctrl+Shift+Z) restores it.
-2. Erase part of it, press Clear, then undo three times: each step comes back in order.
-3. Ctrl+N with unsaved changes asks Save / Discard / Cancel. Cancel or Escape keeps the drawing.
-4. Ctrl+S on an untitled drawing opens Save As; after saving, the title loses its `*`.
-5. Ctrl+O reopens the file. Opening a renamed `.png` or a truncated `.drawapp` shows an error and
-   keeps the current drawing.
-6. Ctrl+Shift+E exports a PNG; the title keeps its `*` if there were unsaved changes.
-7. Closing the window with unsaved changes asks first.
-8. Layers: see "Testing layers" below.
-9. Crash recovery: draw, wait more than 10 s, then end the process
-   (`taskkill /F /IM drawapp.exe`). Start the app again: it offers Restore / Discard. Restore brings
-   back the drawing as of the last autosave, with `*` in the title. Strokes made in the last
-   seconds before the kill may be missing (see BENCHMARKS.md). Escape keeps the recovery data for
-   the next start; Discard deletes it. Clicking beside the prompt does not dismiss it.
-10. Async save and open: see "Testing file operations" below.
-
-## Testing file operations (manual, Windows; milestone 4)
-
-Saving and opening run on a worker thread. Small files finish too quickly to see this, so for
-steps 2–6 first make a heavy document: 10 layers, each painted over most of the canvas with a
-large brush (the save then takes about 1 s).
-
-1. Save (Ctrl+S) a small drawing: the footer briefly shows a busy indicator and "Saving…", then
-   the title loses its `*`.
-2. With the heavy document, press Ctrl+S and keep drawing at once. The strokes appear without
-   pauses. When the save finishes, the title still has `*`, because those strokes are newer than
-   the saved file. Ctrl+S again clears it.
-3. Press Ctrl+S twice quickly. The footer shows "Saving (another save queued)…". After both
-   finish, reopen the file: it contains everything drawn before the second Ctrl+S.
-4. Press Ctrl+S, then Ctrl+N or Ctrl+O at once: New and Open (and Save As) are disabled, or a
-   notice says to wait, while the save runs.
-5. Make an unsaved change, press Ctrl+N and choose Save. The new document appears only after the
-   save has finished. Repeat with the project file set to read-only in Explorer: an error is
-   shown, the drawing stays and keeps its `*`, and the file on disk is unchanged.
-6. Press Ctrl+S on the heavy document and immediately close the window. A notice says it closes
-   when the save has finished, and it then closes by itself (asking first if there are newer
-   changes).
-7. Open (Ctrl+O) a heavy file: the footer shows "Opening…". The canvas and layer panel do not
-   accept edits until the file has loaded. The previous drawing is replaced only if the file
-   loaded without error; a damaged file shows an error and keeps the current drawing.
-8. Save As to a new name, then end the process with Task Manager more than 10 s after a further
-   change. Restore brings back the newer change, and the file on disk is the saved version.
-
-## Testing layers (manual, Windows)
-
-1. Start the app. The panel on the right shows "Layers (1/42)" with "Layer 1".
-2. Rename it to "Background" (Rename button or double-click the row, type, Enter). Pick a light
-   color, size 256, and paint over most of the canvas.
-3. Add a layer and rename it "Sketch". Draw a rough outline in blue at a small size, then drag the
-   opacity slider to about 40 %. One Ctrl+Z puts the opacity back to 100 % in one step.
-4. Add "Color" and paint some areas. Add "Line art" and draw outlines in black.
-5. Select "Sketch", press Up until it is the top layer, then untick its check box (hidden).
-   Try painting while "Sketch" is selected: nothing is drawn and a banner explains why.
-6. Press Lock on "Line art", select it and try to paint: refused, with an explanation.
-7. Select "Color", switch to the Eraser and erase part of it: the background shows through and
-   the line art above is untouched.
-8. Duplicate and Delete a layer, then undo both; undo and redo the steps above and check that the
-   layer list and the canvas follow.
-9. Save (Ctrl+S), New (Ctrl+N) and Open the file: same layers, order, names, visibility, opacity,
-   locks and active layer. Export PNG (Ctrl+Shift+E): only visible layers, with transparency
-   where nothing is painted.
-10. End the process from Task Manager more than 10 s after a change and start the app again:
-    Restore brings back all layers.
+1. **Layers:** add, rename, reorder, hide, lock, duplicate and delete layers; erase on one layer
+   and see the layer below; undo and redo all of it. Hidden and locked layers refuse painting
+   with a banner.
+2. **Brush settings** (toolbar "Brush… 100%"): the preview follows every slider. At 40 %
+   opacity, a stroke that crosses itself has no darker spot at the crossing, and a second stroke
+   over it is darker. With smoothing 60, a shaky line comes out smooth and still ends exactly
+   where the button is released.
+3. **Pen (if available):** with the response slider at Soft and then Firm, the same light
+   pressure gives a thicker or thinner line. "Lightest" at 100 % gives constant width. The
+   status bar says whether pressure is reported.
+4. **Async save:** on the heavy drawing, press Ctrl+S and keep drawing. There are no pauses, and
+   the title keeps its `*`. Close the window during a save: it closes when the save has finished.
+5. **Open and export:** opening a damaged file keeps the current drawing. PNG export runs in the
+   background ("Exporting PNG…") and keeps the `*`.
+6. **Recovery:** more than 10 s after a change, run `taskkill /F /IM drawapp.exe`. On the next
+   start, Restore brings back all layers. Clicking beside the prompt does not dismiss it.
+7. **Read-only file:** set the project file to read-only in Explorer and save. An error is shown,
+   the drawing keeps its `*`, and the file is unchanged.
 
 ## Android (APK builds; tested on an emulator, not on a physical device)
 
@@ -144,7 +103,7 @@ Debug APK for local device testing, signed with the Android SDK's development ke
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-android.ps1 -Config Debug
-# -> %USERPROFILE%\drawapp-build\android-arm64-debug\android-build\build\outputs\apk\debug\android-build-debug.apk (71.5 MB)
+# -> %USERPROFILE%\drawapp-build\android-arm64-debug\android-build\build\outputs\apk\debug\android-build-debug.apk (71.8 MB)
 & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r <that apk>
 ```
 
@@ -200,45 +159,112 @@ Not tested on the emulator: the in-app Open conflict dialog (painting is disable
 so it cannot be reached by touch), saving to a provider that refuses writes, and real stylus
 pressure or tilt.
 
-**Content URIs** cannot be replaced atomically: saving to one writes it in place. A failed write
-can leave that file damaged. The recovery file and the in-memory document stay intact, and the
-app keeps the document marked as unsaved.
+**Milestone 5 emulator results, 2026-10-12** (same AVD, same caveats; touch input from
+`adb shell input tap/swipe/motionevent`):
+
+| Check | Result |
+|---|---|
+| Brush settings popup by touch | Opens from "Brush… 100%". Tapping a slider's groove sets opacity, size and smoothing; the preview updates. A tap outside closes it without painting (Undo stayed disabled) |
+| Uniform opacity | An X drawn in one stroke at 50 % shows no darker crossing, on screen and in the exported PNG |
+| Smoothing 61 | Corners rounded and the stroke ends at the lift-off point. A ±9 logical-px zigzag (raw `motionevent` moves) became a slight ripple |
+| What the Downloads provider reports (logged by the probe) | Seekable regular file, free space from `fstatvfs`, flags 0x46/0x47 (write, rename, delete supported; thumbnails for PNG) |
+| Save As to a new picker document | No prompt (empty document); `posix_fallocate` reservation **ok**; written and read back |
+| Save over existing contents | Prompt "Overwrite …?" with the storage details; Cancel writes nothing. Overwrite writes, and later saves of that file in the session are not asked again |
+| Save a Copy… | Picker opens; new file written (55,324 bytes); the original's SHA-256 unchanged |
+| Storage completely full (filled with `fallocate` + `dd` until `df` showed 0) | "Could not keep a copy of the drawing on this device before saving (… No space left on device). The file was not changed." The destination's SHA-256 was unchanged and the drawing stayed open |
+| Document deleted behind the app's back (`adb shell rm`) | "Could not save "m5c.drawapp": The file is no longer available … The file was not changed." Fixed during testing: the message showed the document id ("14") until the app kept the name itself |
+| PNG export | Runs on the worker (0.47 s), reservation ok, exported image correct |
+| App reinstalled while unsaved (`adb install -r` kills the process) | Restore offered on next launch, drawing back |
+
+Not reachable on the emulator: the provider's own free-space check (private and shared storage
+share one partition, so the local copy fails first, which is also safe); a write that stops part
+way (covered by `tst_canvas` with a fault-injecting provider); revoking a URI grant without
+deleting the file; cloud or stream-only providers.
+
+What is and is not guaranteed for local files and for provider documents is in ARCHITECTURE.md,
+"Save guarantees".
+
+### Physical Android device (arm64): install and test
+
+Nothing below has been run yet; no device was available.
+
+1. On the device, enable Developer options (tap Build number 7 times), turn on **USB debugging**
+   and connect it by USB. Accept the computer's key on the device.
+2. Build and install the debug APK:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\build-android.ps1 -Config Debug
+   & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" devices      # the device must be listed as "device"
+   & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r "$env:USERPROFILE\drawapp-build\android-arm64-debug\android-build\build\outputs\apk\debug\android-build-debug.apk"
+   ```
+3. Collect the log while testing:
+   `adb logcat -s default:I Qt:I` (the `[file]` lines show what the storage provider reported
+   and whether space reservation worked).
+4. Check, and note the device model and Android version:
+   - **Pen** (if it has one): the status bar says "Input: pen, pressure 0.xx". Light-to-firm
+     strokes taper. The response slider (Soft/Firm) and "Lightest" change that visibly. The
+     pen's eraser end erases. A palm resting while drawing does not paint.
+   - **Finger**: draws at full size; two fingers pan and zoom without leaving marks.
+   - **Brush settings**: popup usable with a finger; opacity uniform within a stroke; smoothing
+     ends at the lift-off point.
+   - **Files**: Save As to Downloads and to a cloud provider (for example Drive). Save again (the
+     overwrite prompt appears), choose Save a Copy once and Overwrite once. Open and Export PNG.
+   - **Lifecycle**: Home and return; `adb shell am kill org.drawapp.prototype` while in the
+     background, then relaunch: Restore offered.
+   - **Speed**: draw quickly with a 128 px brush on 10 layers; note any visible lag (not
+     measurable with these tools).
+
+## Linux (blocked here)
 
 ## Linux (blocked here)
 
 Exact blockers, checked 2026-10-12 in WSL Ubuntu 24.04:
 - There is no C++ compiler, CMake, Ninja or OpenGL/xcb development packages. Installing them
-  needs the user's sudo password. This was not bypassed, for example with `wsl -u root`.
+  needs the owner's sudo password. That password is not requested or stored here, and the
+  install was not bypassed (for example with `wsl -u root`).
 - Ubuntu 24.04's packaged Qt (6.4) is older than this project's minimum (6.8).
 
-Prepared: `tools/fetch_qt_windows.py --linux` downloads Qt 6.12.0 `linux_gcc_64` (qtbase,
-qtdeclarative, qtsvg, icu) from Qt's repository and checks each archive's SHA-1. It must run on
-Linux, because the archives contain symlinks. `--dry-run` resolves and lists the archives
-without downloading; that ran successfully from Windows. Expected steps, unverified past the
-dry run:
+**Step 1: run this yourself** in the WSL Ubuntu 24.04 terminal (it asks for your password):
 
 ```bash
-sudo apt install build-essential cmake ninja-build python3-pip libgl-dev libegl-dev \
-  libxkbcommon-dev libxkbcommon-x11-0 libfontconfig1-dev libxcb-cursor0 libxcb-icccm4 \
-  libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-image0 libvulkan-dev
-python3 -m pip install --user py7zr
-python3 tools/fetch_qt_windows.py --linux          # -> ~/Qt/6.12.0/gcc_64
-cmake -S . -B build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$HOME/Qt/6.12.0/gcc_64
-cmake --build build/linux && ctest --test-dir build/linux --output-on-failure
+sudo apt update && sudo apt install -y build-essential cmake ninja-build python3-venv \
+  libgl-dev libegl-dev libxkbcommon-dev libxkbcommon-x11-0 libfontconfig1-dev libfreetype-dev \
+  libx11-xcb1 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 \
+  libxcb-randr0 libxcb-image0 libxcb-render-util0 libxcb-xkb1 libvulkan-dev
 ```
+
+**Step 2** (no sudo; can be run by the agent afterwards). `tools/fetch_qt_windows.py --linux`
+downloads Qt 6.12.0 `linux_gcc_64` (qtbase, qtdeclarative, qtsvg, icu) and checks each
+archive's SHA-1. It must run on Linux, because the archives contain symlinks. Its `--dry-run`
+ran successfully from Windows; the steps below are unverified past that:
+
+```bash
+python3 -m venv ~/drawapp-venv && ~/drawapp-venv/bin/pip install py7zr
+~/drawapp-venv/bin/python tools/fetch_qt_windows.py --linux          # -> ~/Qt/6.12.0/gcc_64
+cmake -S . -B build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$HOME/Qt/6.12.0/gcc_64
+cmake --build build/linux && QT_QPA_PLATFORM=offscreen ctest --test-dir build/linux --output-on-failure
+```
+
+The window tests need `QT_QPA_PLATFORM=offscreen` on Linux, because the ctest environment
+settings in `tests/CMakeLists.txt` are Windows-only.
 
 ## iOS / iPadOS (blocked)
 
-Building needs macOS with Xcode 16+ and Qt 6.12 for iOS. None is available here. The CMake
-file sets bundle properties, but no iOS configure has ever run. Resolve the Qt LGPL/static
-linking question (ARCHITECTURE.md) before shipping.
+Requirements, none of which is available here:
+- a Mac with macOS 14.4 or later and Xcode 16 or later (Qt 6.12's iOS requirement);
+- Qt 6.12 for iOS (installer component `ios`) plus the macOS host Qt;
+- an Apple ID for device signing (a free account can sign for one's own device for 7 days);
+- an iPad with Apple Pencil for pen testing.
+
+The CMake file sets bundle properties, but no iOS configure has ever run. The storage code is
+written for Android only: iOS would need its own document-picker path, which is not written.
+Resolve the Qt LGPL/static linking question (ARCHITECTURE.md) before shipping.
 
 ## Platform verification status
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 5/5 suites (22 + 60 + 27 + 51 + 8 test functions, counts include init/cleanup). Milestones 0–2 were driven on the desktop with real input (drawing, prompts, native dialogs, 9 forced kills). Milestones 3–4 (layer panel, async save/open, busy state, close during a save, stray press beside the recovery prompt) were driven with synthetic input through the real Main.qml on the offscreen platform (`tst_ui`, screenshots inspected). **On-screen sessions for layers and async file operations are still pending** (checklists above), because the desktop was in use |
-| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results table above): drawing, layer panel, Save/Open/Export PNG through the system picker, background/return, recovery after `am force-stop` and `am kill`, layered save and reopen |
-| Android arm64 | **Built; not run on a physical device** | Release (unsigned, 68.6 MB) and debug (development key, `apksigner` verified, 71.5 MB) APKs rebuilt after milestone 4. Same source as the emulator build, but no arm64 device was available, so pen input, pressure and performance on real hardware are unverified |
-| Linux | **Blocked** | WSL needs a sudo password to install the compiler and libraries; Qt download script prepared (`--linux`) |
-| iOS / iPadOS | **Blocked** | No macOS or Xcode |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 5/5 suites (34 + 62 + 28 + 67 + 10 test functions, counts include init/cleanup). Milestones 0–2 were driven on the desktop with real input. Milestones 3–5 (layers, async files, brush settings, overwrite prompt, provider failures with a fake provider) were driven with synthetic input through the real CanvasItem and Main.qml on the offscreen platform, with screenshots inspected. **One on-screen session is still pending** (short checklist above), because the desktop was in use. Pen pressure was tested with synthetic tablet events only |
+| Android x86_64, emulator | **Launched and exercised on an emulator** | Pixel Tablet AVD, Android 16, `-gpu host` (results tables above): drawing, layers, brush settings, uniform opacity, smoothing, picker Save/Open/Export, overwrite prompt, Save a Copy, full storage, deleted document, background/return, recovery after `am force-stop`, `am kill` and reinstall |
+| Android arm64 | **Built; not run on a physical device** | Release (unsigned) and debug (development key) APKs rebuilt for milestone 5. Same source as the emulator build. Pen pressure, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
+| Linux | **Blocked** | Needs the owner to run one `sudo apt install` command (above); everything after it is prepared |
+| iOS / iPadOS | **Blocked** | Needs a Mac with Xcode 16+ (above) |

@@ -15,6 +15,7 @@
 #include <QSemaphore>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QtEndian>
 #include <QtTest>
 
@@ -273,6 +274,49 @@ private slots:
         const RecoveryFile::Contents c = RecoveryFile::load(m.recoveryFilePath());
         QCOMPARE(c.metadata.documentId, quint64(2));
         QCOMPARE(c.document.layers[0].image, newer);
+    }
+
+    // A save to a storage provider keeps its state in the recovery file first (milestone 5).
+    void writeProjectKeepsTheSavedStateRecoverable()
+    {
+        QTemporaryDir dir;
+        RecoveryManager m(dir.path());
+        QCOMPARE(m.start(), QString());
+        const QImage saved = randomPremultiplied(16, 16, 3);
+        const RecoveryManager::WriteToken token = m.reserveWrite();
+        QVERIFY(token.valid);
+        QString error;
+        QThread *worker = QThread::create([&] {
+            error = m.writeProject(token, ProjectFile::encode(DocumentData::fromImage(saved)), meta(1, 5, "content://x/doc"));
+        });
+        worker->start();
+        QVERIFY(worker->wait(10000));
+        delete worker;
+        QCOMPARE(error, QString());
+        const RecoveryFile::Contents c = RecoveryFile::load(m.recoveryFilePath());
+        QVERIFY(c.ok());
+        QCOMPARE(c.document.layers[0].image, saved);
+        QCOMPARE(c.metadata.originalPath, QStringLiteral("content://x/doc"));
+        QVERIFY(m.hasRecoveryFile());
+
+        // A newer autosave of the same document that committed first wins; that still counts as kept.
+        const RecoveryManager::WriteToken older = m.reserveWrite();
+        QSignalSpy spy(&m, &RecoveryManager::writeFinished);
+        const QImage newer = randomPremultiplied(16, 16, 4);
+        QVERIFY(m.requestWrite(DocumentData::fromImage(newer), meta(1, 6)));
+        QVERIFY(waitForWrite(spy));
+        QCOMPARE(m.writeProject(older, ProjectFile::encode(DocumentData::fromImage(saved)), meta(1, 5)), QString());
+        QCOMPARE(RecoveryFile::load(m.recoveryFilePath()).document.layers[0].image, newer);
+
+        // Discarded in between (the document was replaced): reported, so the save does not go on.
+        const RecoveryManager::WriteToken stale = m.reserveWrite();
+        m.discard();
+        QVERIFY(!m.writeProject(stale, ProjectFile::encode(DocumentData::fromImage(saved)), meta(1, 7)).isEmpty());
+        QVERIFY(!QFile::exists(m.recoveryFilePath()));
+
+        RecoveryManager stopped(dir.filePath("other"));
+        QVERIFY(!stopped.reserveWrite().valid);
+        QVERIFY(!stopped.writeProject({}, QByteArray("x"), meta(1, 1)).isEmpty());
     }
 
     void failedWriteKeepsPreviousRecovery()

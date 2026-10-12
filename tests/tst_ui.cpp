@@ -3,7 +3,9 @@
 // Line art layers and checks the document after each panel action.
 
 #include "CanvasItem.h"
+#include "FakeProvider.h"
 #include "ProjectFile.h"
+#include "RasterDocument.h"
 #include "RecoveryManager.h"
 
 #include <QDir>
@@ -267,7 +269,10 @@ private slots:
         const DocumentData before = m_canvas->document().snapshot();
         const QImage composite = m_canvas->document().composite().copy();
         QCOMPARE(waitFor([&] { return m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("house.drawapp"))); }, true), QString());
+        QSignalSpy exported(m_canvas, &CanvasItem::exportFinished);
         QCOMPARE(m_canvas->exportPng(QUrl::fromLocalFile(dir.filePath("house.png"))), QString());
+        QVERIFY(QTest::qWaitFor([&] { return exported.count() == 1; }, 15000));
+        QVERIFY(exported.first().at(0).toBool());
         m_canvas->newDocument();
         QCOMPARE(m_canvas->layerCount(), 1);
         QCOMPARE(waitFor([&] { return m_canvas->openFile(QUrl::fromLocalFile(dir.filePath("house.drawapp"))); }, false), QString());
@@ -331,6 +336,115 @@ private slots:
         QVERIFY(m_canvas->isModified());
         QCOMPARE(alphaAtDoc(QPointF(300, 300)), 255); // the drawing is still there
         QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(waitForButton("OK")));
+    }
+
+    // --- brush settings and overwrite confirmation (milestone 5) ---
+
+    void brushSettingsPopup()
+    {
+        m_canvas->newDocument();
+        m_canvas->setTool(CanvasItem::Brush);
+        m_canvas->setBrushSize(30);
+        const auto restore = qScopeGuard([&] {
+            if (find("brushPreview"))
+                QTest::keyClick(m_window, Qt::Key_Escape);
+            m_canvas->setBrushOpacity(1.0);
+            m_canvas->setSmoothing(0);
+            m_canvas->setPressureMinSize(0.1);
+            m_canvas->setPressureFirmness(0);
+        });
+        click("brushSettingsButton");
+        QQuickItem *preview = waitFor("brushPreview");
+        QVERIFY(preview);
+        QVERIFY(preview->width() > 200 && preview->height() > 80);
+
+        // Tap on the sliders' grooves, as with a finger.
+        const auto tapSlider = [&](const QString &name, qreal fraction) {
+            QQuickItem *slider = waitFor(name);
+            QVERIFY2(slider, qPrintable(name));
+            const qreal left = slider->property("leftPadding").toReal();
+            const qreal avail = slider->property("availableWidth").toReal();
+            QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier,
+                              slider->mapToScene(QPointF(left + avail * fraction, slider->height() / 2)).toPoint());
+        };
+        tapSlider("brushOpacitySlider", 0.4);
+        QTRY_VERIFY(std::abs(m_canvas->brushOpacity() - 0.4) < 0.03);
+        tapSlider("smoothingSlider", 0.5);
+        QTRY_VERIFY(std::abs(m_canvas->smoothing() - 50) <= 2);
+        tapSlider("pressureMinSlider", 0.0);
+        QTRY_COMPARE(m_canvas->pressureMinSize(), 0.0);
+        tapSlider("pressureFirmnessSlider", 0.97);
+        QTRY_VERIFY(m_canvas->pressureFirmness() >= 0.9); // towards "Firm"
+        QVERIFY(findButton("Brush… " + QString::number(qRound(m_canvas->brushOpacity() * 100)) + "%"));
+        snap("brush_settings");
+
+        // A tap outside closes the popup without painting.
+        const int steps = m_canvas->history().undoCount();
+        const QPoint outside = docToScene(QPointF(1600, 1200));
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, outside);
+        QTRY_VERIFY(!find("brushPreview"));
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        QCOMPARE(alphaAtDoc(QPointF(1600, 1200)), 0);
+
+        // The next stroke uses the settings: uniform 40 % (± one slider step).
+        draw({{300, 300}, {900, 300}, {600, 320}});
+        const int alpha = alphaAtDoc(QPointF(600, 305));
+        QVERIFY2(std::abs(alpha - qRound(m_canvas->brushOpacity() * 255)) <= 1, qPrintable(QString::number(alpha)));
+    }
+
+    void overwriteOfAProviderDocumentIsConfirmed()
+    {
+        FakeProvider provider;
+        m_canvas->projectIo().setProviderForTesting(&provider);
+        QTemporaryDir staging;
+        m_canvas->setStagingDirectory(staging.path());
+        const QString uri = QStringLiteral("content://test.documents/document/shared.drawapp");
+        const QByteArray oldBytes = ProjectFile::encode(DocumentData::fromImage(RasterDocument(QSize(32, 32)).image()));
+        provider.documents.insert(uri, oldBytes);
+        m_canvas->newDocument();
+        draw({{200, 200}, {800, 200}});
+
+        // Cancel: nothing written, the drawing stays unsaved.
+        QSignalSpy finished(m_canvas, &CanvasItem::saveFinished);
+        QCOMPARE(m_canvas->saveFileAs(QUrl(uri)), QString());
+        QQuickItem *cancel = waitForButton("Cancel");
+        QVERIFY(cancel);
+        QVERIFY(waitForButton("Overwrite") && waitForButton("Save a Copy…"));
+        snap("overwrite_warning");
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(cancel));
+        QTRY_COMPARE(finished.count(), 1);
+        QVERIFY(!finished.first().at(0).toBool());
+        QCOMPARE(provider.contents(uri), oldBytes);
+        QVERIFY(m_canvas->isModified());
+
+        // Overwrite: written, checked, saved.
+        QCOMPARE(m_canvas->saveFileAs(QUrl(uri)), QString());
+        QQuickItem *overwrite = waitForButton("Overwrite");
+        QVERIFY(overwrite);
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(overwrite));
+        QTRY_COMPARE(finished.count(), 2);
+        QVERIFY(finished.last().at(0).toBool());
+        QCOMPARE(ProjectFile::decode(provider.contents(uri)).document.composite(), m_canvas->document().composite());
+        QVERIFY(!m_canvas->isModified());
+        QCOMPARE(m_canvas->documentTitle(), QStringLiteral("shared.drawapp"));
+
+        // Save a Copy: the overwrite is dropped and the Save As dialog opens instead.
+        const QString other = QStringLiteral("content://test.documents/document/other.drawapp");
+        provider.documents.insert(other, oldBytes);
+        draw({{200, 400}, {800, 400}});
+        QCOMPARE(m_canvas->saveFileAs(QUrl(other)), QString());
+        QQuickItem *copy = waitForButton("Save a Copy…");
+        QVERIFY(copy);
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(copy));
+        QTRY_VERIFY(!m_canvas->overwriteConfirmationPending());
+        QCOMPARE(finished.count(), 3); // reported as cancelled (no error); the window then opens Save As
+        QVERIFY(!finished.last().at(0).toBool());
+        QVERIFY(finished.last().at(1).toString().isEmpty());
+        QCOMPARE(provider.contents(other), oldBytes);
+        QTest::qWait(200);
+        QTest::keyClick(m_window, Qt::Key_Escape); // close the Save As dialog
+        QTest::qWait(100);
+        m_canvas->projectIo().setProviderForTesting(nullptr);
     }
 
     // On a touch screen a stray tap next to the recovery prompt must not dismiss it; Escape
