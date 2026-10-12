@@ -1,0 +1,10 @@
+first frame 171.6 ms; working set 69.7 MiB, private 55.7 MiB
+idle after 2 s: working set 70.0 MiB, private 56.0 MiB
+first frame 159.3 ms; working set 69.7 MiB, private 55.7 MiB
+idle after 2 s: working set 70.0 MiB, private 55.9 MiB
+first frame 152.1 ms; working set 69.4 MiB, private 55.3 MiB
+idle after 2 s: working set 69.8 MiB, private 55.5 MiB
+first frame 156.3 ms; working set 69.8 MiB, private 55.6 MiB
+idle after 2 s: working set 70.2 MiB, private 55.9 MiB
+first frame 158.9 ms; working set 69.8 MiB, private 55.7 MiB
+idle after 2 s: working set 70.2 MiB, private 56.0 MiB

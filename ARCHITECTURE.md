@@ -687,15 +687,15 @@ physical device. iOS is unverified.
 
 ## Limitations (known)
 
-Timings below were measured on the milestone 9 (dense) storage; milestone 10 re-measures them
-on tiled storage (`docs/m10-performance.md`) and this list is updated with those numbers.
+Timings are milestone 10 measurements (`docs/m10-performance.md`) unless marked as milestone 9.
 
-- **Crash recovery has a loss window** (interval + write time; it grows with layer count because
-  the worker re-encodes every layer: about 0.37 s per write at 5 layers and 0.8 s at 10, measured).
+- **Crash recovery has a loss window** (interval + write time; it grows with the painted area
+  because the worker re-encodes every tile: about 0.24 s per write at 2048 × 1536 × 10 and
+  0.7–0.9 s at 4096² × 8, measured).
   Only process kills were tested; OS crash or power loss may lose unflushed data.
-- Save, open and export run on a worker, but take about 0.35–0.55 s / 0.12–0.15 s at 5 layers
-  and 0.75–1.4 s / 0.24–0.36 s at 10 layers (2048 × 1536, representative content; verification
-  adds 0.1–0.22 s). During that time other file operations wait.
+- Save, open and export run on a worker: about 0.24 s / 0.19 s at 2048 × 1536 × 10 and
+  0.8 s / 0.63 s at 4096² × 8 (representative content, save includes verification), 5.7 s /
+  2.5 s at 8192² × 10. During that time other file operations wait.
 - Saving to an Android `content://` document is not atomic: a write that fails part way can
   damage that file (see "Save guarantees"). The drawing and a local copy are kept.
 - Brushes: see `docs/milestone9-known-limitations.md`. Wet paint is a prototype (no diffusion,
@@ -707,9 +707,10 @@ on tiled storage (`docs/m10-performance.md`) and this list is updated with those
 - Transforms: no perspective, skew, warp or mesh. Pixels moved off the canvas are cut off on
   Apply. Large Applies run on a worker thread (edits wait, viewing works, Stop cancels);
   implicit applies (switching tools with a transform open) still run on the UI thread.
-- During a transform drag on the whole 2048 × 1536 layer, a preview frame costs up to about 20 ms
-  plus the composite (12 ms at 10 layers). Nine adjacent layers take 25–33 ms (merged preview);
-  7 × 4096² take 152–262 ms. Measured on a desktop CPU; phones are unmeasured.
+- During a transform drag of whole layers, a preview frame takes about 27 ms for nine adjacent
+  2048 × 1536 layers (merged preview) and 155 ms for seven 4096² layers; per-layer previews (with
+  a selection, or non-adjacent layers) take 253 ms and about 1 s. Measured on a desktop CPU;
+  phones are unmeasured. No reduced-resolution preview.
 - Clipboard exchange with other applications is untested.
 - Drawing feel (pen pressure response, tilt, latency) is **unverified on hardware**: pressure and
   tilt were exercised only with synthetic tablet events and the emulator's touch input.
@@ -717,8 +718,9 @@ on tiled storage (`docs/m10-performance.md`) and this list is updated with those
   (BENCHMARKS.md). There is no GPU path.
 - When a touch is cancelled by the system, a move that Qt Quick was still holding back for the
   next frame is lost; the stroke ends at the last move that arrived.
-- A full composite rebuild (visibility, opacity, order) takes about 5.6 ms at 5 layers and 12 ms
-  at 10; an opacity drag recomposites on every slider move.
+- A full composite rebuild (visibility, opacity, order) takes about 15 ms at 2048 × 1536 × 10,
+  53 ms at 4096² × 8 and 260 ms at 8192² × 10, on the UI thread; an opacity drag recomposites on
+  every slider move.
 - Memory: 16 KiB per painted 64 x 64 tile in each layer and in the composite (a fully painted
   2048 x 1536 layer is still 12 MiB), plus the undo history (a quarter of the limit at most), all within the
   `MemoryBudget` limit. The selection mask is still one dense byte per canvas pixel (256 MiB at

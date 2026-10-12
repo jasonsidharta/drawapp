@@ -168,8 +168,10 @@ tiles; versions 1 and 2 still read); a view pyramid for zoomed-out views; Apply 
 with progress, cancellation, generations and atomic commit; memory-aware undo (budget from the
 memory limit, eviction under pressure, confirmation before non-undoable actions), a memory
 report and refusal messages; compatibility with files written by milestones 1 and 9, recovery
-and fuzzing (`docs/m10-file-compatibility.md`). Remaining: a reduced-resolution transform preview,
-benchmarks of all workloads, Android validation, the artist workflows and the reports.
+and fuzzing (`docs/m10-file-compatibility.md`); benchmarks of every workload against milestone 9
+(`docs/m10-performance.md`), a device-memory guard, New canvas up to 16384², fifteen automated
+workflows. Not done: a reduced-resolution transform preview. Remaining: sanitizer runs, Android
+validation and the final report.
 
 ## Milestone 7: hardware validation (outstanding: no pen hardware yet)
 

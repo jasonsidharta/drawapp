@@ -422,6 +422,39 @@ document limit), 8192² × 2. New engines per input event at 2048 × 1536 × 10,
 4-sensor dynamics 0.023 ms. No brush exceeded 2 ms for any event. Not measured: Android, latency
 to the screen, and Krita/PhotoCraft (not installed; procedure in `docs/milestone9-performance.md`).
 
+## Milestone 10: sparse tiled storage, 2026-10-12, same machine
+
+Full tables and method: `docs/m10-performance.md`. Raw output: `docs/benchmarks/m10-ab-raw.md`
+(milestone 9 and milestone 10 benchmarks run alternately, three rounds, same session),
+`m10-ab-comparison.md`, `m10-only-workloads.md`, `m10-heavy-rerun.md`, `m10-startup.txt`,
+`m10-open-memory.md`, `m10-bench_tiles.md`, `m10-bench_core.md`; first pass before the fixes:
+`m10-pass1-*`. Medians of three per-round medians; CPU time, not latency.
+
+| Measurement | Milestone 9 | Milestone 10 |
+|---|---|---|
+| Start-up, first frame (offscreen, 5 runs) | 154.5–200.6 ms | 152.1–171.6 ms |
+| Idle private / working set | 75.4–76.0 / 89.5–90.4 MiB | 55.5–56.0 / 69.8–70.2 MiB |
+| Stroke event, Solid Round 24 px, 2048 × 1536 × 10 (median) | 0.020 ms | 0.019 ms |
+| Stroke event, Textured Paint 40 px, 2048 × 1536 × 10 (median) | 0.163 ms | 0.171 ms |
+| Undo of a stroke, 4096² × 8 | 0.96 ms | 0.01 ms |
+| Full composite rebuild, 2048 × 1536 × 10 / 4096² × 8 | 12.9 / 62.7 ms | 15.0 / 53.4 ms |
+| View at fit, later frames, 2048 × 1536 × 10 | 1.54 ms | 1.74 ms |
+| Save / open, 2048 × 1536 × 10 | 824 / 248 ms | 239 / 186 ms |
+| Save / open, 4096² × 8 | 2751 / 970 ms | 794 / 630 ms |
+| Peak private, 8192² × 2 workload | 1833 MiB | 1226 MiB |
+| Transform preview frame, 9 × 2048 × 1536, per layer / merged | 192 / 24.5 ms | 253 / 27.4 ms |
+| Transform preview frame, 7 × 4096², per layer / merged | 840 / 154 ms | 1056 / 155 ms |
+| Transform Apply, 7 × 4096²: prepare + commit | 2613 + 731 ms (UI thread) | 3049 ms (worker) + 116 ms (UI thread) |
+| Opening a small project, peak private (opening only) | 7.7 MiB (512² × 3), 50.6 MiB (2048 × 1536) | 7.6 MiB, 26.5 MiB |
+
+New workloads (milestone 9 refused them): 4096² × 20 (1261 MiB of tiles; save 2.4 s, open 1.7 s),
+8192² × 10 (2136 MiB; save 5.7 s, open 2.5 s, with 4.9 GB free), 16384² × 4 sparse (54.6 MiB of
+tiles instead of 4096 MiB; view at fit 2.3 ms). Remaining regressions: the transform preview
+(1.12–1.31×), transform begin (1.10–1.14×), composite rebuild of small documents (1.16–1.25×),
+file size of fully painted documents (+20–25 %). Not met: 30 fps transform preview at 4096² × 7.
+The milestone 9 claim "file-open peak 1055 → 29 MiB" compared whole benchmark processes; opening
+alone measured 1033.6 → 7.7 MiB (`m10-open-memory.md`).
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera). The

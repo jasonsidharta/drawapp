@@ -11,6 +11,7 @@
 #include "BrushPresets.h"
 #include "BrushProperties.h"
 #include "LayeredDocument.h"
+#include "MemoryBudget.h"
 #include "ProjectFile.h"
 #include "RecoveryFile.h"
 #include "RasterDocument.h"
@@ -476,7 +477,12 @@ void transformBench(QSize size, int wantedLayers, int reps)
                 int(images.size()), size.width(), size.height());
     const Memory before = memory();
     TransformSession t;
-    const Stats begin = measure(std::max(2, reps / 10), [&] { t.begin(images, Selection()); });
+    bool begun = true;
+    const Stats begin = measure(std::max(2, reps / 10), [&] { begun = t.begin(images, Selection()); });
+    if (!begun) {
+        std::printf("| begin: **refused** (%s) | - | - | - |\n", qPrintable(MemoryBudget::shortageText()));
+        return;
+    }
     row("begin (cache each layer's source and reductions)", begin, 1);
     const qsizetype sessionBytes = t.byteSize();
     t.reset();
@@ -499,37 +505,42 @@ void transformBench(QSize size, int wantedLayers, int reps)
         mt.start();
         TiledImage flat(size, TiledImage::DefaultTileSize, MemoryBudget::Category::Preview);
         std::vector<LayerData> stack(doc.layers().begin() + 1, doc.layers().end());
-        compositeLayers(flat, flat.rect(), stack);
+        const bool merged = compositeLayers(flat, flat.rect(), stack);
         std::vector<TiledImage> withMerged = images;
         withMerged.push_back(flat);
         TransformSession m;
-        m.begin(withMerged, Selection());
-        const double setupMs = mt.nsecsElapsed() / 1e6;
-        m.setSize(m.sourceRect().width() * 1.2, m.sourceRect().height() * 1.2);
-        m.setRotation(15);
-        std::vector<LayerData> mergedStack = doc.layers();
-        TiledImage mergedPreview = flat;
-        const int mergedPart = m.partCount() - 1;
-        const Stats mergedFrame = measure(std::max(3, reps / 3), [&] {
-            m.render(mergedPart, mergedPreview, area, TransformSession::Quality::Fast);
-            mergedStack[1].image = mergedPreview;
-            mergedStack[1].opacity = 1.0;
-            for (size_t i = 2; i < mergedStack.size(); ++i)
-                mergedStack[i].visible = false;
-            compositeLayers(composite, area, mergedStack);
-        });
-        row("preview frame, merged copy (milestone 9): fast render of one merged layer + composite", mergedFrame, 1);
-        const Stats mergedFinal = measure(std::max(3, reps / 3), [&] {
-            m.render(mergedPart, mergedPreview, area, TransformSession::Quality::Final);
-            compositeLayers(composite, area, mergedStack);
-        });
-        row("preview after release, merged copy (bicubic)", mergedFinal, 1);
-        std::printf("| begin with the merged copy (merge + cache, once per transform) | %.1f | - | - |\n", setupMs);
+        if (!merged || !m.begin(withMerged, Selection())) {
+            std::printf("| merged copy: **refused** (%s); the app then previews each layer | - | - | - |\n",
+                        qPrintable(MemoryBudget::shortageText()));
+        } else {
+            const double setupMs = mt.nsecsElapsed() / 1e6;
+            m.setSize(m.sourceRect().width() * 1.2, m.sourceRect().height() * 1.2);
+            m.setRotation(15);
+            std::vector<LayerData> mergedStack = doc.layers();
+            TiledImage mergedPreview = flat;
+            const int mergedPart = m.partCount() - 1;
+            const Stats mergedFrame = measure(std::max(3, reps / 3), [&] {
+                m.render(mergedPart, mergedPreview, area, TransformSession::Quality::Fast);
+                mergedStack[1].image = mergedPreview;
+                mergedStack[1].opacity = 1.0;
+                for (size_t i = 2; i < mergedStack.size(); ++i)
+                    mergedStack[i].visible = false;
+                compositeLayers(composite, area, mergedStack);
+            });
+            row("preview frame, merged copy (milestone 9): fast render of one merged layer + composite", mergedFrame, 1);
+            const Stats mergedFinal = measure(std::max(3, reps / 3), [&] {
+                m.render(mergedPart, mergedPreview, area, TransformSession::Quality::Final);
+                compositeLayers(composite, area, mergedStack);
+            });
+            row("preview after release, merged copy (bicubic)", mergedFinal, 1);
+            std::printf("| begin with the merged copy (merge + cache, once per transform) | %.1f | - | - |\n", setupMs);
+        }
     }
     // Apply as CanvasItem does (milestone 10): TransformApply prepares each layer's result as a copy
     // of the layer with the changed tiles rewritten (on a worker thread in the app; timed here on
     // this thread), then the commit exchanges tile references.
     std::vector<TiledImage> results;
+    bool prepared = true;
     const Stats prepare = measure(std::max(2, reps / 10), [&] {
         TransformApply::Input in;
         in.session = t.workerCopy();
@@ -539,8 +550,13 @@ void transformBench(QSize size, int wantedLayers, int reps)
             in.versions.push_back(img.version());
         in.area = area;
         TransformApply::Result r = TransformApply::run(std::move(in));
+        prepared = r.ok;
         results = std::move(r.layers);
     });
+    if (!prepared) {
+        std::printf("| apply: **refused** (%s); nothing changed | - | - | - |\n", qPrintable(MemoryBudget::shortageText()));
+        return;
+    }
     row("apply: prepare all layers (bicubic; on the worker thread in the app)", prepare, 1);
     UndoHistory history;
     QElapsedTimer timer;
