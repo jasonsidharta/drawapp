@@ -92,6 +92,8 @@ is therefore **not** a strict clean-room separation. Mitigations:
 ## Unresolved questions
 
 - How Krita turns tablet events into mouse-compatible tool events on Android and iOS (not read).
+  Partly followed up in `krita-android-saving-stylus-brush.md`: no Android pen code is in this
+  repository, and the Qt patches that would contain it are kept elsewhere.
 - Whether Krita applies event compression or prediction for low-latency pen input (only
   `compressMoveEventCommon` and `tabletLatencyTracker` were seen, not studied).
 - How the OpenGL canvas updates partial textures. This matters for our renderer roadmap.
