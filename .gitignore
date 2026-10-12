@@ -1,0 +1,40 @@
+# Build outputs and deployment folders
+build/
+dist/
+CMakeUserPresets.json
+compile_commands.json
+
+# Generated packages
+*.apk
+*.aab
+*.idsig
+*.ipa
+*.msi
+*.dmg
+*.AppImage
+*.flatpak
+
+# Signing material and credentials
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
+keystore.properties
+local.properties
+.env
+.env.*
+
+# Downloaded toolchains, if placed inside the repository
+Qt/
+_downloads/
+
+# Editor and tool state
+*.user
+.vs/
+.vscode/
+.idea/
+__pycache__/
+*.pyc
