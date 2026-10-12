@@ -13,6 +13,8 @@ option(DRAWAPP_BUILD_TESTS "Build unit tests and benchmarks" ON)
 
 # Document model and raster operations: QtGui only, no Qt Quick, so they can be tested headless.
 add_library(drawcore STATIC
+    src/core/DocumentData.cpp src/core/DocumentData.h
+    src/core/LayeredDocument.cpp src/core/LayeredDocument.h
     src/core/Pressure.h
     src/core/ProjectFile.cpp src/core/ProjectFile.h
     src/core/RasterDocument.cpp src/core/RasterDocument.h
@@ -27,16 +29,20 @@ add_library(drawcore STATIC
 target_include_directories(drawcore PUBLIC src/core)
 target_link_libraries(drawcore PUBLIC Qt6::Gui)
 
-qt_add_executable(drawapp src/app/main.cpp)
-qt_add_qml_module(drawapp
+# The QML user interface as a static QML module, so the app and the UI test load the same Main.qml.
+qt_add_library(drawapp_ui STATIC)
+qt_add_qml_module(drawapp_ui
     URI DrawApp
     VERSION 1.0
     QML_FILES src/app/Main.qml
     SOURCES src/app/CanvasItem.cpp src/app/CanvasItem.h
 )
 # The generated QML type registration includes <CanvasItem.h>.
-target_include_directories(drawapp PRIVATE src/app)
-target_link_libraries(drawapp PRIVATE drawcore Qt6::Quick Qt6::QuickControls2)
+target_include_directories(drawapp_ui PUBLIC src/app)
+target_link_libraries(drawapp_ui PUBLIC drawcore Qt6::Quick Qt6::QuickControls2)
+
+qt_add_executable(drawapp src/app/main.cpp)
+target_link_libraries(drawapp PRIVATE drawapp_ui drawapp_uiplugin)
 set_target_properties(drawapp PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE

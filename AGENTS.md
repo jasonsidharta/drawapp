@@ -24,9 +24,11 @@ python tools\fetch_qt_windows.py          # once
 powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
 ```
 
-All tests must pass before handing off: `tst_core`, `tst_document`, `tst_recovery` (headless) and `tst_canvas`
-(opens real windows and saves screenshots to `build\windows-mingw-release\tests\tst_canvas_*.png`;
-look at them after rendering changes). Android: `tools\build-android.ps1 [-Config Debug]` (build
+All tests must pass before handing off: `tst_core`, `tst_document`, `tst_recovery` (headless),
+`tst_canvas` and `tst_ui` (windows; under ctest they render offscreen so they do not take over the
+user's desktop). They save screenshots to `build\windows-mingw-release\tests\tst_*.png`; look at
+them after rendering or QML changes. Do not drive the real desktop with synthetic OS input unless
+the user is not using the machine. Android: `tools\build-android.ps1 [-Config Debug]` (build
 directory must not contain spaces).
 
 ## Version control
@@ -42,6 +44,16 @@ push. Never commit build outputs, APKs/AABs, keystores or other credentials (see
 - Changing the meaning of `.drawapp` bytes requires a new format version and keeping the reader
   for older versions. Validate before allocating; never replace the open document on failure.
 - File writes go through `ProjectFile::writeFileSafely`.
+
+## Layer invariants
+
+- Layers are addressed by stable id everywhere (undo commands, QML, files); never by index across
+  edits. Ids are never reused within a document.
+- Every change to layer pixels or properties refreshes the composite for the changed area and goes
+  through an `UndoCommand`; selecting the active layer is not an edit.
+- Painting (brush, eraser, clear) must check `activeLayerBlockReason()`.
+- Editor limits and file-reader limits come from `DocumentLimits`; keep them shared.
+- Workers and saved snapshots get `DocumentData` copies (copy-on-write images), never live layers.
 
 ## Crash recovery invariants
 

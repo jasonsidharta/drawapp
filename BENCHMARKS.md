@@ -94,6 +94,58 @@ independent Python decoder (header, metadata checksum, project checksum, decompr
 One kill in run B landed during the file-write phase and left a temporary file, which the next
 start removed. The original project files had identical SHA-256 hashes before and after.
 
+## Milestone 3: layers, 2026-10-11, same machine
+
+`bench_core 30`. All numbers are **CPU processing time on the calling thread**, not
+input-to-display latency (which also includes event delivery, scene-graph texture upload, GPU and
+display; not measured). The machine had other desktop applications in use during these runs, and
+run-to-run variation was large (the single-layer build's save measured 87–144 ms across runs), so
+compare only rows measured side by side.
+
+**Single-layer build vs layered build, same content, run back to back** (milestone 2 commit
+`a98ec27` built in a separate worktree):
+
+| Operation | single-layer build | layered build |
+|---|---|---|
+| stroke event + undo capture, 12 px brush (median / p95 ms) | 0.0070 / 0.0222 | 0.0069 / 0.0213 (includes composite refresh) |
+| save project, 4000 dabs on transparent (ms, median) | 95.5 | 86.7 |
+| open project (ms) | 32.9 | 34.5 |
+| export PNG (ms) | 152.5 | 157.5 (includes compositing) |
+| app idle private memory, offscreen platform, 3 launches (MiB) | 49.8–50.0 | 61.9–62.1 (+12 MiB composite cache) |
+
+No measurable regression for one layer apart from the composite cache's memory.
+
+**Representative documents** (opaque white background + layers with 2500 dabs each, one layer at
+70 % opacity, one hidden when there are five or more):
+
+| Operation (median ms unless noted) | 1 layer | 5 layers | 10 layers |
+|---|---|---|---|
+| Process private memory for the document | 24 MiB | 72 MiB | 132 MiB |
+| File size (project = recovery file, approx.) | 0.01 MiB | 2.06 MiB | 4.60 MiB |
+| Stroke event: stamp + undo capture + composite refresh (median / p95) | 0.0068 / 0.021 | 0.0093 / 0.033 | 0.0104 / 0.028 |
+| Full composite rebuild (visibility / opacity / order change) | 1.0 | 5.6 | 12.2 |
+| Recovery snapshot on UI thread (copy-on-write) | 0.0003 | 0.0007 | 0.0007 |
+| First dab after a snapshot (detaches the active layer) | 2.26 | 2.53 | 2.47 |
+| Same dab without a pending snapshot | 0.0025 | 0.0033 | 0.0026 |
+| Recovery encode + atomic write (worker thread) | 42 | 370 | 800 |
+| Save project (UI thread) | 41 | 369 | 776 |
+| Open project (UI thread) | 29 | 137 | 251 |
+| Export PNG: composite + encode (UI thread) | 89 | 224 | 350 |
+
+Observations:
+- Stroke cost per input event stays about 0.01 ms up to 10 layers because only the dab rect is
+  recomposited.
+- The recovery snapshot no longer copies pixels on the UI thread (milestone 2 copied the image,
+  3.0–3.7 ms each autosave). Instead the first edit of a shared layer after a snapshot copies that
+  layer once (≈ 2.3–3.2 ms), independent of the number of layers.
+- Save/open and recovery writes grow roughly linearly with painted layer content; at 10 layers a
+  save blocks the UI for about 0.8 s, and the crash-recovery loss window grows by the worker time
+  (see Milestone 2 for how the window is defined).
+- History memory is extra: up to 128 MiB, including deleted layers held for undo.
+
+Not measured for layers: on-screen app memory with a real GPU surface (the session was postponed
+because the desktop was in use), Android, and input-to-display latency.
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera).

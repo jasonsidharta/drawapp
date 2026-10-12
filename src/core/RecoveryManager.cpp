@@ -93,7 +93,7 @@ bool RecoveryManager::hasRecoveryFile() const
     return m_fileExists;
 }
 
-bool RecoveryManager::requestWrite(const QImage &snapshot, const RecoveryFile::Metadata &metadata)
+bool RecoveryManager::requestWrite(const DocumentData &snapshot, const RecoveryFile::Metadata &metadata)
 {
     if (!m_lock || m_writing)
         return false;
@@ -121,7 +121,7 @@ bool RecoveryManager::requestWrite(const QImage &snapshot, const RecoveryFile::M
     return true;
 }
 
-QString RecoveryManager::writeNow(const QImage &snapshot, const RecoveryFile::Metadata &metadata)
+QString RecoveryManager::writeNow(const DocumentData &snapshot, const RecoveryFile::Metadata &metadata)
 {
     if (!m_lock)
         return QStringLiteral("Crash recovery is not running.");
@@ -134,7 +134,7 @@ QString RecoveryManager::writeNow(const QImage &snapshot, const RecoveryFile::Me
     return writeAndCommit(snapshot, metadata, generation, m_nextSequence++).error;
 }
 
-RecoveryManager::WriteOutcome RecoveryManager::writeAndCommit(const QImage &snapshot,
+RecoveryManager::WriteOutcome RecoveryManager::writeAndCommit(const DocumentData &snapshot,
                                                               const RecoveryFile::Metadata &metadata,
                                                               quint64 generation, quint64 sequence)
 {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "LayeredDocument.h"
 #include "Pressure.h"
 #include "RasterDocument.h"
 #include "RecoveryManager.h"
@@ -15,6 +16,7 @@
 #include <QQuickWindow>
 #include <QTimer>
 #include <QUrl>
+#include <QVariantList>
 #include <QtQml/qqmlregistration.h>
 #include <optional>
 #include <vector>
@@ -44,6 +46,11 @@ class CanvasItem : public QQuickPaintedItem
     Q_PROPERTY(QString recoveryDescription READ recoveryDescription NOTIFY recoveryChanged)
     Q_PROPERTY(QString recoveryWarning READ recoveryWarning NOTIFY recoveryChanged)
     Q_PROPERTY(QString recoveryStatus READ recoveryStatus NOTIFY recoveryStatusChanged)
+    // Layers for the panel, top layer first: {id, name, visible, opacity, locked, active}.
+    Q_PROPERTY(QVariantList layers READ layers NOTIFY layersChanged)
+    Q_PROPERTY(int activeLayerId READ activeLayerId NOTIFY layersChanged)
+    Q_PROPERTY(int layerCount READ layerCount NOTIFY layersChanged)
+    Q_PROPERTY(int maxLayers READ maxLayers NOTIFY documentChanged)
 
 public:
     enum Tool { Brush, Eraser };
@@ -63,7 +70,7 @@ public:
     qreal zoom() const { return m_view.zoom(); }
     QSize documentSize() const { return m_document.size(); }
     QString inputStatus() const { return m_inputStatus; }
-    const RasterDocument &document() const { return m_document; }
+    const LayeredDocument &document() const { return m_document; }
     const ViewTransform &viewTransform() const { return m_view; }
     const UndoHistory &history() const { return m_history; }
 
@@ -96,7 +103,7 @@ public:
     QString recoveryDescription() const;
     QString recoveryWarning() const { return m_recoveryWarning; }
     QString recoveryStatus() const { return m_recoveryStatus; }
-    quint64 pixelRevision() const { return m_pixelRevision; }
+    quint64 contentRevision() const { return m_contentRevision; }
     qint64 maxRecoveryLagMs() const { return m_maxRecoveryLagMs; }
     // Runs one autosave check now (the timer calls this too).
     void autosaveNow();
@@ -108,7 +115,25 @@ public:
     // The user chose to discard unsaved changes while closing.
     Q_INVOKABLE void discardForClose();
 
-    Q_INVOKABLE void clearCanvas();
+    // --- layers (ids are the stable layer ids; the active layer is not part of undo history) ---
+    QVariantList layers() const;
+    int activeLayerId() const { return int(m_document.activeLayerId()); }
+    int layerCount() const { return m_document.count(); }
+    int maxLayers() const { return LayeredDocument::maxLayersFor(m_document.size()); }
+    Q_INVOKABLE void setActiveLayer(int id);
+    Q_INVOKABLE void addLayer();
+    Q_INVOKABLE void duplicateLayer(int id);
+    Q_INVOKABLE void deleteLayer(int id);
+    Q_INVOKABLE void moveLayerUp(int id);
+    Q_INVOKABLE void moveLayerDown(int id);
+    Q_INVOKABLE void renameLayer(int id, const QString &name);
+    Q_INVOKABLE void setLayerVisible(int id, bool visible);
+    Q_INVOKABLE void setLayerLocked(int id, bool locked);
+    // Live opacity while a slider is dragged (not recorded), then one undo step for the drag.
+    Q_INVOKABLE void previewLayerOpacity(int id, qreal opacity);
+    Q_INVOKABLE void commitLayerOpacity(int id, qreal opacity);
+    // Clears the active layer (one undo step). Refused for hidden or locked layers.
+    Q_INVOKABLE void clearActiveLayer();
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
     Q_INVOKABLE void zoomToActualSize();
@@ -128,6 +153,9 @@ signals:
     void autosaveIntervalChanged();
     void recoveryChanged();
     void recoveryStatusChanged();
+    void layersChanged();
+    // A user action was refused (for example drawing on a hidden layer); message explains why.
+    void notice(const QString &message);
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -156,24 +184,32 @@ private:
     void continuePan(const QPointF &viewPos);
     void endPan();
     void applyPendingDabs();
-    bool commitEdit(TileSnapshot before, const QString &label);
-    void markPixelsChanged();
+    bool commitPixels(quint64 layerId, TileSnapshot before, const QString &label);
+    void pushCommand(UndoCommand command);
+    void applyHistoryResult(const UndoCommand::Result &result);
+    // Empty if the active layer can be painted on, otherwise the reason it cannot.
+    QString activeLayerBlockReason() const;
+    void setLayerProperties(int id, const LayerProperties &props, const QString &label);
+    void markContentChanged();
     bool needsRecovery() const;
     void discardRecoveryFile();
     void onRecoveryWriteFinished(bool committed, bool stale, const QString &error, quint64 documentId,
                                  quint64 revision, qint64 workerMs);
     void setRecoveryStatus(const QString &status);
     RecoveryFile::Metadata recoveryMetadata() const;
-    void replaceDocument(const QImage &image);
+    void replaceDocument(const LayeredDocument &document);
     QString saveTo(const QString &path, const QUrl &url);
     void updateDocumentRect(const QRect &docRect);
     void viewModified();
     void setInputStatus(const QString &status);
     void reportStats();
 
-    RasterDocument m_document;
+    LayeredDocument m_document;
     UndoHistory m_history;
     TileSnapshot m_strokeBefore;
+    quint64 m_strokeLayerId = 0;
+    quint64 m_opacityDragLayerId = 0;  // non-zero while an opacity slider drag is previewing
+    qreal m_opacityDragStart = 1.0;
     quint64 m_savedStateId = 0;
     QString m_filePath;
     QUrl m_fileUrl;
@@ -182,7 +218,7 @@ private:
     QTimer m_autosaveTimer;
     int m_autosaveIntervalMs = 10000;
     quint64 m_documentId = 1;
-    quint64 m_pixelRevision = 0;     // changes with every pixel change, including mid-stroke
+    quint64 m_contentRevision = 0;   // changes with every document change, including mid-stroke
     quint64 m_requestedDocumentId = 0;
     quint64 m_requestedRevision = 0; // last revision handed to a recovery write
     bool m_autosaveTickMissed = false;

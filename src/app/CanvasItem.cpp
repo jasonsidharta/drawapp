@@ -13,6 +13,7 @@
 #include <QQuickWindow>
 #include <QTabletEvent>
 #include <QTouchEvent>
+#include <QVariantMap>
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
@@ -127,16 +128,7 @@ QString CanvasItem::documentTitle() const
     return name.isEmpty() ? QStringLiteral("Untitled") : name;
 }
 
-void CanvasItem::clearCanvas()
-{
-    if (m_gesture == Gesture::Stroke)
-        endStroke();
-    TileSnapshot before;
-    m_document.clear(&before);
-    if (commitEdit(std::move(before), QStringLiteral("Clear canvas")))
-        markPixelsChanged();
-    update();
-}
+// --- history ---
 
 void CanvasItem::undo()
 {
@@ -145,9 +137,7 @@ void CanvasItem::undo()
         endStroke();
     if (!m_history.canUndo())
         return;
-    updateDocumentRect(m_document.undo(m_history));
-    markPixelsChanged();
-    emit historyChanged();
+    applyHistoryResult(m_history.undo(m_document));
 }
 
 void CanvasItem::redo()
@@ -156,45 +146,324 @@ void CanvasItem::redo()
         endStroke();
     if (!m_history.canRedo())
         return;
-    updateDocumentRect(m_document.redo(m_history));
-    markPixelsChanged();
-    emit historyChanged();
+    applyHistoryResult(m_history.redo(m_document));
 }
 
-bool CanvasItem::commitEdit(TileSnapshot before, const QString &label)
+void CanvasItem::applyHistoryResult(const UndoCommand::Result &result)
 {
+    if (result.activate)
+        m_document.setActiveLayer(result.activate);
+    if (!result.dirty.isEmpty()) {
+        m_document.refreshComposite(result.dirty);
+        updateDocumentRect(result.dirty);
+    }
+    markContentChanged();
+    emit historyChanged();
+    if (result.structure || result.activate)
+        emit layersChanged();
+}
+
+bool CanvasItem::commitPixels(quint64 layerId, TileSnapshot before, const QString &label)
+{
+    const int index = m_document.indexOf(layerId);
+    if (index < 0)
+        return false;
     // Tiles touched but left identical (for example erasing transparent pixels) are not history.
-    before.dropUnchanged(m_document.image());
+    before.dropUnchanged(m_document.layer(index).image);
     if (before.isEmpty())
         return false;
-    m_history.push(std::move(before), label);
-    emit historyChanged();
+    pushCommand(UndoCommand::pixels(layerId, std::move(before), label));
     return true;
 }
 
-void CanvasItem::replaceDocument(const QImage &image)
+void CanvasItem::pushCommand(UndoCommand command)
+{
+    m_history.push(std::move(command));
+    emit historyChanged();
+}
+
+// --- layers ---
+
+QVariantList CanvasItem::layers() const
+{
+    QVariantList list;
+    for (int i = m_document.count() - 1; i >= 0; --i) {
+        const LayerData &layer = m_document.layer(i);
+        QVariantMap row;
+        row.insert(QStringLiteral("id"), int(layer.id));
+        row.insert(QStringLiteral("name"), layer.name);
+        row.insert(QStringLiteral("visible"), layer.visible);
+        row.insert(QStringLiteral("opacity"), layer.opacity);
+        row.insert(QStringLiteral("locked"), layer.locked);
+        row.insert(QStringLiteral("active"), layer.id == m_document.activeLayerId());
+        list.append(row);
+    }
+    return list;
+}
+
+void CanvasItem::setActiveLayer(int id)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    if (quint64(id) == m_document.activeLayerId() || m_document.indexOf(quint64(id)) < 0)
+        return;
+    m_document.setActiveLayer(quint64(id)); // selection only: not an edit, not undoable
+    emit layersChanged();
+}
+
+QString CanvasItem::activeLayerBlockReason() const
+{
+    const int index = m_document.activeIndex();
+    if (index < 0)
+        return QStringLiteral("There is no active layer.");
+    const LayerData &layer = m_document.layer(index);
+    if (!layer.visible)
+        return QStringLiteral("Can't paint: layer \"%1\" is hidden. Show it or choose another layer.").arg(layer.name);
+    if (layer.locked)
+        return QStringLiteral("Can't paint: layer \"%1\" is locked. Unlock it or choose another layer.").arg(layer.name);
+    return {};
+}
+
+void CanvasItem::addLayer()
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    if (m_document.count() >= maxLayers()) {
+        emit notice(QStringLiteral("This canvas can have at most %1 layers.").arg(maxLayers()));
+        return;
+    }
+    LayerData layer;
+    layer.id = m_document.allocateId();
+    layer.name = m_document.nextLayerName();
+    layer.image = RasterDocument::blank(m_document.size());
+    const int index = m_document.activeIndex() + 1; // above the active layer
+    const quint64 id = layer.id;
+    m_document.insertLayer(index, std::move(layer));
+    m_document.setActiveLayer(id);
+    pushCommand(UndoCommand::layerInserted(id, index, QStringLiteral("Add layer")));
+    markContentChanged();
+    emit layersChanged();
+}
+
+void CanvasItem::duplicateLayer(int id)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    const int source = m_document.indexOf(quint64(id));
+    if (source < 0)
+        return;
+    if (m_document.count() >= maxLayers()) {
+        emit notice(QStringLiteral("This canvas can have at most %1 layers.").arg(maxLayers()));
+        return;
+    }
+    LayerData copy = m_document.layer(source); // pixels shared until either layer is edited
+    copy.id = m_document.allocateId();
+    copy.name = (copy.name + QStringLiteral(" copy")).left(DocumentLimits::MaxNameLength);
+    const quint64 newId = copy.id;
+    m_document.insertLayer(source + 1, std::move(copy));
+    m_document.setActiveLayer(newId);
+    m_document.refreshComposite();
+    update();
+    pushCommand(UndoCommand::layerInserted(newId, source + 1, QStringLiteral("Duplicate layer")));
+    markContentChanged();
+    emit layersChanged();
+}
+
+void CanvasItem::deleteLayer(int id)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    const int index = m_document.indexOf(quint64(id));
+    if (index < 0)
+        return;
+    if (m_document.count() <= 1) {
+        emit notice(QStringLiteral("A drawing needs at least one layer."));
+        return;
+    }
+    LayerData removed = m_document.takeLayer(index); // the layer below becomes active if needed
+    m_document.refreshComposite();
+    update();
+    pushCommand(UndoCommand::layerRemoved(std::move(removed), index, QStringLiteral("Delete layer")));
+    markContentChanged();
+    emit layersChanged();
+}
+
+void CanvasItem::moveLayerUp(int id)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    const int index = m_document.indexOf(quint64(id));
+    if (index < 0 || index >= m_document.count() - 1)
+        return;
+    m_document.moveLayer(index, index + 1);
+    m_document.refreshComposite();
+    update();
+    pushCommand(UndoCommand::moved(quint64(id), index, QStringLiteral("Move layer up")));
+    markContentChanged();
+    emit layersChanged();
+}
+
+void CanvasItem::moveLayerDown(int id)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    const int index = m_document.indexOf(quint64(id));
+    if (index <= 0)
+        return;
+    m_document.moveLayer(index, index - 1);
+    m_document.refreshComposite();
+    update();
+    pushCommand(UndoCommand::moved(quint64(id), index, QStringLiteral("Move layer down")));
+    markContentChanged();
+    emit layersChanged();
+}
+
+void CanvasItem::setLayerProperties(int id, const LayerProperties &props, const QString &label)
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    const int index = m_document.indexOf(quint64(id));
+    if (index < 0)
+        return;
+    LayerData &layer = m_document.layerRef(index);
+    const LayerProperties before{layer.name, layer.visible, layer.opacity, layer.locked};
+    if (before.name == props.name && before.visible == props.visible && before.opacity == props.opacity
+        && before.locked == props.locked)
+        return;
+    const bool pixelsChange = before.visible != props.visible || before.opacity != props.opacity;
+    layer.name = props.name;
+    layer.visible = props.visible;
+    layer.opacity = props.opacity;
+    layer.locked = props.locked;
+    if (pixelsChange) {
+        m_document.refreshComposite();
+        update();
+    }
+    pushCommand(UndoCommand::properties(quint64(id), before, label));
+    markContentChanged();
+    emit layersChanged();
+}
+
+void CanvasItem::renameLayer(int id, const QString &name)
+{
+    const int index = m_document.indexOf(quint64(id));
+    const QString trimmed = name.trimmed().left(DocumentLimits::MaxNameLength);
+    if (index < 0 || trimmed.isEmpty())
+        return;
+    LayerData layer = m_document.layer(index);
+    setLayerProperties(id, {trimmed, layer.visible, layer.opacity, layer.locked}, QStringLiteral("Rename layer"));
+}
+
+void CanvasItem::setLayerVisible(int id, bool visible)
+{
+    const int index = m_document.indexOf(quint64(id));
+    if (index < 0)
+        return;
+    const LayerData &layer = m_document.layer(index);
+    setLayerProperties(id, {layer.name, visible, layer.opacity, layer.locked},
+                       visible ? QStringLiteral("Show layer") : QStringLiteral("Hide layer"));
+}
+
+void CanvasItem::setLayerLocked(int id, bool locked)
+{
+    const int index = m_document.indexOf(quint64(id));
+    if (index < 0)
+        return;
+    const LayerData &layer = m_document.layer(index);
+    setLayerProperties(id, {layer.name, layer.visible, layer.opacity, locked},
+                       locked ? QStringLiteral("Lock layer") : QStringLiteral("Unlock layer"));
+}
+
+void CanvasItem::previewLayerOpacity(int id, qreal opacity)
+{
+    const int index = m_document.indexOf(quint64(id));
+    if (index < 0)
+        return;
+    opacity = std::clamp(opacity, 0.0, 1.0);
+    LayerData &layer = m_document.layerRef(index);
+    if (m_opacityDragLayerId != quint64(id)) {
+        // A new drag: remember where it started so the whole drag becomes one undo step.
+        if (m_opacityDragLayerId != 0)
+            commitLayerOpacity(int(m_opacityDragLayerId), m_document.layer(m_document.indexOf(m_opacityDragLayerId)).opacity);
+        m_opacityDragLayerId = quint64(id);
+        m_opacityDragStart = layer.opacity;
+    }
+    if (layer.opacity == opacity)
+        return;
+    layer.opacity = opacity;
+    m_document.refreshComposite();
+    update();
+    markContentChanged(); // the layer list is refreshed when the drag is committed
+}
+
+void CanvasItem::commitLayerOpacity(int id, qreal opacity)
+{
+    const int index = m_document.indexOf(quint64(id));
+    if (index < 0)
+        return;
+    opacity = std::clamp(opacity, 0.0, 1.0);
+    LayerData &layer = m_document.layerRef(index);
+    const bool wasDragging = m_opacityDragLayerId == quint64(id);
+    if (wasDragging) {
+        // Put the start value back so the recorded "before" is where the drag began.
+        layer.opacity = m_opacityDragStart;
+        m_opacityDragLayerId = 0;
+    }
+    setLayerProperties(id, {layer.name, layer.visible, opacity, layer.locked}, QStringLiteral("Change layer opacity"));
+    if (wasDragging) {
+        // The composite may still show a preview value if the drag ended where it started.
+        m_document.refreshComposite();
+        update();
+        emit layersChanged();
+    }
+}
+
+void CanvasItem::clearActiveLayer()
+{
+    if (m_gesture == Gesture::Stroke)
+        endStroke();
+    const QString reason = activeLayerBlockReason();
+    if (!reason.isEmpty()) {
+        emit notice(QString(reason).replace(QStringLiteral("Can't paint"), QStringLiteral("Can't clear")));
+        return;
+    }
+    const int index = m_document.activeIndex();
+    TileSnapshot before;
+    const QRect changed = RasterDocument::clear(m_document.pixels(index), &before);
+    if (commitPixels(m_document.activeLayerId(), std::move(before), QStringLiteral("Clear layer"))) {
+        m_document.refreshComposite(changed);
+        markContentChanged();
+        update();
+    }
+}
+
+// --- documents and files ---
+
+void CanvasItem::replaceDocument(const LayeredDocument &document)
 {
     if (m_gesture == Gesture::Stroke)
         endStroke();
     m_gesture = Gesture::None;
+    m_opacityDragLayerId = 0;
     // The previous document was saved or explicitly discarded: its recovery data goes too.
     discardRecoveryFile();
-    m_document = RasterDocument(image);
+    m_document = document;
     m_history.clear();
     m_savedStateId = m_history.stateId();
     ++m_documentId;
-    ++m_pixelRevision;
+    ++m_contentRevision;
     m_oldestUnrecoveredMs = -1;
     m_view.fit(QSizeF(m_document.size()), size());
     update();
     emit documentChanged();
     emit historyChanged();
     emit viewChanged();
+    emit layersChanged();
 }
 
 void CanvasItem::newDocument()
 {
-    replaceDocument(RasterDocument().image());
+    replaceDocument(LayeredDocument());
     m_filePath.clear();
     m_fileUrl = QUrl();
     emit fileChanged();
@@ -203,11 +472,11 @@ void CanvasItem::newDocument()
 QString CanvasItem::openFile(const QUrl &url)
 {
     const QString path = pathFromUrl(url);
-    // Decoded into a separate image first: a failed open leaves the current artwork untouched.
+    // Decoded into separate memory first: a failed open leaves the current artwork untouched.
     ProjectFile::LoadResult result = ProjectFile::load(path);
     if (!result.ok())
         return result.error;
-    replaceDocument(result.image);
+    replaceDocument(LayeredDocument(result.document));
     m_filePath = path;
     m_fileUrl = url;
     emit fileChanged();
@@ -233,7 +502,9 @@ QString CanvasItem::saveTo(const QString &path, const QUrl &url)
 {
     if (m_gesture == Gesture::Stroke)
         endStroke();
-    const QString error = ProjectFile::save(m_document.image(), path);
+    if (m_opacityDragLayerId != 0)
+        commitLayerOpacity(int(m_opacityDragLayerId), m_document.layer(m_document.indexOf(m_opacityDragLayerId)).opacity);
+    const QString error = ProjectFile::save(m_document.snapshot(), path);
     if (!error.isEmpty())
         return error; // recovery data stays: the work is still only recoverable from there
     m_savedStateId = m_history.stateId();
@@ -256,8 +527,9 @@ QString CanvasItem::exportPng(const QUrl &url)
     QString path = pathFromUrl(url);
     QUrl target = url;
     ensureSuffix(path, target, QStringLiteral("png"));
-    // Export does not change the project file or the unsaved-changes state.
-    return ProjectFile::exportPng(m_document.image(), path);
+    // A fresh composite of the visible layers (not the view cache). Export does not change the
+    // project file or the unsaved-changes state.
+    return ProjectFile::exportPng(m_document.snapshot().composite(), path);
 }
 
 void CanvasItem::zoomIn()
@@ -292,7 +564,7 @@ void CanvasItem::paint(QPainter *painter)
 
     const QRect exposed = painter->hasClipping() ? painter->clipBoundingRect().toAlignedRect()
                                                  : boundingRect().toAlignedRect();
-    ViewRenderer::render(*painter, m_document.image(), m_view, exposed);
+    ViewRenderer::render(*painter, m_document.composite(), m_view, exposed);
 
     if (m_statsEnabled) {
         const qint64 ns = timer.nsecsElapsed();
@@ -546,7 +818,13 @@ void CanvasItem::beginStroke(const QPointF &viewPos, PointerKind kind, qreal pre
     if (m_statsEnabled)
         timer.start();
 
+    const QString blocked = activeLayerBlockReason();
+    if (!blocked.isEmpty()) {
+        emit notice(blocked); // the gesture stays None, so the rest of this press does nothing
+        return;
+    }
     m_gesture = Gesture::Stroke;
+    m_strokeLayerId = m_document.activeLayerId();
     m_strokeKind = kind;
     m_strokeMode = (eraserTip || m_tool == Eraser) ? BrushMode::Erase : BrushMode::Paint;
     m_strokeColor = m_brushColor;
@@ -586,8 +864,8 @@ void CanvasItem::endStroke()
     // However a stroke ends (release, lost grab, a second finger, an undo or save mid-stroke),
     // the marks it made become one undo step.
     if (m_gesture == Gesture::Stroke) {
-        commitEdit(std::move(m_strokeBefore),
-                   m_strokeMode == BrushMode::Erase ? QStringLiteral("Eraser stroke") : QStringLiteral("Brush stroke"));
+        commitPixels(m_strokeLayerId, std::move(m_strokeBefore),
+                     m_strokeMode == BrushMode::Erase ? QStringLiteral("Eraser stroke") : QStringLiteral("Brush stroke"));
         m_strokeBefore = TileSnapshot();
     }
     m_spacer.reset();
@@ -620,33 +898,42 @@ void CanvasItem::applyPendingDabs()
     if (m_pendingDabs.empty())
         return;
     m_statsDabs += qint64(m_pendingDabs.size());
-    const QRect changed = m_document.stampDabs(m_pendingDabs, m_strokeColor, m_strokeMode, &m_strokeBefore);
-    if (!changed.isEmpty())
-        markPixelsChanged();
+    const int index = m_document.indexOf(m_strokeLayerId);
+    if (index < 0) {
+        m_pendingDabs.clear();
+        return;
+    }
+    // Only the stroke's layer changes; the composite is rebuilt for the changed area only.
+    const QRect changed = RasterDocument::stampDabs(m_document.pixels(index), m_pendingDabs, m_strokeColor,
+                                                    m_strokeMode, &m_strokeBefore);
+    if (!changed.isEmpty()) {
+        m_document.refreshComposite(changed);
+        markContentChanged();
+    }
     updateDocumentRect(changed);
     m_pendingDabs.clear();
 }
 
 // --- crash recovery ---
 
-void CanvasItem::markPixelsChanged()
+void CanvasItem::markContentChanged()
 {
-    ++m_pixelRevision;
+    ++m_contentRevision;
     if (m_oldestUnrecoveredMs < 0)
         m_oldestUnrecoveredMs = m_recoveryClock.elapsed();
 }
 
 bool CanvasItem::needsRecovery() const
 {
-    // A stroke in progress counts before it is committed to history.
-    return isModified() || (m_gesture == Gesture::Stroke && !m_strokeBefore.isEmpty());
+    // A stroke in progress or an opacity drag counts before it is committed to history.
+    return isModified() || (m_gesture == Gesture::Stroke && !m_strokeBefore.isEmpty()) || m_opacityDragLayerId != 0;
 }
 
 RecoveryFile::Metadata CanvasItem::recoveryMetadata() const
 {
     RecoveryFile::Metadata meta;
     meta.documentId = m_documentId;
-    meta.revision = m_pixelRevision;
+    meta.revision = m_contentRevision;
     meta.savedAt = QDateTime::currentDateTimeUtc();
     meta.originalPath = m_filePath;
     meta.originalUrl = m_fileUrl.toString();
@@ -699,11 +986,17 @@ QString CanvasItem::recoveryDescription() const
     const RecoveryFile::Contents &c = m_orphans.first().contents;
     const QString name = c.metadata.originalPath.isEmpty() ? QStringLiteral("Untitled")
                                                            : QFileInfo(c.metadata.originalPath).fileName();
-    return QStringLiteral("DrawApp did not close normally. Unsaved artwork \"%1\" (%2 × %3 px) from %4 can be restored.")
-        .arg(name)
-        .arg(c.image.width())
-        .arg(c.image.height())
-        .arg(QLocale().toString(c.metadata.savedAt.toLocalTime(), QLocale::ShortFormat));
+    const int layers = int(c.document.layers.size());
+    QString text = QStringLiteral("DrawApp did not close normally. Unsaved artwork \"%1\" (%2 × %3 px, %4 %5) from %6 can be restored.")
+                       .arg(name)
+                       .arg(c.document.size.width())
+                       .arg(c.document.size.height())
+                       .arg(layers)
+                       .arg(layers == 1 ? QStringLiteral("layer") : QStringLiteral("layers"))
+                       .arg(QLocale().toString(c.metadata.savedAt.toLocalTime(), QLocale::ShortFormat));
+    if (c.recoveryVersion == 1)
+        text += QStringLiteral(" It was saved by an earlier single-layer version of DrawApp and opens as one layer.");
+    return text;
 }
 
 void CanvasItem::restoreRecovery()
@@ -712,7 +1005,7 @@ void CanvasItem::restoreRecovery()
         return;
     const RecoveryManager::Orphan orphan = m_orphans.takeFirst();
     m_orphans.clear(); // further orphans stay on disk for the next start
-    replaceDocument(orphan.contents.image);
+    replaceDocument(LayeredDocument(orphan.contents.document));
     m_filePath = orphan.contents.metadata.originalPath;
     m_fileUrl = orphan.contents.metadata.originalUrl.isEmpty() ? (m_filePath.isEmpty() ? QUrl() : QUrl::fromLocalFile(m_filePath))
                                                                : QUrl(orphan.contents.metadata.originalUrl);
@@ -722,7 +1015,7 @@ void CanvasItem::restoreRecovery()
     if (error.isEmpty()) {
         // The adopted file already holds exactly this state.
         m_requestedDocumentId = m_documentId;
-        m_requestedRevision = m_pixelRevision;
+        m_requestedRevision = m_contentRevision;
         setRecoveryStatus(QStringLiteral("Restored unsaved artwork"));
     } else {
         m_oldestUnrecoveredMs = m_recoveryClock.elapsed();
@@ -786,28 +1079,31 @@ void CanvasItem::autosaveNow()
         m_oldestUnrecoveredMs = -1;
         return;
     }
-    if (m_documentId == m_requestedDocumentId && m_pixelRevision == m_requestedRevision)
+    if (m_documentId == m_requestedDocumentId && m_contentRevision == m_requestedRevision)
         return; // already written or being written
     if (m_recovery->isWriting()) {
         m_autosaveTickMissed = true; // run again as soon as the current write ends
         return;
     }
 
-    // Consistent snapshot on the UI thread; the worker only ever sees this private copy.
+    // Consistent snapshot on the UI thread: plain values whose layer images are shared
+    // copy-on-write, so the worker never sees later edits (the next edit of a shared layer copies
+    // that layer's pixels on the UI thread first).
     QElapsedTimer copyTimer;
     copyTimer.start();
-    const QImage snapshot = m_document.image().copy();
-    const qint64 copyUs = copyTimer.nsecsElapsed() / 1000;
+    const DocumentData snapshot = m_document.snapshot();
+    const qint64 copyNs = copyTimer.nsecsElapsed();
     if (!m_recovery->requestWrite(snapshot, recoveryMetadata()))
         return;
     m_requestedDocumentId = m_documentId;
-    m_requestedRevision = m_pixelRevision;
+    m_requestedRevision = m_contentRevision;
     m_inFlightOldestMs = m_oldestUnrecoveredMs;
     m_oldestUnrecoveredMs = -1;
     if (m_statsEnabled)
-        qInfo().noquote() << QStringLiteral("[recovery] snapshot rev %1 copied on UI thread in %2 ms")
-                                 .arg(m_pixelRevision)
-                                 .arg(copyUs / 1000.0, 0, 'f', 3);
+        qInfo().noquote() << QStringLiteral("[recovery] snapshot rev %1 of %2 layers taken on UI thread in %3 ms")
+                                 .arg(m_contentRevision)
+                                 .arg(snapshot.layers.size())
+                                 .arg(copyNs / 1e6, 0, 'f', 4);
 }
 
 void CanvasItem::onRecoveryWriteFinished(bool committed, bool stale, const QString &error, quint64 documentId,
@@ -854,7 +1150,7 @@ void CanvasItem::shutdownRecovery()
         // latest state recoverable instead of deleting it.
         if (m_gesture == Gesture::Stroke)
             endStroke();
-        m_recovery->writeNow(m_document.image().copy(), recoveryMetadata());
+        m_recovery->writeNow(m_document.snapshot(), recoveryMetadata());
         m_recovery->releaseKeepingFile();
     } else {
         m_recovery->finishCleanly();

@@ -8,12 +8,11 @@
 #include <vector>
 
 class TileSnapshot;
-class UndoHistory;
 
 enum class BrushMode { Paint, Erase };
 
-// One raster in premultiplied ARGB32 (4 bytes per pixel). New documents are 2048x1536 and fully
-// transparent; opened documents keep their stored size.
+// One raster in premultiplied ARGB32 (4 bytes per pixel). The static functions apply the same
+// raster operations to any image, such as a layer of a LayeredDocument.
 class RasterDocument
 {
 public:
@@ -28,17 +27,21 @@ public:
     QSize size() const { return m_image.size(); }
     QRect bounds() const { return m_image.rect(); }
 
-    // Stamps anti-aliased round dabs. Paint composites color over the pixels; Erase removes
-    // alpha (destination-out). If before is given, the tiles about to change are captured into
-    // it first. Returns the changed area clipped to the document, or an empty rect.
     QRect stampDabs(const std::vector<Dab> &dabs, const QColor &color, BrushMode mode,
-                    TileSnapshot *before = nullptr);
+                    TileSnapshot *before = nullptr)
+    {
+        return stampDabs(m_image, dabs, color, mode, before);
+    }
+    QRect clear(TileSnapshot *before = nullptr) { return clear(m_image, before); }
 
+    static QImage blank(QSize size);
+    // Stamps anti-aliased round dabs. Paint composites color over the pixels; Erase removes
+    // alpha (destination-out). If before is given, the tiles under each dab are captured into
+    // it first. Returns the changed area clipped to the image, or an empty rect.
+    static QRect stampDabs(QImage &image, const std::vector<Dab> &dabs, const QColor &color, BrushMode mode,
+                           TileSnapshot *before = nullptr);
     // Makes every pixel transparent, capturing painted tiles into before if given.
-    QRect clear(TileSnapshot *before = nullptr);
-
-    QRect undo(UndoHistory &history);
-    QRect redo(UndoHistory &history);
+    static QRect clear(QImage &image, TileSnapshot *before = nullptr);
 
 private:
     QImage m_image;

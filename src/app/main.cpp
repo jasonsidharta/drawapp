@@ -7,6 +7,9 @@
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QStandardPaths>
+#include <QtQml/qqmlextensionplugin.h>
+
+Q_IMPORT_QML_PLUGIN(DrawAppPlugin)
 
 namespace {
 

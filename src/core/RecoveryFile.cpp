@@ -29,7 +29,9 @@ QString damaged(const QString &detail)
 
 } // namespace
 
-QByteArray RecoveryFile::encode(const QImage &image, const Metadata &metadata)
+namespace {
+
+QByteArray container(quint32 version, const RecoveryFile::Metadata &metadata, const QByteArray &project)
 {
     QJsonObject json;
     json[QStringLiteral("documentId")] = QString::number(metadata.documentId);
@@ -38,20 +40,31 @@ QByteArray RecoveryFile::encode(const QImage &image, const Metadata &metadata)
     json[QStringLiteral("originalPath")] = metadata.originalPath;
     json[QStringLiteral("originalUrl")] = metadata.originalUrl;
     const QByteArray meta = QJsonDocument(json).toJson(QJsonDocument::Compact);
-    const QByteArray project = ProjectFile::encode(image);
 
     QByteArray out;
     out.reserve(FixedHeader + meta.size() + 8 + project.size());
     QDataStream s(&out, QIODevice::WriteOnly);
     s.setByteOrder(QDataStream::LittleEndian);
     s.writeRawData(Magic, sizeof(Magic));
-    s << CurrentVersion << quint32(meta.size());
+    s << version << quint32(meta.size());
     const QByteArray digest = QCryptographicHash::hash(meta, QCryptographicHash::Sha256);
     s.writeRawData(digest.constData(), int(digest.size()));
     s.writeRawData(meta.constData(), int(meta.size()));
     s << quint64(project.size());
     out.append(project);
     return out;
+}
+
+} // namespace
+
+QByteArray RecoveryFile::encode(const DocumentData &document, const Metadata &metadata)
+{
+    return container(CurrentVersion, metadata, ProjectFile::encode(document));
+}
+
+QByteArray RecoveryFile::encodeVersion1(const QImage &image, const Metadata &metadata)
+{
+    return container(1, metadata, ProjectFile::encodeVersion1(image));
 }
 
 RecoveryFile::Contents RecoveryFile::decode(const QByteArray &data)
@@ -84,10 +97,15 @@ RecoveryFile::Contents RecoveryFile::decode(const QByteArray &data)
     ProjectFile::LoadResult project = ProjectFile::decode(data.mid(projectOffset));
     if (!project.ok())
         return failure(damaged(project.error));
+    // Version 1 containers come from the single-layer milestone and must embed a version 1 project.
+    if (version == 1 && project.version != 1)
+        return failure(damaged(QStringLiteral("unexpected project version")));
 
     const QJsonObject json = doc.object();
     Contents c;
-    c.image = project.image;
+    c.document = project.document;
+    c.recoveryVersion = version;
+    c.projectVersion = project.version;
     c.metadata.documentId = json.value(QStringLiteral("documentId")).toString().toULongLong();
     c.metadata.revision = json.value(QStringLiteral("revision")).toString().toULongLong();
     c.metadata.savedAt = QDateTime::fromString(json.value(QStringLiteral("savedAt")).toString(), Qt::ISODateWithMs);

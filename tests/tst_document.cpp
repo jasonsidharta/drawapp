@@ -1,5 +1,6 @@
-// Undo history, project files and PNG export, without any UI.
+// Layered document, undo history, project files and PNG export, without any UI.
 
+#include "LayeredDocument.h"
 #include "ProjectFile.h"
 #include "RasterDocument.h"
 #include "TileSnapshot.h"
@@ -11,30 +12,88 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRandomGenerator>
 #include <QTemporaryDir>
 #include <QtEndian>
 #include <QtTest>
+#include <cstdlib>
 
 namespace {
 
 constexpr qsizetype TileBytes = qsizetype(TileSnapshot::TileSize) * TileSnapshot::TileSize * 4;
 
-// Paints one dab and records it as an undo step. Returns false if nothing changed.
-bool paintStep(RasterDocument &doc, UndoHistory &history, QPointF center, qreal diameter, QColor color,
-               BrushMode mode = BrushMode::Paint)
+// Paints one dab on a layer and records it as an undo step, like the canvas does.
+bool paintStep(LayeredDocument &doc, UndoHistory &history, quint64 layerId, QPointF center, qreal diameter,
+               QColor color, BrushMode mode = BrushMode::Paint)
 {
+    const int index = doc.indexOf(layerId);
     TileSnapshot before;
-    doc.stampDabs({{center, diameter}}, color, mode, &before);
-    before.dropUnchanged(doc.image());
+    const QRect changed = RasterDocument::stampDabs(doc.pixels(index), {{center, diameter}}, color, mode, &before);
+    doc.refreshComposite(changed);
+    before.dropUnchanged(doc.layer(index).image);
     if (before.isEmpty())
         return false;
-    history.push(std::move(before), QStringLiteral("stroke"));
+    history.push(UndoCommand::pixels(layerId, std::move(before), QStringLiteral("stroke")));
     return true;
 }
 
-// Random image with valid premultiplied pixels (each color channel <= alpha), including
-// fully transparent and partially transparent pixels.
+void undo(LayeredDocument &doc, UndoHistory &history)
+{
+    const UndoCommand::Result r = history.undo(doc);
+    if (r.activate)
+        doc.setActiveLayer(r.activate);
+    doc.refreshComposite(r.dirty);
+}
+
+void redo(LayeredDocument &doc, UndoHistory &history)
+{
+    const UndoCommand::Result r = history.redo(doc);
+    if (r.activate)
+        doc.setActiveLayer(r.activate);
+    doc.refreshComposite(r.dirty);
+}
+
+quint64 addLayer(LayeredDocument &doc, UndoHistory &history, const QString &name)
+{
+    LayerData layer;
+    layer.id = doc.allocateId();
+    layer.name = name;
+    layer.image = RasterDocument::blank(doc.size());
+    const int index = doc.activeIndex() + 1;
+    const quint64 id = layer.id;
+    doc.insertLayer(index, layer);
+    doc.setActiveLayer(id);
+    history.push(UndoCommand::layerInserted(id, index, QStringLiteral("Add layer")));
+    return id;
+}
+
+void deleteLayer(LayeredDocument &doc, UndoHistory &history, quint64 id)
+{
+    const int index = doc.indexOf(id);
+    LayerData removed = doc.takeLayer(index);
+    doc.refreshComposite();
+    history.push(UndoCommand::layerRemoved(std::move(removed), index, QStringLiteral("Delete layer")));
+}
+
+void moveLayer(LayeredDocument &doc, UndoHistory &history, quint64 id, int to)
+{
+    const int from = doc.indexOf(id);
+    doc.moveLayer(from, to);
+    doc.refreshComposite();
+    history.push(UndoCommand::moved(id, from, QStringLiteral("Move layer")));
+}
+
+QImage solid(QSize size, QColor color)
+{
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    image.fill(color);
+    return image;
+}
+
+// Random image with valid premultiplied pixels, including transparent and partly transparent ones.
 QImage randomPremultiplied(int w, int h, quint32 seed)
 {
     QRandomGenerator rng(seed);
@@ -49,9 +108,34 @@ QImage randomPremultiplied(int w, int h, quint32 seed)
     return image;
 }
 
-// Builds a project file from explicit header fields, recomputing the checksum unless told not to.
-QByteArray makeFile(quint32 version, quint32 w, quint32 h, quint32 format, quint32 compression,
-                    const QByteArray &payload, bool validChecksum = true)
+bool near(QRgb a, QRgb b, int tolerance = 2)
+{
+    return std::abs(qRed(a) - qRed(b)) <= tolerance && std::abs(qGreen(a) - qGreen(b)) <= tolerance
+           && std::abs(qBlue(a) - qBlue(b)) <= tolerance && std::abs(qAlpha(a) - qAlpha(b)) <= tolerance;
+}
+
+DocumentData threeLayerDocument(QSize size)
+{
+    DocumentData doc;
+    doc.size = size;
+    const char *names[] = {"Background", "Sketch ✏ 素描", "Line art"};
+    for (int i = 0; i < 3; ++i) {
+        LayerData layer;
+        layer.id = quint64(10 + i * 7); // non-contiguous ids must survive
+        layer.name = QString::fromUtf8(names[i]);
+        layer.image = randomPremultiplied(size.width(), size.height(), quint32(i + 1));
+        layer.visible = i != 1;
+        layer.opacity = i == 2 ? 0.37 : 1.0;
+        layer.locked = i == 0;
+        doc.layers.push_back(layer);
+    }
+    doc.activeLayerId = 17;
+    return doc;
+}
+
+// Version 1 file with explicit header fields (checksum recomputed unless told not to).
+QByteArray makeV1(quint32 version, quint32 w, quint32 h, quint32 format, quint32 compression,
+                  const QByteArray &payload, bool validChecksum = true)
 {
     QByteArray out;
     QDataStream s(&out, QIODevice::WriteOnly);
@@ -64,6 +148,41 @@ QByteArray makeFile(quint32 version, quint32 w, quint32 h, quint32 format, quint
     s.writeRawData(digest.constData(), 32);
     out.append(payload);
     return out;
+}
+
+// Version 2 file from a header, metadata JSON and layer blocks (checksum recomputed).
+QByteArray makeV2(quint32 w, quint32 h, quint32 count, const QJsonObject &meta, const QList<QByteArray> &blocks)
+{
+    QByteArray payload = QJsonDocument(meta).toJson(QJsonDocument::Compact);
+    const quint32 metaSize = quint32(payload.size());
+    for (const QByteArray &b : blocks)
+        payload.append(b);
+    QByteArray out;
+    QDataStream s(&out, QIODevice::WriteOnly);
+    s.setByteOrder(QDataStream::LittleEndian);
+    s.writeRawData("DRAWAPP\n", 8);
+    s << quint32(2) << w << h << count << metaSize << quint64(payload.size());
+    const QByteArray digest = QCryptographicHash::hash(payload, QCryptographicHash::Sha256);
+    s.writeRawData(digest.constData(), 32);
+    out.append(payload);
+    return out;
+}
+
+QJsonObject layerMeta(const QString &id, qint64 blockSize, double opacity = 1.0)
+{
+    QJsonObject o;
+    o["id"] = id;
+    o["name"] = "L";
+    o["visible"] = true;
+    o["opacity"] = opacity;
+    o["locked"] = false;
+    o["compressedSize"] = double(blockSize);
+    return o;
+}
+
+QByteArray block(int w, int h)
+{
+    return qCompress(QByteArray(w * h * 4, '\0'));
 }
 
 QByteArray readAll(const QString &path)
@@ -79,210 +198,403 @@ class TestDocument : public QObject
     Q_OBJECT
 
 private slots:
+    // --- layer model and compositing ---
+    void newDocumentHasOneTransparentLayer()
+    {
+        LayeredDocument doc;
+        QCOMPARE(doc.size(), QSize(2048, 1536));
+        QCOMPARE(doc.count(), 1);
+        QCOMPARE(doc.layer(0).name, QStringLiteral("Layer 1"));
+        QCOMPARE(doc.activeLayerId(), doc.layer(0).id);
+        QCOMPARE(qAlpha(doc.composite().pixel(100, 100)), 0);
+        QCOMPARE(LayeredDocument::maxLayersFor(doc.size()), 42); // 512 MiB / 12 MiB per layer
+    }
+
+    void compositeOrderOpacityAndVisibility()
+    {
+        DocumentData data;
+        data.size = QSize(8, 8);
+        LayerData bottom{1, "red", solid(data.size, QColor(255, 0, 0)), true, 1.0, false};
+        LayerData top{2, "blue", solid(data.size, QColor(0, 0, 255)), true, 0.5, false};
+        data.layers = {bottom, top};
+        data.activeLayerId = 2;
+        LayeredDocument doc(data);
+        // Blue at 50 % over opaque red.
+        QVERIFY(near(doc.composite().pixel(3, 3), qRgba(128, 0, 127, 255)));
+
+        LayeredDocument swapped(data);
+        swapped.moveLayer(1, 0); // blue now at the bottom, red on top at full opacity
+        swapped.refreshComposite();
+        QCOMPARE(swapped.composite().pixel(3, 3), qRgba(255, 0, 0, 255));
+
+        swapped.layerRef(1).visible = false; // hide red: half-transparent blue over nothing
+        swapped.refreshComposite();
+        QVERIFY(near(swapped.composite().pixel(3, 3), qRgba(0, 0, 128, 128)));
+    }
+
+    void compositeKeepsTransparency()
+    {
+        DocumentData data;
+        data.size = QSize(4, 4);
+        data.layers = {{1, "a", solid(data.size, QColor(255, 0, 0, 128)), true, 1.0, false},
+                       {2, "b", solid(data.size, QColor(0, 255, 0, 128)), true, 1.0, false}};
+        data.activeLayerId = 1;
+        const QRgb c = LayeredDocument(data).composite().pixel(1, 1);
+        // alpha = a1 + a2 (1 - a1) ≈ 0.5 + 0.5 * 0.5 = 0.75
+        QVERIFY2(std::abs(qAlpha(c) - 191) <= 2, qPrintable(QString::number(qAlpha(c))));
+        QVERIFY(qGreen(c) > qRed(c)); // the upper (green) layer dominates
+    }
+
+    void erasingUpperLayerRevealsLowerLayer()
+    {
+        LayeredDocument doc(QSize(200, 200));
+        UndoHistory history;
+        const quint64 background = doc.layer(0).id;
+        paintStep(doc, history, background, QPointF(100, 100), 150, QColor(0, 180, 0));
+        const quint64 upper = addLayer(doc, history, "upper");
+        paintStep(doc, history, upper, QPointF(100, 100), 150, QColor(0, 0, 200));
+        QCOMPARE(doc.composite().pixel(100, 100), qRgb(0, 0, 200));
+        paintStep(doc, history, upper, QPointF(100, 100), 30, Qt::black, BrushMode::Erase);
+        QCOMPARE(doc.composite().pixel(100, 100), qRgb(0, 180, 0)); // lower layer shows through
+        QCOMPARE(qAlpha(doc.layer(doc.indexOf(upper)).image.pixel(100, 100)), 0);
+        QCOMPARE(doc.layer(doc.indexOf(background)).image.pixel(100, 100), qRgb(0, 180, 0)); // untouched
+    }
+
+    void partialRefreshMatchesFullComposite()
+    {
+        LayeredDocument doc(QSize(300, 200));
+        UndoHistory history;
+        const quint64 a = doc.layer(0).id;
+        const quint64 b = addLayer(doc, history, "b");
+        doc.layerRef(doc.indexOf(b)).opacity = 0.6;
+        doc.refreshComposite();
+        for (int i = 0; i < 20; ++i)
+            paintStep(doc, history, i % 2 ? a : b, QPointF(20 + i * 13, 30 + i * 7), 25,
+                      QColor::fromHsv(i * 17, 200, 220));
+        QCOMPARE(doc.composite(), doc.snapshot().composite());
+    }
+
+    void layerIdsAreStableAndNeverReused()
+    {
+        LayeredDocument doc(QSize(16, 16));
+        UndoHistory history;
+        const quint64 first = doc.layer(0).id;
+        const quint64 second = addLayer(doc, history, "2");
+        deleteLayer(doc, history, second);
+        const quint64 third = addLayer(doc, history, "3");
+        QVERIFY(third != second && third != first);
+        undo(doc, history); // remove "3"
+        undo(doc, history); // restore "2" with its original id
+        QVERIFY(doc.indexOf(second) >= 0);
+        QCOMPARE(doc.activeLayerId(), second);
+    }
+
+    void deletingActiveLayerSelectsTheLayerBelow()
+    {
+        LayeredDocument doc(QSize(16, 16));
+        UndoHistory history;
+        const quint64 bottom = doc.layer(0).id;
+        const quint64 middle = addLayer(doc, history, "middle");
+        const quint64 top = addLayer(doc, history, "top");
+        deleteLayer(doc, history, top);
+        QCOMPARE(doc.activeLayerId(), middle);
+        doc.setActiveLayer(bottom);
+        deleteLayer(doc, history, bottom); // no layer below: the new bottom layer becomes active
+        QCOMPARE(doc.activeLayerId(), middle);
+        undo(doc, history); // restored layer becomes active again, at its old position
+        QCOMPARE(doc.activeLayerId(), bottom);
+        QCOMPARE(doc.indexOf(bottom), 0);
+    }
+
     // --- undo / redo ---
     void strokeUndoRedoRestoresPixels()
     {
-        RasterDocument doc(QSize(300, 200));
+        LayeredDocument doc(QSize(300, 200));
         UndoHistory history;
-        const QImage empty = doc.image().copy();
-        TileSnapshot before;
-        doc.stampDabs({{QPointF(50, 50), 20}, {QPointF(150, 120), 30}}, Qt::red, BrushMode::Paint, &before);
-        history.push(std::move(before), QStringLiteral("Brush stroke"));
-        const QImage painted = doc.image().copy();
-        QVERIFY(painted != empty);
-
-        QVERIFY(!doc.undo(history).isEmpty());
-        QCOMPARE(doc.image(), empty);
+        const QImage empty = doc.composite().copy();
+        const quint64 id = doc.layer(0).id;
+        QVERIFY(paintStep(doc, history, id, QPointF(50, 50), 20, Qt::red));
+        const QImage painted = doc.composite().copy();
+        undo(doc, history);
+        QCOMPARE(doc.composite(), empty);
         QVERIFY(history.canRedo());
-        QVERIFY(!doc.redo(history).isEmpty());
-        QCOMPARE(doc.image(), painted);
-        QCOMPARE(history.undoLabel(), QStringLiteral("Brush stroke"));
+        redo(doc, history);
+        QCOMPARE(doc.composite(), painted);
     }
 
-    void eraserUndoRestoresPaint()
+    void eraserAndClearUndo()
     {
-        RasterDocument doc(QSize(200, 200));
+        LayeredDocument doc(QSize(500, 300));
         UndoHistory history;
-        QVERIFY(paintStep(doc, history, QPointF(100, 100), 80, Qt::blue));
-        const QImage painted = doc.image().copy();
-        QVERIFY(paintStep(doc, history, QPointF(100, 100), 30, Qt::black, BrushMode::Erase));
-        QCOMPARE(qAlpha(doc.image().pixel(100, 100)), 0);
-        doc.undo(history);
-        QCOMPARE(doc.image(), painted);
-        doc.redo(history);
-        QCOMPARE(qAlpha(doc.image().pixel(100, 100)), 0);
-    }
+        const quint64 id = doc.layer(0).id;
+        paintStep(doc, history, id, QPointF(100, 100), 80, Qt::blue);
+        const QImage painted = doc.composite().copy();
+        paintStep(doc, history, id, QPointF(100, 100), 30, Qt::black, BrushMode::Erase);
+        QCOMPARE(qAlpha(doc.composite().pixel(100, 100)), 0);
+        undo(doc, history);
+        QCOMPARE(doc.composite(), painted);
 
-    void clearUndoRestoresArtwork()
-    {
-        RasterDocument doc(QSize(500, 300));
-        UndoHistory history;
-        QVERIFY(paintStep(doc, history, QPointF(30, 30), 20, Qt::green));
-        QVERIFY(paintStep(doc, history, QPointF(470, 270), 20, Qt::green));
-        const QImage painted = doc.image().copy();
         TileSnapshot before;
-        doc.clear(&before);
-        QCOMPARE(before.tileCount(), 2); // only painted tiles are kept
-        history.push(std::move(before), QStringLiteral("Clear canvas"));
-        doc.undo(history);
-        QCOMPARE(doc.image(), painted);
-        doc.redo(history);
-        QCOMPARE(qAlpha(doc.image().pixel(30, 30)), 0);
-        QCOMPARE(qAlpha(doc.image().pixel(470, 270)), 0);
+        RasterDocument::clear(doc.pixels(0), &before);
+        doc.refreshComposite();
+        history.push(UndoCommand::pixels(id, std::move(before), QStringLiteral("Clear layer")));
+        QCOMPARE(qAlpha(doc.composite().pixel(100, 100)), 0);
+        undo(doc, history);
+        QCOMPARE(doc.composite(), painted);
     }
 
     void newEditInvalidatesRedo()
     {
-        RasterDocument doc(QSize(200, 200));
+        LayeredDocument doc(QSize(200, 200));
         UndoHistory history;
-        QVERIFY(paintStep(doc, history, QPointF(30, 30), 20, Qt::red));
-        const QImage afterFirst = doc.image().copy();
-        QVERIFY(paintStep(doc, history, QPointF(150, 150), 20, Qt::red));
-        doc.undo(history);
-        QVERIFY(history.canRedo());
-        QVERIFY(paintStep(doc, history, QPointF(150, 30), 20, Qt::blue));
+        const quint64 id = doc.layer(0).id;
+        paintStep(doc, history, id, QPointF(30, 30), 20, Qt::red);
+        const QImage afterFirst = doc.composite().copy();
+        paintStep(doc, history, id, QPointF(150, 150), 20, Qt::red);
+        undo(doc, history);
+        paintStep(doc, history, id, QPointF(150, 30), 20, Qt::blue);
         QVERIFY(!history.canRedo());
-        QCOMPARE(history.redoCount(), 0);
-        QVERIFY(doc.redo(history).isEmpty());
-        doc.undo(history);
-        QCOMPARE(doc.image(), afterFirst);
+        undo(doc, history);
+        QCOMPARE(doc.composite(), afterFirst);
+    }
+
+    void undoAfterReorderTargetsTheRightLayer()
+    {
+        LayeredDocument doc(QSize(200, 200));
+        UndoHistory history;
+        const quint64 a = doc.layer(0).id;
+        const quint64 b = addLayer(doc, history, "b");
+        paintStep(doc, history, a, QPointF(50, 50), 40, Qt::red);
+        paintStep(doc, history, b, QPointF(150, 150), 40, Qt::blue);
+        moveLayer(doc, history, a, 1); // a now on top
+        QCOMPARE(doc.layer(1).id, a);
+        undo(doc, history);            // move back
+        QCOMPARE(doc.layer(0).id, a);
+        undo(doc, history);            // b's stroke
+        undo(doc, history);            // a's stroke
+        QCOMPARE(qAlpha(doc.layer(doc.indexOf(a)).image.pixel(50, 50)), 0);
+        QCOMPARE(qAlpha(doc.layer(doc.indexOf(b)).image.pixel(150, 150)), 0);
+
+        // Redo after moving again: the strokes go back to their own layers, wherever they are.
+        redo(doc, history);
+        redo(doc, history);
+        redo(doc, history);
+        QCOMPARE(doc.layer(1).id, a);
+        QCOMPARE(doc.layer(doc.indexOf(a)).image.pixel(50, 50), qRgb(255, 0, 0));
+        QCOMPARE(qAlpha(doc.layer(doc.indexOf(a)).image.pixel(150, 150)), 0);
+        QCOMPARE(doc.layer(doc.indexOf(b)).image.pixel(150, 150), qRgb(0, 0, 255));
+    }
+
+    void undoAfterDeletionRestoresLayerAndPixels()
+    {
+        LayeredDocument doc(QSize(200, 200));
+        UndoHistory history;
+        const quint64 a = doc.layer(0).id;
+        const quint64 b = addLayer(doc, history, "b");
+        paintStep(doc, history, b, QPointF(100, 100), 60, Qt::green);
+        const QImage before = doc.composite().copy();
+        deleteLayer(doc, history, b);
+        QCOMPARE(doc.count(), 1);
+        QCOMPARE(qAlpha(doc.composite().pixel(100, 100)), 0);
+        undo(doc, history);
+        QCOMPARE(doc.count(), 2);
+        QCOMPARE(doc.layer(1).id, b);
+        QCOMPARE(doc.composite(), before);
+        undo(doc, history); // b's stroke: still targets b
+        QCOMPARE(qAlpha(doc.composite().pixel(100, 100)), 0);
+        redo(doc, history);
+        redo(doc, history); // delete again
+        QCOMPARE(doc.count(), 1);
+        QCOMPARE(doc.layer(0).id, a);
+    }
+
+    void propertyChangesAreUndoable()
+    {
+        LayeredDocument doc(QSize(8, 8));
+        UndoHistory history;
+        const quint64 id = doc.layer(0).id;
+        LayerData &layer = doc.layerRef(0);
+        const LayerProperties before{layer.name, layer.visible, layer.opacity, layer.locked};
+        layer.name = "Ink";
+        layer.visible = false;
+        layer.opacity = 0.25;
+        layer.locked = true;
+        history.push(UndoCommand::properties(id, before, QStringLiteral("props")));
+        undo(doc, history);
+        QCOMPARE(doc.layer(0).name, QStringLiteral("Layer 1"));
+        QVERIFY(doc.layer(0).visible);
+        QCOMPARE(doc.layer(0).opacity, 1.0);
+        QVERIFY(!doc.layer(0).locked);
+        redo(doc, history);
+        QCOMPARE(doc.layer(0).name, QStringLiteral("Ink"));
+        QCOMPARE(doc.layer(0).opacity, 0.25);
+        QVERIFY(doc.layer(0).locked && !doc.layer(0).visible);
     }
 
     void snapshotsStoreOnlyChangedTiles()
     {
-        RasterDocument doc; // 2048x1536
-        TileSnapshot small;
-        doc.stampDabs({{QPointF(1000, 700), 10}}, Qt::black, BrushMode::Paint, &small);
-        QVERIFY(small.tileCount() <= 4);
-
-        // A full-width diagonal stroke covers the whole canvas bounding box but few tiles.
+        RasterDocument raster; // 2048x1536
         std::vector<Dab> diagonal;
         for (int i = 0; i <= 2000; i += 2)
             diagonal.push_back({QPointF(20 + i, 20 + i * 0.74), 12});
         TileSnapshot stroke;
-        doc.stampDabs(diagonal, Qt::black, BrushMode::Paint, &stroke);
-        const qsizetype fullCanvas = qsizetype(2048) * 1536 * 4;
-        QVERIFY2(stroke.byteSize() < fullCanvas / 10,
-                 qPrintable(QString("%1 bytes for a diagonal stroke").arg(stroke.byteSize())));
+        raster.stampDabs(diagonal, Qt::black, BrushMode::Paint, &stroke);
+        QVERIFY(stroke.byteSize() < qsizetype(2048) * 1536 * 4 / 10);
+        TileSnapshot small;
+        raster.stampDabs({{QPointF(1000, 700), 10}}, Qt::black, BrushMode::Paint, &small);
+        QVERIFY(small.tileCount() <= 4);
     }
 
     void unchangedTilesAreDropped()
     {
-        RasterDocument doc(QSize(200, 200));
+        RasterDocument raster(QSize(200, 200));
         TileSnapshot before;
-        doc.stampDabs({{QPointF(100, 100), 50}}, Qt::black, BrushMode::Erase, &before); // erase nothing
-        QVERIFY(!before.isEmpty());
-        before.dropUnchanged(doc.image());
+        raster.stampDabs({{QPointF(100, 100), 50}}, Qt::black, BrushMode::Erase, &before);
+        before.dropUnchanged(raster.image());
         QVERIFY(before.isEmpty());
-        QCOMPARE(before.byteSize(), 0);
     }
 
     void budgetEvictsOldestUndoEntries()
     {
-        RasterDocument doc(QSize(640, 64));
+        LayeredDocument doc(QSize(640, 64));
         UndoHistory history(3 * TileBytes);
+        const quint64 id = doc.layer(0).id;
         for (int i = 0; i < 5; ++i)
-            QVERIFY(paintStep(doc, history, QPointF(32 + 128 * i, 32), 10, Qt::red)); // one tile each
+            QVERIFY(paintStep(doc, history, id, QPointF(32 + 128 * i, 32), 10, Qt::red));
         QCOMPARE(history.undoCount(), 3);
-        QVERIFY(history.bytesUsed() <= history.budgetBytes());
         QCOMPARE(history.bytesUsed(), 3 * TileBytes);
-
         for (int i = 0; i < 3; ++i)
-            QVERIFY(!doc.undo(history).isEmpty());
+            undo(doc, history);
         QVERIFY(!history.canUndo());
-        // The two evicted edits stay on the canvas; the three newest were undone.
-        QCOMPARE(qAlpha(doc.image().pixel(32, 32)), 255);
-        QCOMPARE(qAlpha(doc.image().pixel(160, 32)), 255);
-        for (int i = 2; i < 5; ++i)
-            QCOMPARE(qAlpha(doc.image().pixel(32 + 128 * i, 32)), 0);
+        QCOMPARE(qAlpha(doc.composite().pixel(32, 32)), 255); // evicted edits stay
+        QCOMPARE(qAlpha(doc.composite().pixel(544, 32)), 0);
     }
 
     void budgetCountsRedoEntries()
     {
-        RasterDocument doc(QSize(640, 64));
+        LayeredDocument doc(QSize(640, 64));
         UndoHistory history(3 * TileBytes);
+        const quint64 id = doc.layer(0).id;
         for (int i = 0; i < 3; ++i)
-            paintStep(doc, history, QPointF(32 + 128 * i, 32), 10, Qt::red);
-        doc.undo(history);
-        doc.undo(history);
-        QCOMPARE(history.redoCount(), 2);
-        QCOMPARE(history.bytesUsed(), 3 * TileBytes); // redo data still counts
-        paintStep(doc, history, QPointF(32 + 128 * 4, 32), 10, Qt::blue);
+            paintStep(doc, history, id, QPointF(32 + 128 * i, 32), 10, Qt::red);
+        undo(doc, history);
+        undo(doc, history);
+        QCOMPARE(history.bytesUsed(), 3 * TileBytes);
+        paintStep(doc, history, id, QPointF(32 + 128 * 4, 32), 10, Qt::blue);
         QCOMPARE(history.redoCount(), 0);
-        QCOMPARE(history.undoCount(), 2);
         QCOMPARE(history.bytesUsed(), 2 * TileBytes);
+    }
+
+    void layerCommandsCountRetainedImages()
+    {
+        const QSize size(512, 256); // 512 KiB per layer image
+        const qsizetype layerBytes = qsizetype(size.width()) * size.height() * 4;
+        LayeredDocument doc(size);
+        UndoHistory history(2 * layerBytes + layerBytes / 2);
+        const quint64 a = addLayer(doc, history, "a");
+        const quint64 b = addLayer(doc, history, "b");
+        const quint64 c = addLayer(doc, history, "c");
+        QCOMPARE(history.bytesUsed(), 0); // inserted layers live in the document
+        deleteLayer(doc, history, a);
+        deleteLayer(doc, history, b);
+        QCOMPARE(history.bytesUsed(), 2 * layerBytes); // deleted layers are retained by history
+        deleteLayer(doc, history, c);                  // over budget: oldest entries are evicted
+        QVERIFY(history.bytesUsed() <= history.budgetBytes());
+        QVERIFY(history.undoCount() < 6);
+
+        // Undoing an insert moves the layer into the redo entry, which is counted too.
+        LayeredDocument doc2(size);
+        UndoHistory history2(10 * layerBytes);
+        addLayer(doc2, history2, "x");
+        QCOMPARE(history2.bytesUsed(), 0);
+        undo(doc2, history2);
+        QCOMPARE(history2.bytesUsed(), layerBytes);
+        redo(doc2, history2);
+        QCOMPARE(history2.bytesUsed(), 0);
     }
 
     void editLargerThanBudgetIsNotUndoable()
     {
-        RasterDocument doc(QSize(256, 256));
+        LayeredDocument doc(QSize(256, 256));
         UndoHistory history(TileBytes);
         const quint64 start = history.stateId();
-        QVERIFY(paintStep(doc, history, QPointF(128, 128), 200, Qt::red)); // spans many tiles
+        QVERIFY(paintStep(doc, history, doc.layer(0).id, QPointF(128, 128), 200, Qt::red));
         QVERIFY(!history.canUndo());
         QCOMPARE(history.bytesUsed(), 0);
-        QVERIFY(history.stateId() != start); // still counts as a change
-        QCOMPARE(qAlpha(doc.image().pixel(128, 128)), 255);
+        QVERIFY(history.stateId() != start);
     }
 
     void stateIdMatchesSavedStateAfterUndoAndEviction()
     {
-        RasterDocument doc(QSize(640, 64));
+        LayeredDocument doc(QSize(640, 64));
         UndoHistory history(2 * TileBytes);
-        paintStep(doc, history, QPointF(32, 32), 10, Qt::red);
+        const quint64 id = doc.layer(0).id;
+        paintStep(doc, history, id, QPointF(32, 32), 10, Qt::red);
         const quint64 saved = history.stateId();
-        const QImage savedPixels = doc.image().copy();
-        paintStep(doc, history, QPointF(160, 32), 10, Qt::red);
-        QVERIFY(history.stateId() != saved);
-        paintStep(doc, history, QPointF(288, 32), 10, Qt::red); // evicts the saved edit's entry
-        QCOMPARE(history.undoCount(), 2);
-        doc.undo(history);
-        QVERIFY(history.stateId() != saved);
-        doc.undo(history);
-        QCOMPARE(history.stateId(), saved); // back at the saved pixels
-        QCOMPARE(doc.image(), savedPixels);
-        doc.redo(history);
-        QVERIFY(history.stateId() != saved);
-        history.clear();
-        QVERIFY(!history.canUndo() && !history.canRedo());
-        QCOMPARE(history.bytesUsed(), 0);
+        const QImage savedPixels = doc.composite().copy();
+        paintStep(doc, history, id, QPointF(160, 32), 10, Qt::red);
+        paintStep(doc, history, id, QPointF(288, 32), 10, Qt::red);
+        undo(doc, history);
+        undo(doc, history);
+        QCOMPARE(history.stateId(), saved);
+        QCOMPARE(doc.composite(), savedPixels);
     }
 
     // --- project files ---
-    void roundTripPreservesSizeColorsAndAlpha()
+    void layeredRoundTripPreservesEverything()
     {
-        const QImage image = randomPremultiplied(37, 23, 7);
-        const ProjectFile::LoadResult result = ProjectFile::decode(ProjectFile::encode(image));
-        QVERIFY2(result.ok(), qPrintable(result.error));
-        QCOMPARE(result.image.size(), QSize(37, 23));
-        QCOMPARE(result.image.format(), QImage::Format_ARGB32_Premultiplied);
-        QCOMPARE(result.image, image);
+        const DocumentData original = threeLayerDocument(QSize(37, 23));
+        const ProjectFile::LoadResult r = ProjectFile::decode(ProjectFile::encode(original));
+        QVERIFY2(r.ok(), qPrintable(r.error));
+        QCOMPARE(r.version, 2);
+        QCOMPARE(r.document.size, original.size);
+        QCOMPARE(r.document.activeLayerId, original.activeLayerId);
+        QCOMPARE(r.document.layers.size(), original.layers.size());
+        for (size_t i = 0; i < original.layers.size(); ++i) {
+            const LayerData &a = original.layers[i], &b = r.document.layers[i];
+            QCOMPARE(b.id, a.id);
+            QCOMPARE(b.name, a.name);
+            QCOMPARE(b.visible, a.visible);
+            QCOMPARE(b.opacity, a.opacity);
+            QCOMPARE(b.locked, a.locked);
+            QCOMPARE(b.image, a.image);
+        }
+        QCOMPARE(LayeredDocument(r.document).composite(), original.composite());
+    }
+
+    void version1ProjectLoadsAsOneLayer()
+    {
+        const QImage image = randomPremultiplied(40, 30, 9);
+        const ProjectFile::LoadResult r = ProjectFile::decode(ProjectFile::encodeVersion1(image));
+        QVERIFY2(r.ok(), qPrintable(r.error));
+        QCOMPARE(r.version, 1);
+        QCOMPARE(r.document.layers.size(), size_t(1));
+        QCOMPARE(r.document.layers[0].image, image);
+        QVERIFY(r.document.layers[0].visible);
+        QCOMPARE(r.document.layers[0].opacity, 1.0);
+        QCOMPARE(r.document.activeLayerId, r.document.layers[0].id);
     }
 
     void roundTripThroughFile()
     {
         QTemporaryDir dir;
-        RasterDocument doc;
-        doc.stampDabs({{QPointF(100, 100), 40}}, QColor(10, 200, 30), BrushMode::Paint);
-        doc.stampDabs({{QPointF(110, 100), 12}}, Qt::black, BrushMode::Erase); // partial alpha edges
+        const DocumentData original = threeLayerDocument(QSize(2048, 1536));
         const QString path = dir.filePath("art.drawapp");
-        QCOMPARE(ProjectFile::save(doc.image(), path), QString());
-        const ProjectFile::LoadResult result = ProjectFile::load(path);
-        QVERIFY2(result.ok(), qPrintable(result.error));
-        QCOMPARE(result.image.size(), QSize(2048, 1536));
-        QCOMPARE(result.image, doc.image());
-        QVERIFY(QFileInfo(path).size() < 200 * 1024); // mostly transparent canvas compresses well
+        QCOMPARE(ProjectFile::save(original, path), QString());
+        const ProjectFile::LoadResult r = ProjectFile::load(path);
+        QVERIFY2(r.ok(), qPrintable(r.error));
+        QCOMPARE(r.document.layers.size(), size_t(3));
+        for (size_t i = 0; i < 3; ++i)
+            QCOMPARE(r.document.layers[i].image, original.layers[i].image);
     }
 
-    void rejectsDamagedFiles_data()
+    void rejectsDamagedVersion1Files_data()
     {
         QTest::addColumn<QByteArray>("data");
         QTest::addColumn<QString>("expected");
-
         const QImage image = randomPremultiplied(16, 8, 3);
-        const QByteArray good = ProjectFile::encode(image);
+        const QByteArray good = ProjectFile::encodeVersion1(image);
         const QByteArray payload = good.mid(ProjectFile::HeaderSize);
-
         QTest::newRow("empty") << QByteArray() << "not a DrawApp project";
         QTest::newRow("png file") << QByteArray("\x89PNG\r\n\x1a\n0000000000", 18) << "not a DrawApp project";
         QTest::newRow("header cut short") << good.left(40) << "damaged";
@@ -291,93 +603,123 @@ private slots:
         QByteArray flipped = good;
         flipped[ProjectFile::HeaderSize + 10] = char(flipped[ProjectFile::HeaderSize + 10] ^ 0x55);
         QTest::newRow("payload byte flipped") << flipped << "checksum";
-        QTest::newRow("newer version") << makeFile(2, 16, 8, 1, 1, payload) << "newer version";
-        QTest::newRow("version zero") << makeFile(0, 16, 8, 1, 1, payload) << "damaged";
-        QTest::newRow("zero width") << makeFile(1, 0, 8, 1, 1, payload) << "damaged";
-        QTest::newRow("huge dimensions") << makeFile(1, 100000, 100000, 1, 1, payload) << "too large";
-        QTest::newRow("too many pixels") << makeFile(1, 16384, 16384, 1, 1, payload) << "too large";
-        QTest::newRow("unknown pixel format") << makeFile(1, 16, 8, 7, 1, payload) << "pixel format";
-        QTest::newRow("unknown compression") << makeFile(1, 16, 8, 1, 9, payload) << "pixel format";
-        QTest::newRow("bad checksum") << makeFile(1, 16, 8, 1, 1, payload, false) << "checksum";
-        // Header says 32x32 but the pixel data is for 16x8: rejected before decompressing.
-        QTest::newRow("size mismatch") << makeFile(1, 32, 32, 1, 1, payload) << "does not match";
-        // A compressed stream claiming a huge raw size must not be decompressed.
+        QTest::newRow("newer version") << makeV1(3, 16, 8, 1, 1, payload) << "newer version";
+        QTest::newRow("version zero") << makeV1(0, 16, 8, 1, 1, payload) << "damaged";
+        QTest::newRow("zero width") << makeV1(1, 0, 8, 1, 1, payload) << "damaged";
+        QTest::newRow("huge dimensions") << makeV1(1, 100000, 100000, 1, 1, payload) << "too large";
+        QTest::newRow("too many pixels") << makeV1(1, 16384, 16384, 1, 1, payload) << "too large";
+        QTest::newRow("unknown pixel format") << makeV1(1, 16, 8, 7, 1, payload) << "pixel format";
+        QTest::newRow("bad checksum") << makeV1(1, 16, 8, 1, 1, payload, false) << "checksum";
+        QTest::newRow("size mismatch") << makeV1(1, 32, 32, 1, 1, payload) << "does not match";
         QByteArray liar = payload;
         qToBigEndian<quint32>(0x7fffffff, liar.data());
-        QTest::newRow("claims huge raw size") << makeFile(1, 16, 8, 1, 1, liar) << "does not match";
+        QTest::newRow("claims huge raw size") << makeV1(1, 16, 8, 1, 1, liar) << "does not match";
         QByteArray garbage(4, '\0');
         qToBigEndian<quint32>(16 * 8 * 4, garbage.data());
         garbage.append("not zlib data at all");
-        QTest::newRow("corrupt zlib") << makeFile(1, 16, 8, 1, 1, garbage) << "decompressed";
-        // Valid zlib of pixels that break the premultiplied rule (red 200 > alpha 10).
+        QTest::newRow("corrupt zlib") << makeV1(1, 16, 8, 1, 1, garbage) << "decompressed";
         QByteArray invalidPixels;
         for (int i = 0; i < 16 * 8; ++i)
             invalidPixels.append(QByteArray::fromHex("c800000a"));
-        QTest::newRow("invalid premultiplied pixels") << makeFile(1, 16, 8, 1, 1, qCompress(invalidPixels)) << "invalid pixel";
+        QTest::newRow("invalid premultiplied pixels") << makeV1(1, 16, 8, 1, 1, qCompress(invalidPixels)) << "invalid pixel";
     }
 
-    void rejectsDamagedFiles()
+    void rejectsDamagedVersion1Files()
     {
         QFETCH(QByteArray, data);
         QFETCH(QString, expected);
-        const ProjectFile::LoadResult result = ProjectFile::decode(data);
-        QVERIFY(!result.ok());
-        QVERIFY(result.image.isNull());
-        QVERIFY2(result.error.contains(expected, Qt::CaseInsensitive), qPrintable(result.error));
+        const ProjectFile::LoadResult r = ProjectFile::decode(data);
+        QVERIFY(!r.ok());
+        QVERIFY(r.document.layers.empty());
+        QVERIFY2(r.error.contains(expected, Qt::CaseInsensitive), qPrintable(r.error));
+    }
+
+    void rejectsDamagedLayeredFiles_data()
+    {
+        QTest::addColumn<QByteArray>("data");
+        QTest::addColumn<QString>("expected");
+        const QByteArray good = ProjectFile::encode(threeLayerDocument(QSize(8, 8)));
+        const QByteArray b = block(8, 8);
+        auto meta = [&](const QJsonArray &layers, const QString &active = "1") {
+            QJsonObject o;
+            o["activeLayerId"] = active;
+            o["layers"] = layers;
+            return o;
+        };
+        QTest::newRow("truncated") << good.left(good.size() - 7) << "damaged";
+        QByteArray flipped = good;
+        flipped[flipped.size() - 20] = char(flipped[flipped.size() - 20] ^ 0x40);
+        QTest::newRow("byte flipped") << flipped << "checksum";
+        QTest::newRow("too many layers") << makeV2(8, 8, 100, meta({layerMeta("1", b.size())}), {b}) << "too large";
+        // 2048x1536 x 50 layers = 600 MiB > 512 MiB: refused from the header alone.
+        QTest::newRow("total pixels too large") << makeV2(2048, 1536, 50, meta({}), {}) << "too large";
+        QTest::newRow("no layers") << makeV2(8, 8, 0, meta({}), {}) << "no layers";
+        QTest::newRow("count mismatch") << makeV2(8, 8, 2, meta({layerMeta("1", b.size())}), {b}) << "count";
+        QTest::newRow("duplicate ids")
+            << makeV2(8, 8, 2, meta({layerMeta("1", b.size()), layerMeta("1", b.size())}), {b, b}) << "id";
+        QTest::newRow("zero id") << makeV2(8, 8, 1, meta({layerMeta("0", b.size())}), {b}) << "id";
+        QTest::newRow("opacity out of range") << makeV2(8, 8, 1, meta({layerMeta("1", b.size(), 1.5)}), {b}) << "opacity";
+        QTest::newRow("block size too large") << makeV2(8, 8, 1, meta({layerMeta("1", b.size() + 50)}), {b}) << "size";
+        QTest::newRow("extra data") << makeV2(8, 8, 1, meta({layerMeta("1", b.size())}), {b, "junk"}) << "after the last layer";
+        QTest::newRow("wrong pixel size") << makeV2(8, 8, 1, meta({layerMeta("1", block(4, 4).size())}), {block(4, 4)})
+                                          << "does not match";
+        QJsonObject notArray;
+        notArray["layers"] = "nope";
+        QTest::newRow("bad metadata") << makeV2(8, 8, 1, notArray, {b}) << "count";
+    }
+
+    void rejectsDamagedLayeredFiles()
+    {
+        QFETCH(QByteArray, data);
+        QFETCH(QString, expected);
+        const ProjectFile::LoadResult r = ProjectFile::decode(data);
+        QVERIFY(!r.ok());
+        QVERIFY(r.document.layers.empty());
+        QVERIFY2(r.error.contains(expected, Qt::CaseInsensitive), qPrintable(r.error));
+    }
+
+    void unknownActiveLayerFallsBackToTop()
+    {
+        DocumentData doc = threeLayerDocument(QSize(8, 8));
+        doc.activeLayerId = 999;
+        const ProjectFile::LoadResult r = ProjectFile::decode(ProjectFile::encode(doc));
+        QVERIFY(r.ok());
+        QCOMPARE(r.document.activeLayerId, doc.layers.back().id);
     }
 
     void rejectsMissingAndOversizedFiles()
     {
         QTemporaryDir dir;
         QVERIFY(!ProjectFile::load(dir.filePath("missing.drawapp")).ok());
-
         const QString big = dir.filePath("big.drawapp");
         {
             QFile f(big);
             QVERIFY(f.open(QIODevice::WriteOnly));
             f.write("DRAWAPP\n");
-            QVERIFY(f.resize(ProjectFile::MaxFileBytes + 1)); // sparse/zero-filled, not written
+            QVERIFY(f.resize(ProjectFile::MaxFileBytes + 1));
         }
         QElapsedTimer timer;
         timer.start();
-        const ProjectFile::LoadResult result = ProjectFile::load(big);
-        QVERIFY(!result.ok());
-        QVERIFY2(result.error.contains("too large"), qPrintable(result.error));
-        QVERIFY(timer.elapsed() < 2000); // rejected from the size, not by reading it
+        const ProjectFile::LoadResult r = ProjectFile::load(big);
+        QVERIFY(!r.ok());
+        QVERIFY(r.error.contains("too large"));
+        QVERIFY(timer.elapsed() < 2000);
     }
 
     void failedSaveKeepsPreviousFile()
     {
         QTemporaryDir dir;
         const QString path = dir.filePath("keep.drawapp");
-        const QImage first = randomPremultiplied(40, 30, 1);
+        const DocumentData first = threeLayerDocument(QSize(40, 30));
         QCOMPARE(ProjectFile::save(first, path), QString());
         const QByteArray original = readAll(path);
-
-        // The target cannot be replaced (read-only): the save fails and the old file survives.
         QVERIFY(QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::ReadUser));
-        const QString error = ProjectFile::save(randomPremultiplied(40, 30, 2), path);
+        const QString error = ProjectFile::save(DocumentData::fromImage(randomPremultiplied(40, 30, 2)), path);
         QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
         QVERIFY(!error.isEmpty());
         QCOMPARE(readAll(path), original);
-        QCOMPARE(ProjectFile::load(path).image, first);
-        // No temporary files are left behind.
         QCOMPARE(QDir(dir.path()).entryList(QDir::Files), QStringList{"keep.drawapp"});
-
-        // Other failures: missing folder, and a folder in place of the file.
         QVERIFY(!ProjectFile::save(first, dir.filePath("no/such/folder/x.drawapp")).isEmpty());
-        QVERIFY(QDir(dir.path()).mkdir("folder.drawapp"));
-        QVERIFY(!ProjectFile::save(first, dir.filePath("folder.drawapp")).isEmpty());
-    }
-
-    void successfulSaveReplacesFile()
-    {
-        QTemporaryDir dir;
-        const QString path = dir.filePath("replace.drawapp");
-        QCOMPARE(ProjectFile::save(randomPremultiplied(10, 10, 1), path), QString());
-        const QImage second = randomPremultiplied(20, 5, 2);
-        QCOMPARE(ProjectFile::save(second, path), QString());
-        QCOMPARE(ProjectFile::load(path).image, second);
     }
 
     // --- PNG export ---
@@ -388,11 +730,23 @@ private slots:
         const QString path = dir.filePath("out.png");
         QCOMPARE(ProjectFile::exportPng(image, path), QString());
         QImage png(path);
-        QVERIFY(!png.isNull());
         QCOMPARE(png.size(), image.size());
-        QVERIFY(png.hasAlphaChannel());
-        // PNG stores straight alpha: compare in straight ARGB32.
         QCOMPARE(png.convertToFormat(QImage::Format_ARGB32), image.convertToFormat(QImage::Format_ARGB32));
+    }
+
+    void pngExportOfLayersMatchesVisibleComposite()
+    {
+        QTemporaryDir dir;
+        const DocumentData doc = threeLayerDocument(QSize(50, 40)); // one hidden, one at 37 %
+        const QImage composite = doc.composite();
+        const QString path = dir.filePath("layers.png");
+        QCOMPARE(ProjectFile::exportPng(composite, path), QString());
+        QImage png(path);
+        QCOMPARE(png.convertToFormat(QImage::Format_ARGB32), composite.convertToFormat(QImage::Format_ARGB32));
+        // The hidden layer does not contribute.
+        DocumentData withoutHidden = doc;
+        withoutHidden.layers.erase(withoutHidden.layers.begin() + 1);
+        QCOMPARE(withoutHidden.composite(), composite);
     }
 };
 

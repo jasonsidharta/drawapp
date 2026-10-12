@@ -1,6 +1,8 @@
 // Recovery file format and RecoveryManager (worker writes, stale completions, orphans).
 
+#include "LayeredDocument.h"
 #include "ProjectFile.h"
+#include "RasterDocument.h"
 #include "RecoveryFile.h"
 #include "RecoveryManager.h"
 
@@ -90,9 +92,9 @@ private slots:
         const QImage image = randomPremultiplied(33, 21, 5);
         RecoveryFile::Metadata m = meta(7, 42, QStringLiteral("C:/art/picture.drawapp"));
         m.originalUrl = QStringLiteral("file:///C:/art/picture.drawapp");
-        const RecoveryFile::Contents c = RecoveryFile::decode(RecoveryFile::encode(image, m));
+        const RecoveryFile::Contents c = RecoveryFile::decode(RecoveryFile::encode(DocumentData::fromImage(image), m));
         QVERIFY2(c.ok(), qPrintable(c.error));
-        QCOMPARE(c.image, image);
+        QCOMPARE(c.document.layers[0].image, image);
         QCOMPARE(c.metadata.documentId, quint64(7));
         QCOMPARE(c.metadata.revision, quint64(42));
         QCOMPARE(c.metadata.originalPath, m.originalPath);
@@ -103,9 +105,9 @@ private slots:
     void corruptFilesAreRejected_data()
     {
         QTest::addColumn<QByteArray>("data");
-        const QByteArray good = RecoveryFile::encode(randomPremultiplied(8, 8, 1), meta(1, 1));
+        const QByteArray good = RecoveryFile::encode(DocumentData::fromImage(randomPremultiplied(8, 8, 1)), meta(1, 1));
         QTest::newRow("empty") << QByteArray();
-        QTest::newRow("project file instead") << ProjectFile::encode(randomPremultiplied(8, 8, 1));
+        QTest::newRow("project file instead") << ProjectFile::encode(DocumentData::fromImage(randomPremultiplied(8, 8, 1)));
         QTest::newRow("header cut short") << good.left(30);
         QTest::newRow("truncated") << good.left(good.size() - 10);
         QTest::newRow("trailing bytes") << good + "x";
@@ -129,7 +131,61 @@ private slots:
         QFETCH(QByteArray, data);
         const RecoveryFile::Contents c = RecoveryFile::decode(data);
         QVERIFY(!c.ok());
-        QVERIFY(c.image.isNull());
+        QVERIFY(c.document.layers.empty());
+    }
+
+    void layeredRoundTrip()
+    {
+        DocumentData doc;
+        doc.size = QSize(24, 16);
+        for (int i = 0; i < 4; ++i) {
+            LayerData layer;
+            layer.id = quint64(100 + i);
+            layer.name = QStringLiteral("L%1").arg(i);
+            layer.image = randomPremultiplied(24, 16, quint32(i + 7));
+            layer.visible = i != 2;
+            layer.opacity = 0.25 * (i + 1);
+            layer.locked = i == 3;
+            doc.layers.push_back(layer);
+        }
+        doc.activeLayerId = 102;
+        const RecoveryFile::Contents c = RecoveryFile::decode(RecoveryFile::encode(doc, meta(5, 6)));
+        QVERIFY2(c.ok(), qPrintable(c.error));
+        QCOMPARE(c.recoveryVersion, quint32(2));
+        QCOMPARE(c.projectVersion, 2);
+        QCOMPARE(c.document.activeLayerId, quint64(102));
+        QCOMPARE(c.document.layers.size(), size_t(4));
+        for (size_t i = 0; i < 4; ++i) {
+            QCOMPARE(c.document.layers[i].id, doc.layers[i].id);
+            QCOMPARE(c.document.layers[i].name, doc.layers[i].name);
+            QCOMPARE(c.document.layers[i].visible, doc.layers[i].visible);
+            QCOMPARE(c.document.layers[i].opacity, doc.layers[i].opacity);
+            QCOMPARE(c.document.layers[i].locked, doc.layers[i].locked);
+            QCOMPARE(c.document.layers[i].image, doc.layers[i].image);
+        }
+    }
+
+    void legacySingleLayerRecoveryIsReadAsOneLayer()
+    {
+        const QImage image = randomPremultiplied(30, 20, 3);
+        const RecoveryFile::Contents c = RecoveryFile::decode(RecoveryFile::encodeVersion1(image, meta(1, 4, "C:/old.drawapp")));
+        QVERIFY2(c.ok(), qPrintable(c.error));
+        QCOMPARE(c.recoveryVersion, quint32(1));
+        QCOMPARE(c.projectVersion, 1);
+        QCOMPARE(c.document.layers.size(), size_t(1));
+        QCOMPARE(c.document.layers[0].image, image);
+        QCOMPARE(c.metadata.originalPath, QStringLiteral("C:/old.drawapp"));
+    }
+
+    void snapshotIsIsolatedFromLaterEdits()
+    {
+        LayeredDocument live(QSize(64, 64));
+        const DocumentData snapshot = live.snapshot(); // shares pixels until the live side writes
+        const QImage before = snapshot.layers[0].image.copy();
+        RasterDocument::stampDabs(live.pixels(0), {{QPointF(32, 32), 40}}, Qt::red, BrushMode::Paint);
+        QVERIFY(live.layer(0).image != before);
+        QCOMPARE(snapshot.layers[0].image, before); // the worker's copy did not change
+        QVERIFY(snapshot.layers[0].image.constBits() != live.layer(0).image.constBits());
     }
 
     // --- manager writes ---
@@ -141,7 +197,7 @@ private slots:
         QVERIFY(QFileInfo(m.recoveryFilePath()).absolutePath() == QFileInfo(dir.filePath("recovery")).absoluteFilePath());
         QSignalSpy spy(&m, &RecoveryManager::writeFinished);
         const QImage image = randomPremultiplied(64, 40, 2);
-        QVERIFY(m.requestWrite(image, meta(1, 5)));
+        QVERIFY(m.requestWrite(DocumentData::fromImage(image), meta(1, 5)));
         QVERIFY(m.isWriting());
         QVERIFY(waitForWrite(spy));
         QCOMPARE(spy.first().at(0).toBool(), true);  // committed
@@ -150,7 +206,7 @@ private slots:
         QVERIFY(m.hasRecoveryFile());
         const RecoveryFile::Contents c = RecoveryFile::load(m.recoveryFilePath());
         QVERIFY2(c.ok(), qPrintable(c.error));
-        QCOMPARE(c.image, image);
+        QCOMPARE(c.document.layers[0].image, image);
         QCOMPARE(c.metadata.revision, quint64(5));
         // Only the recovery file and the session lock: no temporary files left behind.
         QCOMPARE(QDir(dir.filePath("recovery")).entryList(QDir::Files).size(), 2);
@@ -164,11 +220,11 @@ private slots:
         QSemaphore gate;
         m.setBeforeCommitHookForTesting([&] { gate.acquire(); });
         QSignalSpy spy(&m, &RecoveryManager::writeFinished);
-        QVERIFY(m.requestWrite(randomPremultiplied(16, 16, 1), meta(1, 1)));
-        QVERIFY(!m.requestWrite(randomPremultiplied(16, 16, 2), meta(1, 2)));
+        QVERIFY(m.requestWrite(DocumentData::fromImage(randomPremultiplied(16, 16, 1)), meta(1, 1)));
+        QVERIFY(!m.requestWrite(DocumentData::fromImage(randomPremultiplied(16, 16, 2)), meta(1, 2)));
         gate.release();
         QVERIFY(waitForWrite(spy));
-        QVERIFY(m.requestWrite(randomPremultiplied(16, 16, 3), meta(1, 3)));
+        QVERIFY(m.requestWrite(DocumentData::fromImage(randomPremultiplied(16, 16, 3)), meta(1, 3)));
         gate.release();
         QVERIFY(waitForWrite(spy, 2));
         QCOMPARE(RecoveryFile::load(m.recoveryFilePath()).metadata.revision, quint64(3));
@@ -180,13 +236,13 @@ private slots:
         RecoveryManager m(dir.path());
         QCOMPARE(m.start(), QString());
         QSignalSpy spy(&m, &RecoveryManager::writeFinished);
-        QVERIFY(m.requestWrite(randomPremultiplied(16, 16, 1), meta(1, 1)));
+        QVERIFY(m.requestWrite(DocumentData::fromImage(randomPremultiplied(16, 16, 1)), meta(1, 1)));
         QVERIFY(waitForWrite(spy));
         QVERIFY(QFile::exists(m.recoveryFilePath()));
 
         QSemaphore gate;
         m.setBeforeCommitHookForTesting([&] { gate.acquire(); });
-        QVERIFY(m.requestWrite(randomPremultiplied(16, 16, 2), meta(1, 2)));
+        QVERIFY(m.requestWrite(DocumentData::fromImage(randomPremultiplied(16, 16, 2)), meta(1, 2)));
         m.discard(); // for example the document was saved while the write was running
         QVERIFY(!QFile::exists(m.recoveryFilePath()));
         gate.release();
@@ -205,18 +261,18 @@ private slots:
         QSignalSpy spy(&m, &RecoveryManager::writeFinished);
         QSemaphore gate;
         m.setBeforeCommitHookForTesting([&] { gate.acquire(); });
-        QVERIFY(m.requestWrite(randomPremultiplied(16, 16, 1), meta(1, 9))); // old document
+        QVERIFY(m.requestWrite(DocumentData::fromImage(randomPremultiplied(16, 16, 1)), meta(1, 9))); // old document
         m.discard();                                                          // New / Open
         gate.release();
         QVERIFY(waitForWrite(spy));
         QVERIFY(spy.at(0).at(1).toBool());
         const QImage newer = randomPremultiplied(16, 16, 2);
-        QVERIFY(m.requestWrite(newer, meta(2, 1))); // new document
+        QVERIFY(m.requestWrite(DocumentData::fromImage(newer), meta(2, 1))); // new document
         gate.release();
         QVERIFY(waitForWrite(spy, 2));
         const RecoveryFile::Contents c = RecoveryFile::load(m.recoveryFilePath());
         QCOMPARE(c.metadata.documentId, quint64(2));
-        QCOMPARE(c.image, newer);
+        QCOMPARE(c.document.layers[0].image, newer);
     }
 
     void failedWriteKeepsPreviousRecovery()
@@ -226,18 +282,18 @@ private slots:
         QCOMPARE(m.start(), QString());
         QSignalSpy spy(&m, &RecoveryManager::writeFinished);
         const QImage first = randomPremultiplied(16, 16, 1);
-        QVERIFY(m.requestWrite(first, meta(1, 1)));
+        QVERIFY(m.requestWrite(DocumentData::fromImage(first), meta(1, 1)));
         QVERIFY(waitForWrite(spy));
         const QByteArray before = readAll(m.recoveryFilePath());
 
         QVERIFY(QFile::setPermissions(m.recoveryFilePath(), QFileDevice::ReadOwner | QFileDevice::ReadUser));
-        QVERIFY(m.requestWrite(randomPremultiplied(16, 16, 2), meta(1, 2)));
+        QVERIFY(m.requestWrite(DocumentData::fromImage(randomPremultiplied(16, 16, 2)), meta(1, 2)));
         QVERIFY(waitForWrite(spy, 2));
         QFile::setPermissions(m.recoveryFilePath(), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
         QCOMPARE(spy.at(1).at(0).toBool(), false);
         QVERIFY(!spy.at(1).at(2).toString().isEmpty()); // error message
         QCOMPARE(readAll(m.recoveryFilePath()), before);
-        QCOMPARE(RecoveryFile::load(m.recoveryFilePath()).image, first);
+        QCOMPARE(RecoveryFile::load(m.recoveryFilePath()).document.layers[0].image, first);
         QCOMPARE(QDir(dir.path()).entryList(QDir::Files).size(), 2); // no temporary leftovers
     }
 
@@ -247,7 +303,7 @@ private slots:
         {
             RecoveryManager m(dir.path());
             QCOMPARE(m.start(), QString());
-            QCOMPARE(m.writeNow(randomPremultiplied(8, 8, 1), meta(1, 1)), QString());
+            QCOMPARE(m.writeNow(DocumentData::fromImage(randomPremultiplied(8, 8, 1)), meta(1, 1)), QString());
             QVERIFY(QFile::exists(m.recoveryFilePath()));
             m.finishCleanly();
             QVERIFY(QDir(dir.path()).entryList(QDir::Files).isEmpty()); // file and lock removed
@@ -255,7 +311,7 @@ private slots:
         {
             RecoveryManager m(dir.path());
             QCOMPARE(m.start(), QString());
-            QCOMPARE(m.writeNow(randomPremultiplied(8, 8, 2), meta(1, 2)), QString());
+            QCOMPARE(m.writeNow(DocumentData::fromImage(randomPremultiplied(8, 8, 2)), meta(1, 2)), QString());
             m.releaseKeepingFile();
             QCOMPARE(QDir(dir.path()).entryList({"*.drawrecovery"}, QDir::Files).size(), 1);
             QVERIFY(QDir(dir.path()).entryList({"*.lock"}, QDir::Files).isEmpty());
@@ -270,7 +326,7 @@ private slots:
         {
             RecoveryManager ended(dir.path());
             QCOMPARE(ended.start(), QString());
-            QCOMPARE(ended.writeNow(image, meta(3, 8, QStringLiteral("C:/x.drawapp"))), QString());
+            QCOMPARE(ended.writeNow(DocumentData::fromImage(image), meta(3, 8, QStringLiteral("C:/x.drawapp"))), QString());
             ended.releaseKeepingFile(); // like a crash: the recovery file remains, nobody owns it
         }
         // Leftover temporary file from a write interrupted by the crash.
@@ -282,7 +338,7 @@ private slots:
         const QList<RecoveryManager::Orphan> orphans = live.findOrphans();
         QCOMPARE(orphans.size(), 1);
         QVERIFY(orphans.first().contents.ok());
-        QCOMPARE(orphans.first().contents.image, image);
+        QCOMPARE(orphans.first().contents.document.layers[0].image, image);
         QCOMPARE(orphans.first().contents.metadata.originalPath, QStringLiteral("C:/x.drawapp"));
         QVERIFY(!QFile::exists(dir.filePath(orphanPath + ".Ab12Cd")));
 
@@ -290,7 +346,7 @@ private slots:
         QCOMPARE(live.adopt(orphans.first()), QString());
         QVERIFY(!QFile::exists(orphans.first().path));
         QVERIFY(live.hasRecoveryFile());
-        QCOMPARE(RecoveryFile::load(live.recoveryFilePath()).image, image);
+        QCOMPARE(RecoveryFile::load(live.recoveryFilePath()).document.layers[0].image, image);
         QVERIFY(live.findOrphans().isEmpty());
     }
 
@@ -299,7 +355,7 @@ private slots:
         QTemporaryDir dir;
         RecoveryManager first(dir.path());
         QCOMPARE(first.start(), QString());
-        QCOMPARE(first.writeNow(randomPremultiplied(8, 8, 1), meta(1, 1)), QString());
+        QCOMPARE(first.writeNow(DocumentData::fromImage(randomPremultiplied(8, 8, 1)), meta(1, 1)), QString());
         RecoveryManager second(dir.path());
         QCOMPARE(second.start(), QString());
         QVERIFY(second.findOrphans().isEmpty()); // first still holds its lock
@@ -323,7 +379,7 @@ private slots:
     void discardedOrphanIsRemoved()
     {
         QTemporaryDir dir;
-        writeFile(dir.filePath("session-dead.drawrecovery"), RecoveryFile::encode(randomPremultiplied(8, 8, 1), meta(1, 1)));
+        writeFile(dir.filePath("session-dead.drawrecovery"), RecoveryFile::encode(DocumentData::fromImage(randomPremultiplied(8, 8, 1)), meta(1, 1)));
         RecoveryManager m(dir.path());
         QCOMPARE(m.start(), QString());
         const QList<RecoveryManager::Orphan> orphans = m.findOrphans();
@@ -339,7 +395,7 @@ private slots:
         writeFile(dir.filePath("blocked"), "a file where the folder should be");
         RecoveryManager m(dir.filePath("blocked/recovery"));
         QVERIFY(!m.start().isEmpty());
-        QVERIFY(!m.requestWrite(randomPremultiplied(8, 8, 1), meta(1, 1)));
+        QVERIFY(!m.requestWrite(DocumentData::fromImage(randomPremultiplied(8, 8, 1)), meta(1, 1)));
         QVERIFY(m.findOrphans().isEmpty());
     }
 };

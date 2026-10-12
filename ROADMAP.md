@@ -2,57 +2,56 @@
 
 ## Milestone 0: drawing prototype (done on Windows)
 
-Window and toolbar; one raster canvas (2048 × 1536); round brush with size and color; eraser to
-transparency; mouse, pen and touch input; pressure-controlled size when valid; zoom and pan;
-clear. All host criteria passed on Windows 11 except pen pressure on real hardware (synthetic
-tablet events only). Commit `bb3e9a2`.
+One raster canvas (2048 × 1536), round brush and eraser, mouse/pen/touch input, zoom and pan,
+clear. Pen pressure verified only with synthetic tablet events. Commit `bb3e9a2`.
 
 ## Milestone 1: undo/redo and explicit save/open (done on Windows)
 
-Tile-snapshot undo/redo (stroke, eraser stroke, clear) under a 128 MiB budget; versioned
-`.drawapp` format with validation; atomic saving; New/Open/Save/Save As with unsaved-changes
-prompts; PNG export. Verified by `tst_document`, `tst_canvas` and a manual GUI session. Android
-rebuilt with a development-signed debug APK (not launched). Commit `8ccad84`.
-
-Correction recorded there: atomic saving alone does not protect unsaved strokes after a crash;
-that is milestone 2.
+Tile-snapshot undo/redo under a 128 MiB budget; versioned `.drawapp`; atomic saving; New/Open/
+Save/Save As with unsaved-changes prompts; PNG export. Commit `8ccad84`.
 
 ## Milestone 2: crash recovery (done on Windows)
 
+Per-session recovery files in the app data folder, 10 s autosave, worker-thread writes with
+generation-gated atomic commits, Restore/Discard on start, verified with forced kills. The loss
+window is the interval plus write time, not "only the current stroke". Mobile recovery is
+unverified. Commit `a98ec27`.
+
+## Milestone 3: raster layers (done on Windows; not committed yet)
+
 | Criterion | Status | How verified |
 |---|---|---|
-| Autosave modified documents to a separate recovery file in the app data folder | Done | `autosaveFollowsUnsavedChanges`; real app wrote `%APPDATA%\DrawApp\recovery\session-*.drawrecovery` |
-| Configurable interval, 10 s default | Done | `autosaveInterval` / `DRAWAPP_AUTOSAVE_MS`; real app ticks measured 10 000–10 001 ms apart |
-| UI-thread snapshot, worker encode/write, worker never touches the canvas | Done | Design (private `QImage` copy); snapshot 2.1–3.7 ms measured |
-| One write at a time; stale writes cannot replace newer data or recreate cleaned-up files | Done | `onlyOneWriteAtATime`, `staleWriteDoesNotRecreateDiscardedFile`, `staleWriteCannotReplaceNewerDocument`, `writeStillRunningWhenDocumentIsReplacedIsDropped` (worker held on a semaphore) |
-| Atomic recovery writes; interrupted write keeps the previous recovery | Done | `failedWriteKeepsPreviousRecovery`; 8 forced kills during worst-case writes, every recovery file valid by an independent checker; the kill that left a temporary file was cleaned up on the next start |
-| Restore or Discard on start; restored work stays unsaved | Done | `restoreAfterCrash`, `discardRecoveryAfterCrash`; real app: prompt, Restore (title `*manual1.drawapp`), Discard via the button |
-| Save / New / Open / Discard / exit handled; cancelled or failed actions keep recovery | Done | `newOpenAndFailedSaveHandleRecovery`, `shutdownKeepsOrRemovesRecovery`, `autosaveFollowsUnsavedChanges`; real normal exit left an empty recovery folder |
-| Corrupt recovery files do not block startup | Done | `corruptFilesAreRejected` (10 cases), `damagedOrphansAreSetAside`, `corruptRecoveryDoesNotBlockStartup`; real app showed a warning, moved the file to `.damaged`, kept working |
-| User's project file never written by recovery | Done | `projectFileIsNeverTouchedByAutosave`; real kills: SHA-256 of `manual1.drawapp` and `noise.drawapp` unchanged |
-| Measured loss window | Done | BENCHMARKS.md: ≤ 9.3 s change-to-recovery observed at 10 s; stroke made 1.7 s before a kill was lost, earlier strokes restored |
+| Layer model: stable id, name, raster, visibility, opacity, lock; ordered stack; active layer | Done | `tst_document` layer tests |
+| Normal compositing with opacity; transparency kept; erasing an upper layer reveals lower ones | Done | `compositeOrderOpacityAndVisibility`, `compositeKeepsTransparency`, `erasingUpperLayerRevealsLowerLayer`, `strokesAffectOnlyTheActiveLayer` |
+| Panel: add, select, rename, duplicate, delete, up/down, visibility, lock, opacity | Done | `tst_ui` drives the real Main.qml panel (offscreen) building a Background/Sketch/Color/Line art illustration; screenshots inspected |
+| At least one layer kept; predictable active layer after delete and undo | Done | `keepsAtLeastOneLayerAndSelectingIsNotAnEdit`, `deletingActiveLayerSelectsTheLayerBelow`, `activeLayerAfterDeleteAndUndo` |
+| Brush/eraser only on the active layer; hidden/locked layers refuse painting with an explanation | Done | `strokesAffectOnlyTheActiveLayer`, `hiddenAndLockedLayersRejectPainting` (mouse and pen), `tst_ui` banner text |
+| Clear Active Layer replaces Clear | Done | toolbar; refused on hidden/locked layers |
+| Undo/redo of all layer operations; one opacity drag = one step; selection not an edit | Done | `layerOperationsAreUndoableOneStepEach`, `opacityDragEndingAtItsStartIsNotAnEdit`, `tst_ui` slider drag |
+| Undo after deletion and reordering targets the right layer | Done | `undoAfterReorderTargetsTheRightLayer`, `undoAfterDeletionRestoresLayerAndPixels` |
+| History budget counts retained layer images | Done | `layerCommandsCountRetainedImages`, `deletedLayerIsCountedInHistory` |
+| Layered project format v2; v1 still opens as one layer; validation before allocation | Done | `layeredRoundTripPreservesEverything`, `version1ProjectLoadsAsOneLayer`, `rejectsDamagedLayeredFiles` (13 cases), `layeredSaveAndOpenPreserveStructure`, `olderSingleLayerProjectOpensAsOneLayer` |
+| PNG export = visible composite | Done | `pngExportOfLayersMatchesVisibleComposite`, `pngExportIsTheVisibleComposite`, `tst_ui` |
+| Recovery preserves layers; immutable snapshots; v1 recovery handled explicitly | Done | `layeredRecoveryRestoresStructureAndPixels`, `snapshotIsIsolatedFromLaterEdits`, `legacySingleLayerRecoveryIsReadAsOneLayer`, `legacyRecoveryFileIsOfferedAsOneLayer`; stale-write tests from milestone 2 still pass |
+| Measurements for 1/5/10 layers and against the single-layer build | Done | BENCHMARKS.md |
+| Android rebuilt | Built, not launched | debug APK signed with the development key |
 
-Not verified: OS crash or power loss (only process kills), Android/iOS/Linux behaviour.
+Not verified for this milestone: an on-screen session with real mouse input on the Windows
+desktop (postponed because the desktop was in use; the panel was verified with synthetic input
+on the offscreen platform), Android at runtime.
 
-## Milestone 3: hardware input validation (next)
+## Milestone 4: hardware and platform validation (next)
 
-- Windows pen device (Windows Ink) and an Android tablet with stylus, plus finger touch.
-- Pressure range, event rate, synthesized mouse events, palm contacts; adjust separation.
-- Pressure curve (gamma) setting if needed; end-to-end latency measurements.
-- First Android launch: drawing, file dialogs via the storage access framework, saving to
-  `content://` locations, recovery folder in app storage, recovery after the OS kills the app in
-  the background.
+- Windows pen device (Windows Ink) and an Android tablet with stylus, plus finger touch:
+  pressure range, event rate, synthesized mouse events, palm contacts.
+- First Android launch: drawing, layer panel on a small screen, file dialogs via the storage
+  access framework, saving to `content://`, recovery after the OS kills the app in the background.
+- On-screen Windows session for the layer panel and end-to-end latency measurement.
 - Unblock Linux (WSL packages) and run the same tests.
-
-## Milestone 4: layers
-
-Multiple raster layers with opacity, visibility and normal/multiply/screen blend; a format
-version 2 with a reader for version 1 (project and recovery files). Likely the point where tiled
-storage and partial texture uploads are needed; decide from measurements.
 
 ## Later (unordered)
 
-Background saving/export; recovery write cost reduction (dirty tiles only, faster compression);
-canvas rotation and mirroring; smoothing/stabilizer; brush presets; selection and transform; iOS
-build (needs macOS and a licensing decision); Play Store AAB with an upload key and release
-pipeline. Deferred features are listed in PRODUCT.md.
+Background saving/export and incremental recovery writes (only changed layers); more blend modes,
+groups, clipping, masks; drag-and-drop layer reordering; canvas rotation and mirroring;
+smoothing/stabilizer; brush presets; selection and transform; iOS build (needs macOS and a
+licensing decision); Play Store AAB with an upload key and release pipeline.

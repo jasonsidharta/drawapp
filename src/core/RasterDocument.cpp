@@ -1,14 +1,12 @@
 #include "RasterDocument.h"
 
 #include "TileSnapshot.h"
-#include "UndoHistory.h"
 
 #include <QPainter>
 
 RasterDocument::RasterDocument(QSize size)
-    : m_image(size, QImage::Format_ARGB32_Premultiplied)
+    : m_image(blank(size))
 {
-    m_image.fill(Qt::transparent);
 }
 
 RasterDocument::RasterDocument(const QImage &image)
@@ -16,7 +14,14 @@ RasterDocument::RasterDocument(const QImage &image)
 {
 }
 
-QRect RasterDocument::stampDabs(const std::vector<Dab> &dabs, const QColor &color, BrushMode mode,
+QImage RasterDocument::blank(QSize size)
+{
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    return image;
+}
+
+QRect RasterDocument::stampDabs(QImage &image, const std::vector<Dab> &dabs, const QColor &color, BrushMode mode,
                                 TileSnapshot *before)
 {
     if (dabs.empty())
@@ -27,16 +32,16 @@ QRect RasterDocument::stampDabs(const std::vector<Dab> &dabs, const QColor &colo
         const qreal r = dab.diameter / 2.0;
         // One extra pixel for anti-aliased edges.
         const QRect dabRect = QRectF(dab.center.x() - r, dab.center.y() - r, dab.diameter, dab.diameter)
-                                  .toAlignedRect().adjusted(-1, -1, 1, 1) & bounds();
+                                  .toAlignedRect().adjusted(-1, -1, 1, 1) & image.rect();
         // Per dab, not the union: a long diagonal segment must not capture its whole bounding box.
         if (before)
-            before->capture(m_image, dabRect);
+            before->capture(image, dabRect);
         dirty |= dabRect;
     }
     if (dirty.isEmpty())
         return {};
 
-    QPainter painter(&m_image);
+    QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setPen(Qt::NoPen);
     if (mode == BrushMode::Erase) {
@@ -53,20 +58,10 @@ QRect RasterDocument::stampDabs(const std::vector<Dab> &dabs, const QColor &colo
     return dirty;
 }
 
-QRect RasterDocument::clear(TileSnapshot *before)
+QRect RasterDocument::clear(QImage &image, TileSnapshot *before)
 {
     if (before)
-        before->captureNonTransparent(m_image);
-    m_image.fill(Qt::transparent);
-    return bounds();
-}
-
-QRect RasterDocument::undo(UndoHistory &history)
-{
-    return history.undo(m_image);
-}
-
-QRect RasterDocument::redo(UndoHistory &history)
-{
-    return history.redo(m_image);
+        before->captureNonTransparent(image);
+    image.fill(Qt::transparent);
+    return image.rect();
 }

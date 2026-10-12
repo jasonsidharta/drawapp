@@ -22,10 +22,9 @@ future feature with no work scheduled.
 
 ## First-release goals (planned, not done)
 
-- Raster drawing with layers and common blend modes.
+- Common blend modes, groups and clipping for layers (Normal-blend raster layers are done).
 - Pressure-sensitive brushes with a pressure curve, smoothing and a small set of brush presets.
 - Selection and transform basics.
-- Undo/redo for layer operations (single-canvas undo/redo is done).
 - JPEG export (atomic project saving, crash recovery and PNG export are done).
 - Canvas rotation and mirroring.
 - Touch gestures on tablets (pinch zoom/pan, two-finger tap undo) with palm rejection.
@@ -38,6 +37,8 @@ future feature with no work scheduled.
 - Milestone 1: undo/redo (stroke, eraser stroke, clear) under a 128 MiB budget; New/Open/Save/Save As
   with a versioned .drawapp format, atomic saving and unsaved-changes prompts; PNG export.
 - Milestone 2: crash recovery (10 s autosave to a separate recovery file, restore/discard on start).
+- Milestone 3: raster layers (Normal blending, opacity, visibility, lock) with a layer panel, undo for
+  every layer operation, a layered project format (older files still open) and layered recovery.
 
 See ROADMAP.md for acceptance status.
 

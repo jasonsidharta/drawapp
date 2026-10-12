@@ -3,6 +3,7 @@
 
 #include "CanvasItem.h"
 #include "ProjectFile.h"
+#include "RasterDocument.h"
 #include "RecoveryFile.h"
 #include "RecoveryManager.h"
 #include "ViewRenderer.h"
@@ -46,7 +47,7 @@ private:
         return QTest::qWaitFor([&] { return spy.count() > 0; }, 10000);
     }
 
-    QImage recoveredImage() const { return RecoveryFile::load(m_recovery->recoveryFilePath()).image; }
+    QImage recoveredImage() const { return RecoveryFile::load(m_recovery->recoveryFilePath()).document.composite(); }
 
     // A fresh window and canvas, as after restarting the app.
     void restartCanvas()
@@ -60,7 +61,10 @@ private:
     std::unique_ptr<QPointingDevice> m_eraserTip;
     QPointingDevice *m_touch = nullptr;
 
-    const QImage &doc() const { return m_canvas->document().image(); }
+    // What the layers composite to (with one opaque layer, exactly that layer's pixels).
+    const QImage &doc() const { return m_canvas->document().composite(); }
+    QImage layerImage(int index) const { return m_canvas->document().layer(index).image; }
+    int layerIndex(int id) const { return m_canvas->document().indexOf(quint64(id)); }
     QPointF toView(const QPointF &docPt) const { return m_canvas->viewTransform().docToView(docPt); }
     QPointF toDoc(const QPointF &viewPt) const { return m_canvas->viewTransform().viewToDoc(viewPt); }
     int alphaAt(const QPointF &docPt) const { return qAlpha(doc().pixel(docPt.toPoint())); }
@@ -252,7 +256,7 @@ private slots:
     {
         mouseStroke({{100, 100}, {700, 500}});
         QCOMPARE(alphaAt(toDoc(QPointF(400, 300))), 255);
-        m_canvas->clearCanvas();
+        m_canvas->clearActiveLayer();
         QImage empty(doc().size(), doc().format());
         empty.fill(Qt::transparent);
         QCOMPARE(doc(), empty);
@@ -344,7 +348,7 @@ private slots:
         const QImage erased = doc().copy();
         QCOMPARE(m_canvas->undoText(), QStringLiteral("Eraser stroke"));
 
-        m_canvas->clearCanvas();
+        m_canvas->clearActiveLayer();
         QCOMPARE(doc(), empty);
         QCOMPARE(m_canvas->history().undoCount(), 3);
 
@@ -420,7 +424,7 @@ private slots:
     {
         m_canvas->setTool(CanvasItem::Eraser);
         mouseStroke({{100, 100}, {400, 100}});
-        m_canvas->clearCanvas(); // already empty
+        m_canvas->clearActiveLayer(); // already empty
         QVERIFY(!m_canvas->canUndo());
         QVERIFY(!m_canvas->isModified());
     }
@@ -475,7 +479,7 @@ private slots:
 
         const QString damaged = dir.filePath("damaged.drawapp");
         {
-            QByteArray bytes = ProjectFile::encode(doc());
+            QByteArray bytes = ProjectFile::encode(m_canvas->document().snapshot());
             bytes.chop(100);
             QFile f(damaged);
             QVERIFY(f.open(QIODevice::WriteOnly));
@@ -508,7 +512,7 @@ private slots:
         RasterDocument small(QSize(300, 200));
         small.stampDabs({{QPointF(150, 100), 50}}, QColor(200, 0, 0), BrushMode::Paint);
         const QString path = dir.filePath("small.drawapp");
-        QCOMPARE(ProjectFile::save(small.image(), path), QString());
+        QCOMPARE(ProjectFile::save(DocumentData::fromImage(small.image()), path), QString());
         QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
         QCOMPARE(m_canvas->documentSize(), QSize(300, 200));
         QCOMPARE(doc(), small.image());
@@ -617,7 +621,7 @@ private slots:
         QVERIFY(autosaveAndWait());
         QVERIFY(QFile::exists(rec));
         RasterDocument other(QSize(200, 100));
-        QCOMPARE(ProjectFile::save(other.image(), projects.filePath("other.drawapp")), QString());
+        QCOMPARE(ProjectFile::save(DocumentData::fromImage(other.image()), projects.filePath("other.drawapp")), QString());
         QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(projects.filePath("other.drawapp"))), QString());
         QVERIFY(!QFile::exists(rec));
     }
@@ -678,12 +682,12 @@ private slots:
         QCOMPARE(QDir(dir).entryList({"*.drawrecovery"}, QDir::Files).size(), 1);
 
         // The project file still holds the last explicit save, not the recovered strokes.
-        QVERIFY(ProjectFile::load(project).image != before);
+        QVERIFY(ProjectFile::load(project).document.composite() != before);
         // Saving clears the unsaved state and the recovery data.
         QCOMPARE(m_canvas->saveFile(), QString());
         QVERIFY(!m_canvas->isModified());
         QVERIFY(!QFile::exists(m_recovery->recoveryFilePath()));
-        QCOMPARE(ProjectFile::load(project).image, before);
+        QCOMPARE(ProjectFile::load(project).document.composite(), before);
     }
 
     void discardRecoveryAfterCrash()
@@ -721,6 +725,306 @@ private slots:
         QCOMPARE(alphaAt(toDoc(QPointF(300, 300))), 255);
         QVERIFY(autosaveAndWait());
         QVERIFY(QFile::exists(m_recovery->recoveryFilePath()));
+    }
+
+    // --- layers ---
+
+    void strokesAffectOnlyTheActiveLayer()
+    {
+        const int bottom = m_canvas->activeLayerId();
+        m_canvas->addLayer();
+        const int top = m_canvas->activeLayerId();
+        QVERIFY(top != bottom);
+        QCOMPARE(m_canvas->layerCount(), 2);
+        m_canvas->setBrushSize(30);
+        mouseStroke({{100, 300}, {600, 300}}); // on the new top layer
+        const QPointF p = toDoc(QPointF(300, 300));
+        QCOMPARE(qAlpha(layerImage(layerIndex(top)).pixel(p.toPoint())), 255);
+        QCOMPARE(qAlpha(layerImage(layerIndex(bottom)).pixel(p.toPoint())), 0);
+
+        m_canvas->setActiveLayer(bottom);
+        m_canvas->setBrushColor(QColor(0, 160, 0));
+        mouseStroke({{300, 150}, {300, 450}}); // crosses the top layer's stroke, on the bottom layer
+        QCOMPARE(layerImage(layerIndex(bottom)).pixel(p.toPoint()), qRgb(0, 160, 0));
+        QCOMPARE(layerImage(layerIndex(top)).pixel(p.toPoint()), qRgb(20, 20, 20)); // untouched
+        QCOMPARE(doc().pixel(p.toPoint()), qRgb(20, 20, 20)); // top layer still covers it
+
+        m_canvas->setActiveLayer(top);
+        m_canvas->setTool(CanvasItem::Eraser);
+        mouseStroke({{300, 280}, {300, 320}});
+        QCOMPARE(doc().pixel(p.toPoint()), qRgb(0, 160, 0)); // erasing the top layer reveals the bottom
+        QCOMPARE(layerImage(layerIndex(bottom)).pixel(p.toPoint()), qRgb(0, 160, 0));
+        screenshot("layers_erase_reveals");
+    }
+
+    void hiddenAndLockedLayersRejectPainting()
+    {
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        const int id = m_canvas->activeLayerId();
+        m_canvas->setLayerVisible(id, false);
+        const int steps = m_canvas->history().undoCount();
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        QCOMPARE(qAlpha(layerImage(0).pixel(toDoc(QPointF(300, 300)).toPoint())), 0);
+        QCOMPARE(notices.count(), 1);
+        QVERIFY(notices.last().at(0).toString().contains("hidden"));
+
+        m_canvas->setLayerVisible(id, true);
+        m_canvas->setLayerLocked(id, true);
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(qAlpha(layerImage(0).pixel(toDoc(QPointF(300, 300)).toPoint())), 0);
+        QVERIFY(notices.last().at(0).toString().contains("locked"));
+        m_canvas->clearActiveLayer();
+        QVERIFY(notices.last().at(0).toString().contains("Can't clear"));
+
+        // Pen input is refused the same way.
+        sendTablet(QEvent::TabletPress, m_pen.get(), QPointF(100, 400), 1.0);
+        sendTablet(QEvent::TabletMove, m_pen.get(), QPointF(500, 400), 1.0);
+        sendTablet(QEvent::TabletRelease, m_pen.get(), QPointF(500, 400), 1.0);
+        QCOMPARE(qAlpha(layerImage(0).pixel(toDoc(QPointF(300, 400)).toPoint())), 0);
+
+        m_canvas->setLayerLocked(id, false);
+        QTest::qWait(450);
+        mouseStroke({{100, 300}, {600, 300}});
+        QCOMPARE(qAlpha(layerImage(0).pixel(toDoc(QPointF(300, 300)).toPoint())), 255);
+    }
+
+    void layerOperationsAreUndoableOneStepEach()
+    {
+        const int first = m_canvas->activeLayerId();
+        mouseStroke({{100, 300}, {600, 300}});
+        m_canvas->addLayer();
+        const int added = m_canvas->activeLayerId();
+        m_canvas->duplicateLayer(first);
+        const int copy = m_canvas->activeLayerId();
+        QCOMPARE(m_canvas->document().layer(layerIndex(copy)).name, QStringLiteral("Layer 1 copy"));
+        QCOMPARE(layerIndex(copy), layerIndex(first) + 1);
+        QCOMPARE(m_canvas->document().layer(layerIndex(copy)).image, layerImage(layerIndex(first)));
+        m_canvas->renameLayer(added, QStringLiteral("  Ink  "));
+        QCOMPARE(m_canvas->document().layer(layerIndex(added)).name, QStringLiteral("Ink"));
+        m_canvas->moveLayerDown(added);
+        m_canvas->setLayerVisible(copy, false);
+        m_canvas->setLayerLocked(first, true);
+        m_canvas->previewLayerOpacity(added, 0.8);
+        m_canvas->previewLayerOpacity(added, 0.6);
+        m_canvas->previewLayerOpacity(added, 0.4);
+        m_canvas->commitLayerOpacity(added, 0.4); // a whole slider drag is one step
+        m_canvas->deleteLayer(copy);
+        QCOMPARE(m_canvas->history().undoCount(), 9); // stroke + 8 layer operations
+        QCOMPARE(m_canvas->history().undoLabel(), QStringLiteral("Delete layer"));
+
+        const QStringList expected{"Delete layer", "Change layer opacity", "Lock layer", "Hide layer",
+                                   "Move layer down", "Rename layer", "Duplicate layer", "Add layer"};
+        for (const QString &label : expected) {
+            QCOMPARE(m_canvas->undoText(), label);
+            m_canvas->undo();
+        }
+        QCOMPARE(m_canvas->layerCount(), 1);
+        QCOMPARE(m_canvas->activeLayerId(), first);
+        QVERIFY(!m_canvas->document().layer(0).locked);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Brush stroke"));
+
+        for (int i = 0; i < 8; ++i)
+            m_canvas->redo();
+        QCOMPARE(m_canvas->layerCount(), 2);
+        QCOMPARE(layerIndex(copy), -1);
+        QCOMPARE(m_canvas->document().layer(layerIndex(added)).opacity, 0.4);
+        QCOMPARE(m_canvas->document().layer(layerIndex(added)).name, QStringLiteral("Ink"));
+        QVERIFY(m_canvas->document().layer(layerIndex(first)).locked);
+        QCOMPARE(doc(), m_canvas->document().snapshot().composite());
+    }
+
+    void opacityDragEndingAtItsStartIsNotAnEdit()
+    {
+        const int id = m_canvas->activeLayerId();
+        mouseStroke({{100, 300}, {600, 300}});
+        const QImage before = doc().copy();
+        const int steps = m_canvas->history().undoCount();
+        m_canvas->previewLayerOpacity(id, 0.3);
+        QVERIFY(doc() != before); // live preview
+        m_canvas->commitLayerOpacity(id, 1.0);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        QCOMPARE(doc(), before);
+        QCOMPARE(m_canvas->document().layer(0).opacity, 1.0);
+    }
+
+    void keepsAtLeastOneLayerAndSelectingIsNotAnEdit()
+    {
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        m_canvas->deleteLayer(m_canvas->activeLayerId());
+        QCOMPARE(m_canvas->layerCount(), 1);
+        QVERIFY(notices.last().at(0).toString().contains("at least one layer"));
+
+        QTemporaryDir dir;
+        m_canvas->addLayer();
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(dir.filePath("sel.drawapp"))), QString());
+        m_canvas->setActiveLayer(m_canvas->document().layer(0).id);
+        QVERIFY(!m_canvas->isModified());
+        QVERIFY(m_canvas->undoText() == QStringLiteral("Add layer"));
+    }
+
+    void activeLayerAfterDeleteAndUndo()
+    {
+        const int bottom = m_canvas->activeLayerId();
+        m_canvas->addLayer();
+        const int middle = m_canvas->activeLayerId();
+        m_canvas->addLayer();
+        const int top = m_canvas->activeLayerId();
+        m_canvas->deleteLayer(top);
+        QCOMPARE(m_canvas->activeLayerId(), middle); // the layer below
+        m_canvas->undo();
+        QCOMPARE(m_canvas->activeLayerId(), top);    // the restored layer
+        m_canvas->deleteLayer(bottom);
+        QCOMPARE(m_canvas->activeLayerId(), top);    // deleting another layer keeps the selection
+        m_canvas->setActiveLayer(middle);
+        m_canvas->undo();                            // restores the bottom layer and selects it
+        QCOMPARE(m_canvas->activeLayerId(), bottom);
+        QCOMPARE(layerIndex(bottom), 0);
+    }
+
+    void deletedLayerIsCountedInHistory()
+    {
+        m_canvas->addLayer();
+        const qsizetype before = m_canvas->history().bytesUsed();
+        m_canvas->deleteLayer(m_canvas->activeLayerId());
+        QCOMPARE(m_canvas->history().bytesUsed() - before, qsizetype(2048) * 1536 * 4);
+    }
+
+    void layeredSaveAndOpenPreserveStructure()
+    {
+        QTemporaryDir dir;
+        mouseStroke({{100, 300}, {600, 300}});
+        m_canvas->renameLayer(m_canvas->activeLayerId(), "Background");
+        m_canvas->addLayer();
+        m_canvas->setBrushColor(QColor(200, 30, 30));
+        mouseStroke({{300, 150}, {300, 450}});
+        m_canvas->commitLayerOpacity(m_canvas->activeLayerId(), 0.55);
+        m_canvas->addLayer();
+        mouseStroke({{150, 200}, {550, 400}});
+        m_canvas->setLayerVisible(m_canvas->activeLayerId(), false);
+        m_canvas->setLayerLocked(m_canvas->document().layer(0).id, true);
+        m_canvas->setActiveLayer(m_canvas->document().layer(1).id);
+        const DocumentData saved = m_canvas->document().snapshot();
+        const QImage composite = doc().copy();
+        const QString path = dir.filePath("layers.drawapp");
+        QCOMPARE(m_canvas->saveFileAs(QUrl::fromLocalFile(path)), QString());
+
+        m_canvas->newDocument();
+        QCOMPARE(m_canvas->layerCount(), 1);
+        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        const LayeredDocument &d = m_canvas->document();
+        QCOMPARE(d.count(), 3);
+        QCOMPARE(d.activeLayerId(), saved.activeLayerId);
+        for (int i = 0; i < 3; ++i) {
+            QCOMPARE(d.layer(i).id, saved.layers[size_t(i)].id);
+            QCOMPARE(d.layer(i).name, saved.layers[size_t(i)].name);
+            QCOMPARE(d.layer(i).visible, saved.layers[size_t(i)].visible);
+            QCOMPARE(d.layer(i).opacity, saved.layers[size_t(i)].opacity);
+            QCOMPARE(d.layer(i).locked, saved.layers[size_t(i)].locked);
+            QCOMPARE(d.layer(i).image, saved.layers[size_t(i)].image);
+        }
+        QCOMPARE(doc(), composite);
+        QVERIFY(!m_canvas->isModified());
+        m_canvas->addLayer(); // new ids continue after the highest saved id
+        QVERIFY(quint64(m_canvas->activeLayerId()) > std::max({saved.layers[0].id, saved.layers[1].id, saved.layers[2].id}));
+    }
+
+    void olderSingleLayerProjectOpensAsOneLayer()
+    {
+        QTemporaryDir dir;
+        RasterDocument old(QSize(320, 240));
+        old.stampDabs({{QPointF(160, 120), 80}}, QColor(10, 100, 200), BrushMode::Paint);
+        const QString path = dir.filePath("old.drawapp");
+        QCOMPARE(ProjectFile::writeFileSafely(path, ProjectFile::encodeVersion1(old.image())), QString());
+        QCOMPARE(m_canvas->openFile(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(m_canvas->layerCount(), 1);
+        QCOMPARE(m_canvas->documentSize(), QSize(320, 240));
+        QCOMPARE(doc(), old.image());
+        // Saving writes the layered format, which opens to the same pixels.
+        QCOMPARE(m_canvas->saveFile(), QString());
+        QCOMPARE(ProjectFile::load(path).version, 2);
+        QCOMPARE(ProjectFile::load(path).document.composite(), old.image());
+    }
+
+    void pngExportIsTheVisibleComposite()
+    {
+        QTemporaryDir dir;
+        m_canvas->setBrushSize(40);
+        mouseStroke({{100, 300}, {600, 300}});
+        m_canvas->addLayer();
+        m_canvas->setBrushColor(QColor(220, 0, 0));
+        mouseStroke({{300, 150}, {300, 450}});
+        m_canvas->commitLayerOpacity(m_canvas->activeLayerId(), 0.5);
+        m_canvas->addLayer();
+        mouseStroke({{100, 450}, {600, 150}});
+        m_canvas->setLayerVisible(m_canvas->activeLayerId(), false);
+        sendWheel(QPointF(300, 300), 240); // the view must not matter
+        const QString png = dir.filePath("composite.png");
+        QCOMPARE(m_canvas->exportPng(QUrl::fromLocalFile(png)), QString());
+        QImage exported(png);
+        QCOMPARE(exported.size(), QSize(2048, 1536));
+        QCOMPARE(exported.convertToFormat(QImage::Format_ARGB32), doc().convertToFormat(QImage::Format_ARGB32));
+        QCOMPARE(qAlpha(exported.pixel(5, 5)), 0);
+        const QPoint cross = toDoc(QPointF(300, 300)).toPoint();
+        QVERIFY(qRed(exported.pixel(cross)) > 100 && qRed(exported.pixel(cross)) < 140); // 50 % red over black
+    }
+
+    void layeredRecoveryRestoresStructureAndPixels()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        const QString dir = m_recoveryDir->path();
+        attachRecovery(dir);
+        mouseStroke({{100, 300}, {600, 300}});
+        m_canvas->addLayer();
+        mouseStroke({{300, 150}, {300, 450}});
+        m_canvas->commitLayerOpacity(m_canvas->activeLayerId(), 0.65);
+        m_canvas->renameLayer(m_canvas->activeLayerId(), "Color");
+        m_canvas->addLayer();
+        m_canvas->setLayerLocked(m_canvas->activeLayerId(), true);
+        m_canvas->setLayerVisible(m_canvas->document().layer(0).id, false);
+        QVERIFY(autosaveAndWait());
+        const DocumentData before = m_canvas->document().snapshot();
+        const QImage composite = doc().copy();
+        m_recovery->releaseKeepingFile();
+
+        restartCanvas();
+        attachRecovery(dir);
+        QVERIFY(m_canvas->recoveryOffered());
+        QVERIFY(m_canvas->recoveryDescription().contains("3 layers"));
+        m_canvas->restoreRecovery();
+        const LayeredDocument &d = m_canvas->document();
+        QCOMPARE(d.count(), 3);
+        QCOMPARE(d.activeLayerId(), before.activeLayerId);
+        for (int i = 0; i < 3; ++i) {
+            QCOMPARE(d.layer(i).id, before.layers[size_t(i)].id);
+            QCOMPARE(d.layer(i).name, before.layers[size_t(i)].name);
+            QCOMPARE(d.layer(i).visible, before.layers[size_t(i)].visible);
+            QCOMPARE(d.layer(i).opacity, before.layers[size_t(i)].opacity);
+            QCOMPARE(d.layer(i).locked, before.layers[size_t(i)].locked);
+            QCOMPARE(d.layer(i).image, before.layers[size_t(i)].image);
+        }
+        QCOMPARE(doc(), composite);
+        QVERIFY(m_canvas->isModified());
+    }
+
+    void legacyRecoveryFileIsOfferedAsOneLayer()
+    {
+        m_recoveryDir = std::make_unique<QTemporaryDir>();
+        RasterDocument old(QSize(400, 300));
+        old.stampDabs({{QPointF(200, 150), 60}}, QColor(0, 0, 0), BrushMode::Paint);
+        RecoveryFile::Metadata meta;
+        meta.savedAt = QDateTime::currentDateTimeUtc();
+        {
+            QFile f(QDir(m_recoveryDir->path()).filePath("session-old.drawrecovery"));
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(RecoveryFile::encodeVersion1(old.image(), meta));
+        }
+        attachRecovery(m_recoveryDir->path());
+        QVERIFY(m_canvas->recoveryOffered());
+        QVERIFY(m_canvas->recoveryDescription().contains("single-layer"));
+        m_canvas->restoreRecovery();
+        QCOMPARE(m_canvas->layerCount(), 1);
+        QCOMPARE(doc(), old.image());
     }
 
     void shutdownKeepsOrRemovesRecovery()

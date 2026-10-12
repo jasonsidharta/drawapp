@@ -18,7 +18,7 @@ class QLockFile;
 // process belong to sessions that ended without cleaning up (crashes) and are offered on start.
 //
 // Writes run on one worker thread, one at a time. The worker only touches the private image copy
-// it was given. A write commits (atomic replace of the recovery file) only if no discard happened
+// it was given (a DocumentData snapshot). A write commits (atomic replace of the recovery file) only if no discard happened
 // since it was requested, so an outdated write can neither replace newer data nor recreate a file
 // that was cleaned up. All public methods are for the UI thread.
 class RecoveryManager : public QObject
@@ -46,11 +46,12 @@ public:
     bool isWriting() const { return m_writing; }
     bool hasRecoveryFile() const;
 
-    // Starts an asynchronous write. snapshot must be a private copy (not shared with the canvas).
+    // Starts an asynchronous write of a document snapshot (LayeredDocument::snapshot()): plain values
+    // whose images are shared copy-on-write, so later edits on the UI thread never reach the worker.
     // Returns false if a write is already running or the manager is not started.
-    bool requestWrite(const QImage &snapshot, const RecoveryFile::Metadata &metadata);
+    bool requestWrite(const DocumentData &snapshot, const RecoveryFile::Metadata &metadata);
     // Writes synchronously in this thread after any in-flight write ends (used at shutdown).
-    QString writeNow(const QImage &snapshot, const RecoveryFile::Metadata &metadata);
+    QString writeNow(const DocumentData &snapshot, const RecoveryFile::Metadata &metadata);
     // Invalidates in-flight writes and deletes this session's recovery file.
     void discard();
     // Normal exit with nothing to recover: discard, then remove the lock.
@@ -82,7 +83,7 @@ private:
         bool stale = false;
         QString error;
     };
-    WriteOutcome writeAndCommit(const QImage &snapshot, const RecoveryFile::Metadata &metadata,
+    WriteOutcome writeAndCommit(const DocumentData &snapshot, const RecoveryFile::Metadata &metadata,
                                 quint64 generation, quint64 sequence);
     QString sessionBase() const;
 

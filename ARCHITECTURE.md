@@ -1,7 +1,8 @@
 # Architecture
 
-State: milestone 2 done (crash recovery) on top of milestone 1 (undo/redo, project save/open,
-PNG export) and the milestone 0 prototype. Everything under "Current" exists in the code; anything else is labelled *planned*.
+State: milestone 3 (raster layers) on top of milestone 2 (crash recovery), milestone 1 (undo/redo,
+project save/open, PNG export) and the milestone 0 prototype. Everything described here exists in
+the code unless labelled *planned*.
 
 ## Stack
 
@@ -15,182 +16,167 @@ PNG export) and the milestone 0 prototype. Everything under "Current" exists in 
 Why Qt 6 with Qt Quick/QML: one C++ codebase for Windows, Linux, Android and iOS, with a GPU
 scene graph, pen/touch input and native file dialogs on all four. No blocker found so far.
 
-## Components (current)
+## Components
 
 ```
 src/core/   (static lib "drawcore", depends on QtGui only, no Qt Quick)
-  ViewTransform    view = doc * zoom + pan; zoom about an anchor; fit/center; zoom clamp [0.05, 32]
-  Pressure.h       effectivePressure(kind, deviceReportsPressure, raw) -> 0..1
-  StrokeSpacer     input samples -> evenly spaced dabs, distance carried across samples
-  RasterDocument   one QImage, ARGB32 premultiplied; new documents 2048x1536, transparent
+  DocumentData     plain values: LayerData {id, name, image, visible, opacity, locked},
+                   DocumentData {size, layers, activeLayerId}; compositeLayers(); shared limits
+  LayeredDocument  the open document: ordered layers (index 0 = bottom), active layer, id
+                   allocation, cached composite of the visible layers
+  RasterDocument   raster operations on one image: stampDabs (brush/eraser), clear
   TileSnapshot     copies of the 64x64 tiles an edit touched; swap = undo/redo
-  UndoHistory      linear undo/redo stacks under one byte budget; state ids for "unsaved"
-  ProjectFile      .drawapp encode/decode, safe file writes, PNG export
-  RecoveryFile     .drawrecovery encode/decode (metadata + embedded .drawapp)
+  UndoHistory      UndoCommand (pixels / layer presence / properties / move) + linear history
+                   under one byte budget; state ids for "unsaved"
+  ProjectFile      .drawapp v2 (layered) encode/decode, v1 reader, safe writes, PNG export
+  RecoveryFile     .drawrecovery v2 (metadata + embedded layered project), v1 reader
   RecoveryManager  session lock, orphan discovery, one-at-a-time worker writes with stale checks
-  ViewRenderer     paints an exposed view rect: workspace, checkerboard, document through the view
-src/app/
-  CanvasItem       QQuickPaintedItem; input, stroke state, history, file commands, partial repaints
-  Main.qml         window, toolbar, File menu, dialogs, unsaved-changes prompt, shortcuts
-  main.cpp         application setup
-tests/             tst_core, tst_document, tst_recovery (headless), tst_canvas (real window), bench_core
+  ViewTransform, Pressure.h, StrokeSpacer, ViewRenderer   (input, spacing, view; unchanged)
+src/app/    (static QML module "drawapp_ui", URI DrawApp, used by the app and tst_ui)
+  CanvasItem       QQuickPaintedItem; input, strokes, layer commands, history, files, recovery
+  Main.qml         window, toolbar, File menu, layer panel, dialogs, notices, shortcuts
+  main.cpp         application setup (in the drawapp executable)
+tests/             tst_core, tst_document, tst_recovery (headless); tst_canvas, tst_ui (window,
+                   offscreen under ctest); bench_core
 ```
+
+## Layers
+
+- **Model**: each layer has a stable id (never reused in a document, saved in files), a name, a
+  full-canvas premultiplied ARGB32 image, visibility, opacity (0–1) and a lock. The document has
+  an ordered layer list and an active layer. All layers have the canvas size; canvas sizes are
+  unchanged from earlier milestones (new documents 2048 × 1536).
+- **Compositing**: Normal (source-over) only. `compositeLayers` clears a rect and draws each
+  visible layer bottom to top with `QPainter::setOpacity`. `LayeredDocument` keeps a composite
+  cache (one more canvas-sized image). Brush/eraser events refresh only the dabs' rect;
+  visibility, opacity, order, add/delete/duplicate refresh the whole canvas. The view draws the
+  cache exactly as before (renderer unchanged), so the checkerboard appears behind the whole
+  stack, and erasing an upper layer shows the layers below.
+- **Painting**: brush and eraser affect only the active layer, chosen when the stroke starts.
+  Strokes, and Clear Layer, are refused on hidden or locked layers with a notice explaining why
+  (the canvas emits `notice`, QML shows a banner). The lock blocks pixel edits only; renaming,
+  hiding, reordering and deleting a locked layer are allowed.
+- **Panel** (Main.qml): list (top layer first) with visibility check box, name, opacity and lock;
+  Add (above the active layer), Duplicate, Delete, Up, Down, Rename (also double-click), and an
+  opacity slider for the active layer. At least one layer is always kept. Layer count is limited
+  to `min(64, 512 MiB / layer size)` (42 at 2048 × 1536), the same limit the file reader enforces.
+- **Active layer rules**: selecting a layer is not an edit (no history entry, not "modified").
+  New and duplicated layers become active. Deleting the active layer selects the layer below
+  (or, for the bottom layer, the new bottom). Undo/redo that re-inserts a layer selects it; other
+  undo/redo steps keep the selection unless the selected layer disappears.
 
 ## Drawing data flow
 
-1. **Input** reaches `CanvasItem`:
-   - Mouse: left button draws; middle button, or Space + left, pans.
-   - Pen: a window-level event filter on the `QQuickWindow`, because `QQuickItem` has no tablet
-     handler. Press must land inside the item; the event is accepted so Qt does not synthesize
-     mouse events.
-   - Touch: one finger draws; two fingers pan and zoom.
-   - Wheel: zoom about the cursor (×1.25 per notch); a pixel-delta-only wheel pans.
-2. **Pressure** is used only for a pen whose device reports the `Pressure` capability; everything
-   else uses 1.0.
-3. **Coordinates** are converted with `viewToDoc` first. Document pixels never depend on the view.
-4. **Spacing**: a dab every `max(0.5 px, 0.15 × last dab diameter)` along straight segments;
-   `diameter = size × (0.1 + 0.9 × pressure)`, at least 1 px. A press always emits one dab.
-5. **Raster**: `RasterDocument::stampDabs` captures the tiles under each dab into the stroke's
-   `TileSnapshot` (first touch only), then draws anti-aliased circles (source-over for the brush,
-   destination-out for the eraser) and returns the changed rect.
-6. **Repaint**: the changed rect is mapped to the view and passed to `update(rect)`.
-
-Brush size, color and mode are captured when a stroke starts.
+1. **Input** reaches `CanvasItem`: mouse (left draws; middle or Space + left pans), pen (window
+   event filter, because `QQuickItem` has no tablet handler), touch (one finger draws, two pan and
+   zoom), wheel (zoom about the cursor).
+2. **Pressure** only for pens reporting the `Pressure` capability; everything else uses 1.0.
+3. **Coordinates** go through `viewToDoc`; document pixels never depend on the view.
+4. **Spacing**: a dab every `max(0.5 px, 0.15 × last dab diameter)`.
+5. **Raster**: `RasterDocument::stampDabs(layerImage, …)` captures the tiles under each dab into
+   the stroke's `TileSnapshot`, draws the dabs, and returns the changed rect.
+6. **Composite and repaint**: the composite is refreshed for that rect, which is then repainted.
 
 ## Undo and redo
 
-- **Unit of undo**: one brush stroke, one eraser stroke, or one Clear. A stroke becomes one step
-  however it ends: release, lost grab, a second finger, or Undo/Redo/Save/Export/New/Open
-  pressed mid-stroke (the stroke is committed first, so Undo removes it whole and stops it).
-- **What is stored**: before pixels of each 64×64 tile the edit touched (16 KiB per full tile).
-  Tiles left identical (for example erasing transparent pixels) are dropped at commit; an edit
-  with no changed tiles is not recorded and does not mark the document modified. Clear stores
-  only tiles that had paint. A short stroke stores a few tiles, not a canvas copy; the benchmark
-  zig-zag stroke across the canvas stored 1.4–2.1 MiB (BENCHMARKS.md).
-- **Undo/redo mechanics**: swapping the snapshot with the document exchanges old and new pixels,
-  so an entry costs the same memory on the undo or redo side.
-- **Budget**: 128 MiB (`UndoHistory::DefaultBudgetBytes`), counting tile pixel bytes of undo
-  *and* redo entries together (per-entry bookkeeping overhead is not counted). Pushing a new edit
-  first drops the redo branch, then evicts the oldest undo entries until the total fits. An edit
-  larger than the whole budget is applied but cannot be undone. With a 12 MiB canvas the budget
-  holds at least 10 full-canvas clears; typical strokes are far smaller. Not tuned per platform yet.
-- **Not in history**: zoom, pan, window resize, tool/size/color changes.
-- **Unsaved state**: every history entry has a unique id; `stateId()` is the id of the newest undo
-  entry (or of the base state). The document is modified when `stateId()` differs from the id
-  recorded at the last save/open/new. Undoing back to the saved state clears the mark; eviction
-  keeps this correct because evicting an entry makes its id the base id.
-- New and Open clear the history. History does not survive closing the app.
+- **Commands** (`UndoCommand`), each already applied when recorded; `swap()` both undoes and redoes:
+  - *pixels*: one layer's changed tiles (brush stroke, eraser stroke, Clear Layer);
+  - *presence*: a layer inserted (Add, Duplicate) or removed (Delete); the command holds the
+    layer while it is out of the document;
+  - *properties*: name, visibility, opacity, lock (one command per action);
+  - *move*: a layer's position.
+  Commands find their layer by id, so undo after reordering or deleting other layers targets the
+  right layer.
+- **Unit of undo**: one stroke however it ends; one panel action; one opacity-slider drag (the
+  slider previews live without history, the release records one command from the drag's start
+  value; a drag that ends at its start value records nothing).
+- **Budget**: 128 MiB for undo and redo together, counting tile copies and the images of removed
+  layers held by history (a deleted layer counts 12 MiB at 2048 × 1536; undoing Add or Duplicate
+  moves that layer's image into the redo entry, which is counted too). The count is recomputed
+  after every push, undo and redo; when over budget the oldest undo entries go first, then the
+  farthest redo entries. A duplicated layer shares pixels with its source until either is edited,
+  but history counts it in full (conservative).
+- **Not in history**: active-layer selection, zoom, pan, window size, tool/size/color.
+- **Unsaved state**: `stateId()` compared with the id recorded at save/open/new, as before.
 
-## Project files (.drawapp, format version 1)
+## Project files (.drawapp)
 
-Defined in `src/core/ProjectFile.h`: 68-byte little-endian header (magic `DRAWAPP\n`, version,
-width, height, pixel format = 8-bit RGBA premultiplied, compression = zlib via `qCompress`,
-payload size, SHA-256 of the payload) followed by the payload. Pixels are stored exactly as the
-document holds them, so save/open is lossless, including partial alpha.
-
-- **Saving** encodes the whole file in memory, then writes through `QSaveFile` (temporary file in
-  the same folder, atomic rename over the target on commit). A failed open, write or commit leaves
-  any previous file untouched and returns a message; the document stays marked unsaved. On Android,
-  `content://` URIs from the storage access framework cannot be replaced atomically, so they are
-  written directly (untested on a device).
-- **Opening** reads into memory and validates before replacing anything: magic, version (newer
-  versions are refused with a clear message), dimensions (≤ 16384 per side, ≤ 64 megapixels),
-  known pixel format and compression, exact file length, checksum, the compressed stream's declared
-  raw size (checked before decompressing), decompressed size, and premultiplied pixel validity.
-  Files larger than the format allows are rejected from their size without being read.
-  Only a fully decoded image replaces the open document.
-- Opened documents keep their stored size (not necessarily 2048×1536).
-
-## Crash recovery
-
-Components: `RecoveryFile` (format), `RecoveryManager` (files, lock, worker thread) in `src/core`;
-the policy (when to snapshot, when to clean up, restore) lives in `CanvasItem`.
-
-- **Where**: `QStandardPaths::AppDataLocation/recovery` (on Windows
-  `%APPDATA%\DrawApp\recovery`), overridable with `DRAWAPP_RECOVERY_DIR`. Never the project path.
-- **Sessions**: each running app holds `session-<uuid>.lock` (`QLockFile`) and writes only
-  `session-<uuid>.drawrecovery`. On start, recovery files whose lock is not held by a live process
-  are orphans from sessions that ended abnormally. Leftover temporary files and lock files of dead
-  sessions are removed. An unreadable lock older than a minute counts as abandoned.
-- **Format** (`.drawrecovery` v1): magic, version, SHA-256-checked JSON metadata (document id,
-  pixel revision, UTC time, original project path/URL), then a complete embedded `.drawapp` file
-  with its own checksum. Decoding validates everything before use.
-- **When**: a coarse timer (default 10 s, `autosaveInterval`, `DRAWAPP_AUTOSAVE_MS`) checks whether
-  the document needs recovery: unsaved changes, or a stroke in progress that has changed pixels.
-  A pixel revision counter increments on every pixel change (including mid-stroke), so unchanged
-  states are not rewritten. If a write is still running at a tick, the next write starts as soon
-  as it ends.
-- **Snapshot and worker**: the UI thread copies the image (`QImage::copy`, 2–4 ms at 2048×1536)
-  and hands that private copy plus metadata to a one-thread `QThreadPool`. The worker encodes,
-  writes a `QSaveFile` temporary file, then takes a mutex and commits (atomic replace) only if no
-  discard happened since the request (generation check) and the write is newer than the last
-  commit. Workers never touch the canvas or the document.
-- **Cleanup**: successful Save, undo back to the saved state, New, Open (after the user saved or
-  discarded), and choosing Discard while closing all delete the recovery file; the generation bump
-  makes any in-flight write stale so it cannot recreate the file. A failed save, a failed open, or
-  cancelling a prompt leaves recovery data in place.
-- **Exit**: a normal close (saved or discarded) removes the recovery file and the lock. If the app
-  quits while still modified without the close prompt (for example the OS ending the session),
-  the latest state is written synchronously and kept for the next start.
-- **Restore**: on start the newest valid orphan is offered (Restore / Discard; Escape keeps it for
-  the next start). Restore replaces the empty start document, keeps the original project path for
-  Save, stays marked unsaved, and the orphan is renamed to the new session's recovery file.
-  Discard deletes it and offers the next orphan, if any. Damaged orphans are renamed to
-  `*.damaged`, reported once, and never block startup.
+Defined in `src/core/ProjectFile.h`.
+- **Version 2** (written): 68-byte header (magic, version, width, height, layer count, metadata
+  length, payload size, SHA-256 of the payload), then JSON metadata (active layer id; per layer:
+  id, name, visibility, opacity, lock, compressed size) and one zlib block per layer (8-bit RGBA
+  premultiplied, exact). Layers are never flattened when saving.
+- **Version 1** (milestone 1, read only): opens as a one-layer document; saving writes version 2.
+- **Validation before allocation**: dimensions (≤ 16384 per side, ≤ 64 Mpx per layer), layer
+  count (1–64) and total layer pixels (≤ 512 MiB) are checked from the header; then exact length,
+  checksum, metadata (unique non-zero ids, names ≤ 256 characters, opacity 0–1, block sizes that
+  add up), each block's declared raw size before decompressing, and premultiplied validity.
+  An unknown active layer id falls back to the top layer.
+- **Saving** encodes in memory and writes through `QSaveFile` (atomic replace); `content://` URIs
+  are written directly (untested). **Opening** decodes into a separate `DocumentData`; only a fully
+  valid document replaces the open one.
 
 ## PNG export
 
-`ProjectFile::exportPng` writes the document pixels at their own resolution as straight-alpha
-PNG, through the same safe write path. It ignores the view (no workspace, checkerboard or zoom)
-and does not change the project path or the unsaved-changes state.
+A fresh composite of the visible layers with their opacity (not the view cache, no checkerboard,
+no view transform), written as straight-alpha PNG at document resolution through the same safe
+write path. It does not change the project path or the unsaved state.
+
+## Crash recovery
+
+As in milestone 2 (per-session `QLockFile`, orphan discovery, one worker thread, generation-gated
+atomic commits, cleanup on save/new/open/discard), with these changes:
+- **Snapshot**: `LayeredDocument::snapshot()` copies the layer list as plain values. Layer images
+  are `QImage`s shared copy-on-write: the copy takes under 0.01 ms whatever the layer count, and
+  any later write on the UI thread (dab, undo swap, clear) detaches that one layer first (about
+  2.3–3.2 ms for a 2048 × 1536 layer, once per snapshot and edited layer). The worker therefore
+  reads pixels that can no longer change and never touches the live document.
+- **Format v2** embeds a version 2 project, so the whole layer structure is recovered. Version 1
+  recovery files (single image) are still read and offered as one-layer documents, and the
+  Restore prompt says so.
+- Opacity drags in progress count as unsaved changes for recovery.
 
 ## File handling and portability
 
-QML `FileDialog` (native on Windows; storage access framework on Android) returns URLs.
-`CanvasItem` converts `file:` URLs to local paths and passes other URLs (Android `content://`) to
-`QFile` as strings. Save As and Export add `.drawapp` / `.png` to local paths chosen without an
-extension. Nothing assumes a fixed writable folder; dialogs start in the platform's Documents or
-Pictures location. Android and iOS file flows are not verified.
+QML `FileDialog` (native on Windows; storage access framework on Android) returns URLs. `file:`
+URLs become local paths, other URLs (Android `content://`) are passed to `QFile` as strings.
+Nothing assumes a fixed writable folder. Android and iOS file and recovery flows are unverified.
 
 ## Decisions
 
 | Decision | Reason |
 |---|---|
-| CPU raster in one `QImage` | Simplest useful start; measured fast enough at this size |
-| 64×64 tile snapshots for undo | Small strokes stay small without changing the raster storage |
-| Swap-based undo/redo | Same memory whichever side an entry is on; budget accounting stays exact |
-| One 128 MiB budget for undo + redo | Predictable ceiling; oldest history goes first |
-| Raw premultiplied RGBA + zlib in a custom header | Lossless and exact; no PNG premultiply round-trip; small code |
-| SHA-256 of payload | Detects truncation and corruption before decoding |
-| `QSaveFile` | Atomic replace with Qt's tested implementation |
-| Clear without a confirmation dialog | It is undoable now |
-| Recovery: UI-thread image copy + one worker thread | Worker never sees mutable canvas data; copy measured at 2–4 ms |
-| Recovery commit gated by a mutex-protected generation | Stale writes can neither replace newer data nor recreate cleaned-up files |
-| Per-session recovery files with `QLockFile` | Distinguishes crashed sessions from other running instances |
-| Mouse ignored for 400 ms after any pen event | Windows can send OS-synthesized mouse events for pen input |
+| Full-canvas image per layer, no tiles | Simplest; memory and timings measured (BENCHMARKS.md) before considering tiles |
+| Cached composite, refreshed per changed rect | Stroke cost stays flat with layer count (measured); renderer unchanged |
+| Typed undo commands addressed by layer id | Undo stays correct after reorder/delete; one small switch, no framework |
+| Removed-layer images counted in the undo budget | Deleting layers cannot grow memory without bound |
+| Copy-on-write snapshot for recovery | UI-thread cost independent of layer count; detach cost paid once per edited layer |
+| One limit set shared by editor and file reader | Every document the app creates can be reopened |
+| Lock = pixel lock only | Predictable: lock prevents accidental painting, not organising layers |
+| Static QML module (`drawapp_ui`) | The UI test loads the real Main.qml |
+| Per-session recovery files with `QLockFile`; generation-gated commits | From milestone 2 |
 | MinGW 15.1 from MinGW-Builds (GitHub), SHA-256 pinned | Qt's repository metadata points at 13.1 but Qt was built with 15.1 |
 
 ## Limitations (known)
 
-- **Crash recovery has a loss window.** Work since the last committed recovery write is lost on a
-  crash; measured windows are in BENCHMARKS.md. Only process kills were tested: an OS crash or
-  power loss may also lose data the OS had not yet flushed to disk (no explicit fsync).
-- Recovery covers one document per running instance. Only the newest orphan is offered per start;
-  restoring it leaves other orphans for later starts. Two instances started at the same moment
-  could both offer the same orphan; the second restore then fails with a message.
-- Save, open and export run on the UI thread: 87 ms / 33 ms / 150 ms for typical artwork, up to
-  0.44 s / 0.14 s / 0.5 s worst case at 2048×1536 (BENCHMARKS.md). The UI pauses meanwhile.
-- `QSaveFile` commit does not guarantee the data reached the disk before a power loss on every
-  filesystem.
-- Undo budget counts pixel bytes only; it is a fixed number, not adapted to device memory.
-- Not a final painting engine: no tiles in the document itself, no worker threads, no GPU brush.
-- No smoothing, prediction, pressure curve, tilt or rotation; fast curves become straight segments.
+- **Crash recovery has a loss window** (interval + write time; it grows with layer count because
+  the worker re-encodes every layer: about 0.37 s per write at 5 layers and 0.8 s at 10, measured).
+  Only process kills were tested; OS crash or power loss may lose unflushed data.
+- **Save and open run on the UI thread** and grow with layer count: about 0.37 s / 0.14 s at
+  5 layers and 0.78 s / 0.25 s at 10 layers (2048 × 1536, representative content). The UI pauses.
+- A full composite rebuild (visibility, opacity, order) takes about 5.6 ms at 5 layers and 12 ms
+  at 10; an opacity drag recomposites on every slider move.
+- Memory: 12 MiB per layer plus the 12 MiB composite, plus up to 128 MiB of history.
+- Normal blending only; no groups, clipping, masks, vector layers or other blend modes.
+- Layer drag-and-drop reordering is not implemented (Up/Down buttons only).
+- Not a final painting engine: no tiled storage, no GPU brush; input-to-display latency unmeasured.
 - High-DPI checked only at 200 % scaling. Pen buttons and palm rejection untested on hardware.
 
 ## Future requirements (noted, not built)
 
-Layers and blend modes; tiled storage and partial texture uploads; background
-saving; the document model may hold both raster layers and editable strokes.
+More blend modes, groups, clipping and masks; tiled or sparse layer storage if memory requires
+it; background saving; incremental recovery writes (only changed layers); the document model may
+later hold editable strokes.
 
 ## Licensing notes
 

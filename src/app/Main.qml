@@ -109,6 +109,7 @@ ApplicationWindow {
                 }
             }
             ToolButton {
+                objectName: "undoButton"
                 text: "Undo"
                 enabled: canvas.canUndo
                 onClicked: canvas.undo()
@@ -116,6 +117,7 @@ ApplicationWindow {
                 ToolTip.text: (canvas.undoText ? "Undo " + canvas.undoText.toLowerCase() : "Undo") + " (Ctrl+Z)"
             }
             ToolButton {
+                objectName: "redoButton"
                 text: "Redo"
                 enabled: canvas.canRedo
                 onClicked: canvas.redo()
@@ -218,20 +220,250 @@ ApplicationWindow {
             ToolSeparator {}
 
             ToolButton {
-                text: "Clear"
-                onClicked: canvas.clearCanvas()
+                objectName: "clearLayerButton"
+                text: "Clear Layer"
+                onClicked: canvas.clearActiveLayer()
                 ToolTip.visible: hovered
-                ToolTip.text: "Clear the canvas (can be undone)"
+                ToolTip.text: "Clear the active layer (can be undone)"
+            }
+            ToolButton {
+                text: "Layers"
+                checkable: true
+                checked: layerPanel.visible
+                onToggled: layerPanel.visible = checked
+                ToolTip.visible: hovered
+                ToolTip.text: "Show or hide the layer panel"
             }
         }
     }
 
-    CanvasItem {
-        id: canvas
-        anchors.fill: parent
-        focus: true
-        enabled: !unsavedDialog.visible && !errorDialog.visible && !recoveryDialog.visible
+    // The active layer's entry in canvas.layers, or null.
+    function activeLayer() {
+        const list = canvas.layers
+        for (let i = 0; i < list.length; ++i) {
+            if (list[i].active)
+                return list[i]
+        }
+        return null
     }
+
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+
+            CanvasItem {
+                id: canvas
+                objectName: "canvas"
+                anchors.fill: parent
+                focus: true
+                enabled: !unsavedDialog.visible && !errorDialog.visible && !recoveryDialog.visible
+                         && !renameDialog.visible
+                onNotice: (message) => {
+                    noticeLabel.text = message
+                    noticeBanner.visible = true
+                    noticeTimer.restart()
+                }
+                onLayersChanged: window.syncOpacitySlider()
+            }
+
+            Rectangle {
+                id: noticeBanner
+                objectName: "noticeBanner"
+                visible: false
+                anchors.top: parent.top
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.topMargin: 12
+                width: Math.min(parent.width - 24, noticeLabel.implicitWidth + 32)
+                height: noticeLabel.implicitHeight + 16
+                radius: 6
+                color: "#e6303030"
+                border.color: "#f0a030"
+                Label {
+                    id: noticeLabel
+                    objectName: "noticeLabel"
+                    anchors.centerIn: parent
+                    width: parent.width - 32
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: "#ffffff"
+                }
+                Timer { id: noticeTimer; interval: 3500; onTriggered: noticeBanner.visible = false }
+            }
+        }
+
+        Pane {
+            id: layerPanel
+            Layout.preferredWidth: 270
+            Layout.fillHeight: true
+            visible: window.width >= 720
+            padding: 8
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 6
+
+                Label { text: "Layers (" + canvas.layerCount + "/" + canvas.maxLayers + ")"; font.bold: true }
+
+                ListView {
+                    id: layerList
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: canvas.layers
+                    spacing: 2
+                    delegate: Rectangle {
+                        required property var modelData
+                        objectName: "layerRow_" + modelData.name
+                        width: layerList.width
+                        height: 40
+                        radius: 4
+                        // Theme colors, so rows stay readable in light and dark Windows themes.
+                        color: modelData.active ? window.palette.highlight : window.palette.base
+                        border.color: modelData.active ? window.palette.highlight : window.palette.mid
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: canvas.setActiveLayer(parent.modelData.id)
+                            onDoubleClicked: window.openRename(parent.modelData)
+                        }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 4
+                            anchors.rightMargin: 4
+                            spacing: 2
+                            CheckBox {
+                                objectName: "visible_" + modelData.name
+                                checked: modelData.visible
+                                onToggled: canvas.setLayerVisible(modelData.id, checked)
+                                ToolTip.visible: hovered
+                                ToolTip.text: modelData.visible ? "Visible (click to hide)" : "Hidden (click to show)"
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: modelData.name
+                                elide: Text.ElideRight
+                                color: modelData.active ? window.palette.highlightedText
+                                       : (modelData.visible ? window.palette.text : window.palette.placeholderText)
+                                font.italic: !modelData.visible
+                            }
+                            Label {
+                                text: Math.round(modelData.opacity * 100) + "%"
+                                color: modelData.active ? window.palette.highlightedText : window.palette.text
+                            }
+                            ToolButton {
+                                objectName: "lock_" + modelData.name
+                                text: modelData.locked ? "Locked" : "Lock"
+                                checkable: true
+                                checked: modelData.locked
+                                onToggled: canvas.setLayerLocked(modelData.id, checked)
+                                ToolTip.visible: hovered
+                                ToolTip.text: modelData.locked ? "Locked: painting is blocked (click to unlock)"
+                                                               : "Lock painting on this layer"
+                            }
+                        }
+                    }
+                }
+
+                GridLayout {
+                    Layout.fillWidth: true
+                    columns: 3
+                    rowSpacing: 2
+                    columnSpacing: 2
+                    Button {
+                        Layout.fillWidth: true
+                        objectName: "addLayerButton"
+                        text: "Add"
+                        enabled: canvas.layerCount < canvas.maxLayers
+                        onClicked: canvas.addLayer()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "New transparent layer above the active one (Ctrl+Shift+N)"
+                    }
+                    Button {
+                        Layout.fillWidth: true
+                        objectName: "duplicateLayerButton"
+                        text: "Duplicate"
+                        enabled: canvas.layerCount < canvas.maxLayers
+                        onClicked: canvas.duplicateLayer(canvas.activeLayerId)
+                    }
+                    Button {
+                        Layout.fillWidth: true
+                        objectName: "deleteLayerButton"
+                        text: "Delete"
+                        enabled: canvas.layerCount > 1
+                        onClicked: canvas.deleteLayer(canvas.activeLayerId)
+                    }
+                    Button {
+                        Layout.fillWidth: true
+                        objectName: "layerUpButton"
+                        text: "Up"
+                        enabled: canvas.layerCount > 1 && canvas.layers.length > 0 && !canvas.layers[0].active
+                        onClicked: canvas.moveLayerUp(canvas.activeLayerId)
+                    }
+                    Button {
+                        Layout.fillWidth: true
+                        objectName: "layerDownButton"
+                        text: "Down"
+                        enabled: canvas.layerCount > 1 && canvas.layers.length > 0
+                                 && !canvas.layers[canvas.layers.length - 1].active
+                        onClicked: canvas.moveLayerDown(canvas.activeLayerId)
+                    }
+                    Button {
+                        Layout.fillWidth: true
+                        objectName: "renameLayerButton"
+                        text: "Rename"
+                        onClicked: window.openRename(window.activeLayer())
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label { text: "Opacity" }
+                    Slider {
+                        id: opacitySlider
+                        objectName: "opacitySlider"
+                        Layout.fillWidth: true
+                        from: 0
+                        to: 100
+                        stepSize: 1
+                        // Dragging previews live; releasing records one undo step for the drag.
+                        onMoved: {
+                            if (pressed)
+                                canvas.previewLayerOpacity(canvas.activeLayerId, value / 100)
+                            else
+                                canvas.commitLayerOpacity(canvas.activeLayerId, value / 100) // keyboard
+                        }
+                        onPressedChanged: {
+                            if (!pressed)
+                                canvas.commitLayerOpacity(canvas.activeLayerId, value / 100)
+                        }
+                    }
+                    Label { text: Math.round(opacitySlider.value) + "%"; Layout.preferredWidth: 36 }
+                }
+            }
+        }
+    }
+
+    function syncOpacitySlider() {
+        const layer = activeLayer()
+        if (layer && !opacitySlider.pressed)
+            opacitySlider.value = Math.round(layer.opacity * 100)
+    }
+
+    function openRename(layer) {
+        if (!layer)
+            return
+        renameDialog.layerId = layer.id
+        renameField.text = layer.name
+        renameDialog.open()
+        renameField.selectAll()
+        renameField.forceActiveFocus()
+    }
+
+    Component.onCompleted: syncOpacitySlider()
 
     footer: ToolBar {
         Label {
@@ -306,11 +538,14 @@ ApplicationWindow {
     Dialog {
         id: unsavedDialog
         anchors.centerIn: parent
+        width: Math.min(window.width - 32, 420)
         modal: true
         title: "Save changes?"
         focus: true
         standardButtons: Dialog.Save | Dialog.Discard | Dialog.Cancel
         Label {
+            width: parent.width
+            wrapMode: Text.Wrap
             text: "\"" + canvas.documentTitle + "\" has unsaved changes."
             focus: true
             Keys.onReturnPressed: unsavedDialog.accept()
@@ -372,6 +607,25 @@ ApplicationWindow {
     }
 
     Dialog {
+        id: renameDialog
+        property int layerId: 0
+        anchors.centerIn: parent
+        width: Math.min(window.width - 32, 360)
+        modal: true
+        title: "Rename layer"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        TextField {
+            id: renameField
+            objectName: "renameField"
+            width: parent.width
+            maximumLength: 256
+            onAccepted: renameDialog.accept()
+        }
+        onAccepted: canvas.renameLayer(layerId, renameField.text)
+        onClosed: canvas.forceActiveFocus()
+    }
+
+    Dialog {
         id: errorDialog
         property alias text: errorLabel.text
         anchors.centerIn: parent
@@ -398,6 +652,7 @@ ApplicationWindow {
     Shortcut { sequences: [StandardKey.Save]; onActivated: window.saveDocument(null) }
     Shortcut { sequences: ["Ctrl+Shift+S"]; onActivated: window.saveAsDocument(null) }
     Shortcut { sequences: ["Ctrl+Shift+E"]; onActivated: exportDialog.open() }
+    Shortcut { sequences: ["Ctrl+Shift+N"]; onActivated: canvas.addLayer() }
     Shortcut { sequence: "B"; onActivated: canvas.tool = CanvasItem.Brush }
     Shortcut { sequence: "E"; onActivated: canvas.tool = CanvasItem.Eraser }
     Shortcut { sequence: "["; onActivated: canvas.brushSize = Math.max(1, Math.round(canvas.brushSize / 1.2)) }

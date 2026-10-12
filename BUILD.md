@@ -42,6 +42,10 @@ cmake --install build\windows-mingw-release --prefix dist\windows-mingw
 dist\windows-mingw\bin\drawapp.exe
 ```
 
+`ctest` runs the window tests (`tst_canvas`, `tst_ui`) on Qt's offscreen platform with
+`QT_QPA_FONTDIR=C:/Windows/Fonts`, so they do not open windows on the desktop. Run the test
+executables directly (without `QT_QPA_PLATFORM`) to watch them in real windows.
+
 Environment variables for testing and measurement:
 
 | Variable | Effect |
@@ -65,11 +69,33 @@ Run `dist\windows-mingw\bin\drawapp.exe` (after the install step above), then:
    keeps the current drawing.
 6. Ctrl+Shift+E exports a PNG; the title keeps its `*` if there were unsaved changes.
 7. Closing the window with unsaved changes asks first.
-8. Crash recovery: draw, wait more than 10 s, then end the process
+8. Layers: see "Testing layers" below.
+9. Crash recovery: draw, wait more than 10 s, then end the process
    (`taskkill /F /IM drawapp.exe`). Start the app again: it offers Restore / Discard. Restore brings
    back the drawing as of the last autosave, with `*` in the title. Strokes made in the last
    seconds before the kill may be missing (see BENCHMARKS.md). Escape keeps the recovery data for
    the next start; Discard deletes it.
+
+## Testing layers (manual, Windows)
+
+1. Start the app. The panel on the right shows "Layers (1/42)" with "Layer 1".
+2. Rename it to "Background" (Rename button or double-click the row, type, Enter). Pick a light
+   color, size 256, and paint over most of the canvas.
+3. Add a layer and rename it "Sketch". Draw a rough outline in blue at a small size, then drag the
+   opacity slider to about 40 %. One Ctrl+Z puts the opacity back to 100 % in one step.
+4. Add "Color" and paint some areas. Add "Line art" and draw outlines in black.
+5. Select "Sketch", press Up until it is the top layer, then untick its check box (hidden).
+   Try painting while "Sketch" is selected: nothing is drawn and a banner explains why.
+6. Press Lock on "Line art", select it and try to paint: refused, with an explanation.
+7. Select "Color", switch to the Eraser and erase part of it: the background shows through and
+   the line art above is untouched.
+8. Duplicate and Delete a layer, then undo both; undo and redo the steps above and check that the
+   layer list and the canvas follow.
+9. Save (Ctrl+S), New (Ctrl+N) and Open the file: same layers, order, names, visibility, opacity,
+   locks and active layer. Export PNG (Ctrl+Shift+E): only visible layers, with transparency
+   where nothing is painted.
+10. End the process from Task Manager more than 10 s after a change and start the app again:
+    Restore brings back all layers.
 
 ## Android (APK builds; not launched)
 
@@ -126,7 +152,7 @@ linking question (ARCHITECTURE.md) before shipping.
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 4/4 suites (22 + 36 + 24 + 32 tests); deployed build driven with real keyboard/mouse input: drawing, undo/redo, prompts, native file dialogs, damaged-file error; 9 forced kills with restore (screenshots checked) |
-| Android arm64 | **Built but not launched** | Release (unsigned) and debug (signed with the development key, `apksigner` verified) APKs rebuilt after milestone 2; no device or emulator image available. Drawing, file dialogs, `content://` saving and recovery are unverified |
+| Windows 11 x64 (25H2, Intel Core Ultra 7 155H, 200 % scaling) | **Built and launched** | `ctest` 5/5 suites (22 + 60 + 27 + 44 + 4 tests). Milestones 0–2 were driven on the desktop with real input (drawing, prompts, native dialogs, 9 forced kills). Milestone 3's layer panel was driven with synthetic input through the real Main.qml on the offscreen platform (`tst_ui`, screenshots inspected); an on-screen session for layers is still pending |
+| Android arm64 | **Built but not launched** | Release (unsigned) and debug (signed with the development key, `apksigner` verified) APKs rebuilt after milestone 3; no device or emulator image available. Drawing, file dialogs, `content://` saving and recovery are unverified |
 | Linux | **Blocked** | WSL needs a sudo password to install the compiler and libraries |
 | iOS / iPadOS | **Blocked** | No macOS or Xcode |
