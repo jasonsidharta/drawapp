@@ -29,6 +29,7 @@ add_test(NAME tst_recovery COMMAND tst_recovery)
 set(CANVAS_SOURCES
     ../src/app/CanvasItem.cpp ../src/app/CanvasItem.h ../src/app/CanvasItemSelection.cpp
     ../src/app/BrushLibrary.cpp ../src/app/BrushLibrary.h
+    ../src/app/BrushStudio.cpp ../src/app/BrushStudio.h
     ../src/app/BrushScratchpad.cpp ../src/app/BrushScratchpad.h
     ../src/app/BrushThumbnails.cpp ../src/app/BrushThumbnails.h)
 qt_add_executable(tst_canvas tst_canvas.cpp ${CANVAS_SOURCES})

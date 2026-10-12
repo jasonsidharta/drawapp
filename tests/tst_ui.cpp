@@ -14,6 +14,7 @@
 #include "TransformSession.h"
 
 #include <QDir>
+#include <QJsonDocument>
 #include <QScopeGuard>
 #include <QQmlApplicationEngine>
 #include <QSemaphore>
@@ -469,7 +470,162 @@ private slots:
         QTRY_VERIFY(panel->width() > 600);
     }
 
+    // --- milestone 9: Brush Studio through the real UI ---
+
+    void brushStudio()
+    {
+        m_canvas->newDocument();
+        m_canvas->setTool(CanvasItem::Brush);
+        BrushLibrary *lib = m_canvas->brushes();
+        BrushStudio *studio = lib->studio();
+        QVERIFY(lib->select(QStringLiteral("builtin.clean-ink")));
+        lib->resetCurrent();
+        const QString inkId = lib->currentId();
+        const BrushSettings before = lib->workingSettings(inkId);
+        const auto restore = qScopeGuard([&] {
+            if (QObject *popup = m_window->findChild<QObject *>("studioPopup"))
+                QMetaObject::invokeMethod(popup, "close");
+            QTRY_VERIFY(!find("brushStudioPage"));
+            for (const QVariant &p : lib->presets())
+                if (!p.toMap().value("builtIn").toBool() && lib->select(p.toMap().value("id").toString()))
+                    lib->deleteCurrent();
+            lib->select(inkId);
+            lib->resetCurrent();
+            lib->select(BrushPresets::defaultPaintId());
+            m_canvas->setTool(CanvasItem::Brush);
+        });
+        auto typeInto = [&](const QString &name, const QString &text) {
+            click(name);
+            QTest::keyClick(m_window, Qt::Key_A, Qt::ControlModifier);
+            for (const QChar ch : text)
+                QTest::keyClick(m_window, ch.toLatin1());
+            QTest::keyClick(m_window, Qt::Key_Return);
+        };
+
+        // Opened from the quick panel; it edits a copy.
+        click("brushSettingsButton");
+        QVERIFY(waitFor("brushPanel"));
+        click("openStudioButton");
+        QVERIFY(waitFor("brushStudioPage"));
+        QTRY_VERIFY(studio->active());
+        QCOMPARE(studio->presetId(), inkId);
+        QVERIFY(!find("brushPanel")); // the quick panel closed
+
+        // Categories, numeric entry, and the preview follows every change.
+        click("category_Brush Tip");
+        QTRY_COMPARE(studio->group(), QStringLiteral("Brush Tip"));
+        const QString preview = studio->preview();
+        typeInto("field_size", "40");
+        QTRY_COMPARE(studio->settings().size, 40.0);
+        // Leaving the field keeps the value (whatever the locale's digit grouping).
+        click("studioSearch");
+        QCOMPARE(studio->settings().size, 40.0);
+        QVERIFY(studio->preview() != preview);
+        QQuickItem *reset = waitFor("reset_size");
+        QVERIFY(reset); // a changed setting offers its reset
+        // Search across categories.
+        typeInto("studioSearch", "jitter");
+        QTRY_VERIFY(studio->propertyIds().contains("sizeJitter") && studio->propertyIds().contains("hueJitter"));
+        QVERIFY(!studio->propertyIds().contains("size"));
+        typeInto("field_sizeJitter", "50");
+        QTRY_COMPARE(studio->settings().sizeJitter, 0.5);
+        studio->setSearch(QString());
+
+        // Dynamics: switch on, the sensor curve editor appears; drag the curve's end point down.
+        click("category_Pressure and Tilt");
+        QTRY_COMPARE(studio->group(), QStringLiteral("Pressure and Tilt"));
+        click("switch_dynamics.size");
+        QTRY_VERIFY(studio->settings().dynamicsFor(DynamicTarget::Size).enabled);
+        QQuickItem *curve = waitFor("curve_dynamics.size_0");
+        QVERIFY(curve);
+        QVERIFY(QMetaObject::invokeMethod(waitFor("brushStudioPage"), "ensureVisible", Q_ARG(QVariant, QVariant::fromValue(curve))));
+        QTest::qWait(50);
+        const qreal pad = curve->property("pad").toReal();
+        const QPoint end = curve->mapToScene(QPointF(curve->width() - pad, pad)).toPoint();
+        const QPoint lower = curve->mapToScene(QPointF(curve->width() - pad, curve->height() * 0.6)).toPoint();
+        QTest::mousePress(m_window, Qt::LeftButton, Qt::NoModifier, end);
+        for (int i = 1; i <= 8; ++i)
+            QTest::mouseMove(m_window, end + (lower - end) * i / 8);
+        QTest::mouseRelease(m_window, Qt::LeftButton, Qt::NoModifier, lower);
+        QTRY_VERIFY(studio->settings().dynamicsFor(DynamicTarget::Size).mappings.at(0).curve.points().back().y() < 0.6);
+
+        // The pad paints with the copy, not the document.
+        const int steps = m_canvas->history().undoCount();
+        if (QQuickItem *pad = waitFor("studioPad")) {
+            const QPoint a = centerOf(pad, 0.2, 0.5), b = centerOf(pad, 0.8, 0.5);
+            QTest::mousePress(m_window, Qt::LeftButton, Qt::NoModifier, a);
+            for (int i = 1; i <= 10; ++i)
+                QTest::mouseMove(m_window, a + (b - a) * i / 10);
+            QTest::mouseRelease(m_window, Qt::LeftButton, Qt::NoModifier, b);
+            QVERIFY(qAlpha(qobject_cast<BrushScratchpad *>(pad)->layer().pixel(pad->mapFromScene(centerOf(pad)).toPoint())) > 0);
+        } else {
+            QFAIL("no studio pad");
+        }
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        snap("brush_studio");
+
+        // Cancel: the preset and the working brush are exactly as before.
+        click("studioCancel");
+        QTRY_VERIFY(!studio->active());
+        QTRY_VERIFY(!find("brushStudioPage"));
+        QVERIFY(lib->workingSettings(inkId) == before);
+        QVERIFY(lib->savedSettings(inkId) == before);
+
+        // Done saves into the preset.
+        lib->select(inkId);
+        QVERIFY(studio->open());
+        studio->setValue("hardness", 0.3);
+        studio->setValue("taperEnd", 60.0);
+        QVERIFY(studio->modified());
+        QVERIFY(lib->workingSettings(inkId).hardness == before.hardness); // still untouched
+        QVERIFY(studio->done().isEmpty());
+        QCOMPARE(lib->savedSettings(inkId).hardness, 0.3);
+        QCOMPARE(lib->savedSettings(inkId).taperEnd, 60.0);
+        QVERIFY(lib->currentHasSavedChanges());
+
+        // Engine switch shows which settings apply; erasers cannot become paint brushes.
+        QVERIFY(studio->open());
+        studio->setValue("blend", "smudge");
+        QCOMPARE(studio->engine(), QStringLiteral("smudge"));
+        QVERIFY(studio->propertyRow("smudgeStrength").value("applies").toBool());
+        QVERIFY(!studio->propertyRow("paintMode").value("applies").toBool());
+        studio->resetAll();
+        QCOMPARE(studio->engine(), QStringLiteral("paint"));
+
+        // Duplicate, rename, export, import.
+        QVERIFY(studio->duplicate(QStringLiteral("Studio copy")).isEmpty());
+        QVERIFY(studio->presetId().startsWith("custom."));
+        QVERIFY(studio->rename(QStringLiteral("Studio ink")).isEmpty());
+        QTemporaryDir dir;
+        const QUrl file = QUrl::fromLocalFile(dir.filePath("ink.drawbrush"));
+        QVERIFY(studio->exportTo(file).isEmpty());
+        QVERIFY(studio->done().isEmpty());
+        QCOMPARE(lib->currentName(), QStringLiteral("Studio ink"));
+        QVERIFY(studio->importFrom(file).isEmpty());
+        QVERIFY(studio->active());
+        QCOMPARE(studio->name(), QStringLiteral("Studio ink"));
+        QCOMPARE(studio->settings().hardness, 0.3);
+        QVERIFY(studio->presetId() != inkId);
+        studio->cancel();
+        QCOMPARE(studio->rename(QStringLiteral("x")), QString()); // closed: nothing to do
+
+        // A narrow window shows the category menu instead of the list.
+        lib->select(inkId);
+        const QSize wideSize = m_window->size();
+        m_window->resize(420, 860);
+        window()->setProperty("width", 420);
+        QVERIFY(QMetaObject::invokeMethod(m_window, "openStudio"));
+        QVERIFY(waitFor("brushStudioPage"));
+        QTRY_VERIFY(!find("studioCategories"));
+        snap("brush_studio_narrow");
+        click("studioDone");
+        QTRY_VERIFY(!find("brushStudioPage"));
+        m_window->resize(wideSize);
+    }
+
 private:
+    QQuickWindow *window() const { return m_window; }
+
     // --- milestone 8: the artist tasks through the real UI (helpers, not tests) ---
 
     // Samples along an ellipse (document coordinates), 8 ms apart, pressure rising and falling.

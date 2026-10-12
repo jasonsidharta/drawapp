@@ -38,14 +38,35 @@ void BrushScratchpad::setCanvas(CanvasItem *canvas)
         // A different kind of brush (eraser or smudge vs. paint) needs a different scratch layer.
         connect(m_canvas, &CanvasItem::toolChanged, this, &BrushScratchpad::clear);
         connect(m_canvas->brushes(), &BrushLibrary::currentChanged, this, [this] {
-            const bool wantBands = m_canvas && m_canvas->strokeSettings(m_canvas->tool() == CanvasItem::Eraser).blend
-                                                   != BrushBlend::Paint;
-            if (wantBands != m_layerHasBands)
+            if ((activeSettings().blend != BrushBlend::Paint) != m_layerHasBands)
                 clear();
         });
     }
     clear();
     emit canvasChanged();
+}
+
+BrushSettings BrushScratchpad::activeSettings() const
+{
+    if (m_studio && m_studio->active())
+        return m_studio->settings(); // the Brush Studio's copy, before Done
+    return m_canvas ? m_canvas->strokeSettings(m_canvas->tool() == CanvasItem::Eraser) : BrushSettings();
+}
+
+void BrushScratchpad::setStudio(BrushStudio *studio)
+{
+    if (studio == m_studio)
+        return;
+    if (m_studio)
+        disconnect(m_studio, nullptr, this, nullptr);
+    m_studio = studio;
+    if (m_studio)
+        connect(m_studio, &BrushStudio::changed, this, [this] {
+            if ((activeSettings().blend != BrushBlend::Paint) != m_layerHasBands)
+                clear();
+        });
+    clear();
+    emit studioChanged();
 }
 
 void BrushScratchpad::itemChange(ItemChange change, const ItemChangeData &value)
@@ -82,7 +103,7 @@ void BrushScratchpad::clear()
     endStroke();
     m_layer = QImage();
     ensureLayer();
-    m_layerHasBands = m_canvas && m_canvas->strokeSettings(m_canvas->tool() == CanvasItem::Eraser).blend != BrushBlend::Paint;
+    m_layerHasBands = m_canvas && activeSettings().blend != BrushBlend::Paint;
     if (m_layerHasBands) {
         QPainter p(&m_layer);
         const QColor bands[] = {QColor(205, 70, 60), QColor(235, 190, 70), QColor(60, 120, 200), QColor(50, 150, 90)};
@@ -129,7 +150,7 @@ void BrushScratchpad::beginStroke(const QPointF &pos, qreal pressure, const QPoi
         return;
     endStroke();
     ensureLayer();
-    const BrushSettings settings = m_canvas->strokeSettings(m_canvas->tool() == CanvasItem::Eraser);
+    const BrushSettings settings = activeSettings();
     // Smoothing in screen pixels, as on the canvas at 100 % zoom.
     m_engine = std::make_unique<StrokeEngine>(settings, m_canvas->brushColor(), ++m_strokes,
                                               StrokeEngine::smoothingRadius(settings));

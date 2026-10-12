@@ -15,6 +15,8 @@ Item {
     readonly property bool wide: width >= 620
     property bool favoritesOnly: false
     property bool advanced: false
+    // The full editor (Brush Studio) was asked for.
+    signal studioRequested()
 
     implicitHeight: layout.implicitHeight
 
@@ -296,6 +298,15 @@ Item {
                 // Plain text: Android's default font has no triangle arrows.
                 text: panel.advanced ? "Fewer settings" : "More settings…"
                 onClicked: panel.advanced = !panel.advanced
+            }
+            Button {
+                objectName: "openStudioButton"
+                flat: true
+                text: "Brush Studio…"
+                onClicked: panel.studioRequested()
+                ToolTip.delay: 600
+                ToolTip.visible: hovered
+                ToolTip.text: "Every setting of this brush, with sensor curves and a preview"
             }
 
             ColumnLayout {

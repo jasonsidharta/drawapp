@@ -1,0 +1,52 @@
+{
+    "custom": [
+        {
+            "id": "custom.1",
+            "settings": {
+                "accumulation": "buildUp",
+                "airbrush": false,
+                "airbrushRate": 30,
+                "angle": 15,
+                "angleJitter": 0,
+                "blend": "paint",
+                "flow": 0.45,
+                "followDirection": true,
+                "hardness": 0.7,
+                "name": "My pencil",
+                "opacity": 0.85,
+                "pressureFlow": {"enabled": true, "gamma": 1, "minimum": 0.2},
+                "pressureOpacity": {"enabled": false, "gamma": 1, "minimum": 0},
+                "pressureSize": {"enabled": true, "gamma": 1.5, "minimum": 0.25},
+                "roundness": 0.8,
+                "size": 6,
+                "smoothing": 20,
+                "smudgePickup": 0.25,
+                "smudgeStrength": 0.6,
+                "spacing": 0.1,
+                "texture": "paper",
+                "textureMode": "subtract",
+                "textureScale": 1,
+                "textureStrength": 0.5,
+                "tiltOpacity": 1,
+                "tiltSize": 1.5,
+                "tip": ""
+            }
+        }
+    ],
+    "favorites": ["custom.1", "builtin.clean-ink"],
+    "format": "drawapp-brushes",
+    "overrides": {
+        "builtin.solid-round": {
+            "accumulation": "uniform", "airbrush": false, "airbrushRate": 30, "angle": 0, "angleJitter": 0,
+            "blend": "paint", "flow": 1, "followDirection": false, "hardness": 1, "name": "Solid Round",
+            "opacity": 0.5, "pressureFlow": {"enabled": false, "gamma": 1, "minimum": 0},
+            "pressureOpacity": {"enabled": false, "gamma": 1, "minimum": 0},
+            "pressureSize": {"enabled": true, "gamma": 1, "minimum": 0.1}, "roundness": 1, "size": 20,
+            "smoothing": 0, "smudgePickup": 0.25, "smudgeStrength": 0.6, "spacing": 0.15, "texture": "",
+            "textureMode": "multiply", "textureScale": 1, "textureStrength": 0, "tiltOpacity": 1, "tiltSize": 1,
+            "tip": ""
+        }
+    },
+    "selected": {"eraser": "builtin.hard-eraser", "paint": "custom.1"},
+    "version": 1
+}

@@ -23,6 +23,8 @@ class BrushScratchpad : public QQuickPaintedItem
     Q_OBJECT
     QML_ELEMENT
     Q_PROPERTY(CanvasItem *canvas READ canvas WRITE setCanvas NOTIFY canvasChanged)
+    // Optional: while this studio is open, the pad paints with its (unsaved) copy of the brush.
+    Q_PROPERTY(BrushStudio *studio READ studio WRITE setStudio NOTIFY studioChanged)
 
 public:
     explicit BrushScratchpad(QQuickItem *parent = nullptr);
@@ -30,6 +32,10 @@ public:
 
     CanvasItem *canvas() const { return m_canvas; }
     void setCanvas(CanvasItem *canvas);
+    BrushStudio *studio() const { return m_studio; }
+    void setStudio(BrushStudio *studio);
+    // The settings a stroke here uses.
+    BrushSettings activeSettings() const;
 
     void paint(QPainter *painter) override;
     // Empties the scratch layer (with colour bands for erasers and smudge).
@@ -43,6 +49,7 @@ public:
 
 signals:
     void canvasChanged();
+    void studioChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -60,6 +67,7 @@ private:
     void advance();
 
     QPointer<CanvasItem> m_canvas;
+    QPointer<BrushStudio> m_studio;
     QPointer<QQuickWindow> m_window;
     QImage m_layer;
     bool m_layerHasBands = false;

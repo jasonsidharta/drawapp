@@ -31,6 +31,7 @@ BrushLibrary::BrushLibrary(QObject *parent)
     : QObject(parent)
     , m_paintId(BrushPresets::defaultPaintId())
     , m_eraserId(BrushPresets::defaultEraserId())
+    , m_studio(new BrushStudio(this))
 {
     // Coalesces quick successive changes (favourites, selections) into one write.
     m_saveTimer.setSingleShot(true);
@@ -348,22 +349,52 @@ QString BrushLibrary::newCustomId() const
 
 QString BrushLibrary::saveAsNew(const QString &name)
 {
+    const BrushSettings settings = workingSettings(currentId());
+    const QString trimmed = name.trimmed();
+    return addPreset(settings, trimmed.isEmpty() ? settings.name + QStringLiteral(" copy") : trimmed);
+}
+
+QString BrushLibrary::addPreset(const BrushSettings &source, const QString &name)
+{
     if (int(m_data.custom.size()) >= BrushPresetStore::MaxCustomPresets) {
         setStoreStatus(QStringLiteral("There are already %1 custom brushes; delete one first.")
                            .arg(BrushPresetStore::MaxCustomPresets));
         return QString();
     }
-    BrushSettings settings = workingSettings(currentId());
+    BrushSettings settings = source.sanitized();
     const QString trimmed = name.trimmed();
-    settings.name = (trimmed.isEmpty() ? settings.name + QStringLiteral(" copy") : trimmed).left(64);
+    settings.name = (trimmed.isEmpty() ? QStringLiteral("Custom brush") : trimmed).left(64);
     const QString id = newCustomId();
-    m_data.custom.push_back(BrushPreset{id, settings.sanitized(), false});
+    m_data.custom.push_back(BrushPreset{id, settings, false});
     publishThumbnail(id);
     flush();
     select(id);
     emit presetsChanged();
     emit currentChanged();
     return id;
+}
+
+void BrushLibrary::storePreset(const QString &id, const BrushSettings &source)
+{
+    BrushSettings settings = source.sanitized();
+    if (BrushPreset *custom = customPreset(id)) {
+        if (settings.name.trimmed().isEmpty())
+            settings.name = custom->settings.name;
+        custom->settings = settings;
+    } else if (const BrushPreset *builtIn = BrushPresets::builtIn(id)) {
+        settings.name = builtIn->settings.name; // built-ins keep their names
+        if (settings == builtIn->settings)
+            m_data.overrides.erase(id);
+        else
+            m_data.overrides[id] = settings;
+    } else {
+        return;
+    }
+    m_edits.erase(id);
+    publishThumbnail(id);
+    flush();
+    emit currentChanged();
+    emit presetsChanged();
 }
 
 void BrushLibrary::resetCurrent()

@@ -4,6 +4,8 @@
 // Pressure and tilt in these tests are simulated (StrokeSample values); they show the engine's
 // response, not that any physical pen delivers them.
 
+#include "BrushPresetFile.h"
+#include "BrushPresetStore.h"
 #include "BrushPresets.h"
 #include "BrushProperties.h"
 #include "BrushTips.h"
@@ -346,6 +348,99 @@ std::map<QString, Scenario> scenarios()
         {"hatchSpacing", {none, 12.0}},
         {"hatchThickness", {none, 4.0}},
     };
+}
+
+
+QString goldenPath(const QString &name)
+{
+    return QStringLiteral(DRAWAPP_SOURCE_DIR "/tests/golden/") + name;
+}
+
+bool writeGolden()
+{
+    return qEnvironmentVariableIntValue("DRAWAPP_WRITE_GOLDEN") == 1;
+}
+
+// A tip computed pixel by pixel (no QPainter), so it is the same on every platform.
+QImage mathTip()
+{
+    QImage tip(32, 32, QImage::Format_Grayscale8);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            tip.scanLine(y)[x] = uchar(x + y < 40 && x > 2 && y > 2 ? 255 - 4 * x : 0);
+    return tip;
+}
+
+// The golden preset: most new properties away from their defaults.
+BrushSettings goldenBrush()
+{
+    BrushSettings s;
+    s.name = QStringLiteral("Golden wet ink");
+    s.blend = BrushBlend::WetPaint;
+    s.size = 18;
+    s.tipImage = mathTip();
+    s.spacing = 0.12;
+    s.scatter = 0.2;
+    s.count = 2;
+    s.hueJitter = 12;
+    s.texture = QStringLiteral("canvas");
+    s.textureStrength = 0.35;
+    s.textureRotation = 30;
+    s.taperStart = 40;
+    s.taperEnd = 60;
+    s.wetLoad = 0.8;
+    s.wetLoadLength = 400;
+    s.wetPull = 0.4;
+    s.pressureSize = {true, 0.2, 1.4};
+    ParameterDynamics d;
+    d.enabled = true;
+    d.minimum = 0.25;
+    d.combine = CombineMode::Max;
+    d.mappings = {{Sensor::Pressure, SensorCurve::exponential(1.8), 0}, {Sensor::Speed, SensorCurve::inverted(), 3.0}};
+    s.dynamicsFor(DynamicTarget::Opacity) = d;
+    return s.sanitized();
+}
+
+// Compares two preset JSON objects; the embedded tip image by pixels (PNG bytes may differ
+// between zlib versions).
+bool sameJson(QJsonObject a, QJsonObject b, QString *why)
+{
+    const QJsonValue ta = a.take("tipImage"), tb = b.take("tipImage");
+    bool okA = false, okB = false;
+    if (BrushProperties::decodeImage(ta.toString(), &okA).convertToFormat(QImage::Format_Grayscale8)
+        != BrushProperties::decodeImage(tb.toString(), &okB).convertToFormat(QImage::Format_Grayscale8)) {
+        *why = QStringLiteral("tip image differs");
+        return false;
+    }
+    if (a != b) {
+        *why = QString::fromUtf8(QJsonDocument(a).toJson(QJsonDocument::Compact)) + QStringLiteral(" vs ")
+             + QString::fromUtf8(QJsonDocument(b).toJson(QJsonDocument::Compact));
+        return false;
+    }
+    return true;
+}
+
+// Images equal within a small tolerance (platform floating-point differences): at most maxShare
+// of the pixels may differ, and none by more than maxDelta in any channel.
+bool closeImages(const QImage &a, const QImage &b, int maxDelta, double maxShare, QString *why)
+{
+    if (a.size() != b.size()) {
+        *why = QStringLiteral("size differs");
+        return false;
+    }
+    int differ = 0, worst = 0;
+    for (int y = 0; y < a.height(); ++y)
+        for (int x = 0; x < a.width(); ++x) {
+            const QRgb p = a.pixel(x, y), q = b.pixel(x, y);
+            const int d = std::max({std::abs(qRed(p) - qRed(q)), std::abs(qGreen(p) - qGreen(q)),
+                                    std::abs(qBlue(p) - qBlue(q)), std::abs(qAlpha(p) - qAlpha(q))});
+            if (d > 0)
+                ++differ;
+            worst = std::max(worst, d);
+        }
+    const double share = double(differ) / (a.width() * a.height());
+    *why = QStringLiteral("%1 % of pixels differ, by up to %2").arg(share * 100, 0, 'f', 2).arg(worst);
+    return share <= maxShare && worst <= maxDelta;
 }
 
 } // namespace
@@ -1069,6 +1164,142 @@ private slots:
         QVERIFY2(in.open(QIODevice::ReadOnly), "docs/brush-settings-specification.md is missing (run with DRAWAPP_WRITE_SPEC=1)");
         QVERIFY2(QString::fromUtf8(in.readAll()).replace("\r\n", "\n") == spec,
                  "docs/brush-settings-specification.md is out of date: run tst_brushengine with DRAWAPP_WRITE_SPEC=1");
+    }
+
+    // --- preset files and golden data ---
+
+    void presetFileGolden()
+    {
+        const BrushSettings s = goldenBrush();
+        const QByteArray encoded = BrushPresetFile::encode(s);
+        const QString path = goldenPath(QStringLiteral("golden-wet-ink.drawbrush"));
+        if (writeGolden()) {
+            QFile out(path);
+            QVERIFY(out.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            out.write(encoded);
+        }
+        QFile in(path);
+        QVERIFY2(in.open(QIODevice::ReadOnly), "golden file missing (run with DRAWAPP_WRITE_GOLDEN=1)");
+        const QByteArray stored = in.readAll();
+        // Stable serialisation: today's encoding equals the committed file.
+        const QJsonObject now = QJsonDocument::fromJson(encoded).object(), then = QJsonDocument::fromJson(stored).object();
+        QCOMPARE(then.value("format").toString(), QStringLiteral("drawapp-brush"));
+        QCOMPARE(then.value("version").toInt(), 2);
+        QString why;
+        QVERIFY2(sameJson(now.value("settings").toObject(), then.value("settings").toObject(), &why), qPrintable(why));
+        // Round trip from the committed file.
+        BrushSettings back;
+        QString error;
+        QStringList warnings;
+        QVERIFY2(BrushPresetFile::decode(stored, &back, &error, &warnings), qPrintable(error));
+        QVERIFY(warnings.isEmpty());
+        QVERIFY(back == s);
+
+        // A file from a future version 2 writer with keys we do not know: kept on re-export.
+        QJsonObject root = then;
+        QJsonObject settings = root.value("settings").toObject();
+        settings["sparkleAmount"] = 0.7;
+        root["settings"] = settings;
+        root["metadata"] = QJsonObject{{"app", "DrawApp 12"}, {"author", "someone"}};
+        QVERIFY(BrushPresetFile::decode(QJsonDocument(root).toJson(), &back, &error, &warnings));
+        QCOMPARE(QJsonDocument::fromJson(BrushPresetFile::encode(back)).object()["settings"].toObject()["sparkleAmount"].toDouble(), 0.7);
+
+        // Malformed files are refused with a message, never half-loaded.
+        const QList<QByteArray> malformed{QByteArray(), QByteArray("{"), QByteArray("[]"),
+                                          QByteArray(R"({"format":"drawapp-brushes","version":2})"),
+                                          QByteArray(R"({"format":"drawapp-brush","version":3,"settings":{}})"),
+                                          QByteArray(R"({"format":"drawapp-brush","version":"2","settings":{}})"),
+                                          QByteArray(R"({"format":"drawapp-brush","version":2})"),
+                                          QByteArray(R"({"format":"drawapp-brush","version":2,"settings":{"size":"big"}})"),
+                                          QByteArray(BrushPresetFile::MaxFileBytes + 1, ' ')};
+        for (const QByteArray &bad : malformed) {
+            error.clear();
+            QVERIFY2(!BrushPresetFile::decode(bad, &back, &error, &warnings), bad.left(80).constData());
+            QVERIFY(!error.isEmpty());
+        }
+        QVERIFY(!BrushPresetFile::decode(R"({"format":"drawapp-brush","version":3,"settings":{}})", &back, &error, &warnings));
+        QVERIFY(error.contains("newer"));
+        // Missing resources: an unknown texture loads (kept, drawn without it) with a warning.
+        warnings.clear();
+        QVERIFY(BrushPresetFile::decode(R"({"format":"drawapp-brush","version":2,"settings":{"texture":"marble","textureStrength":0.5}})",
+                                        &back, &error, &warnings));
+        QCOMPARE(back.texture, QStringLiteral("marble"));
+        QVERIFY(!warnings.isEmpty());
+        QVERIFY(validPremultiplied(render(back, standardStroke(), stripes())));
+    }
+
+    void libraryVersion1Migrates()
+    {
+        QFile in(goldenPath(QStringLiteral("library-v1.json")));
+        QVERIFY(in.open(QIODevice::ReadOnly));
+        BrushPresetStore::Data data;
+        QString error;
+        QStringList warnings;
+        QVERIFY2(BrushPresetStore::decode(in.readAll(), &data, &error, &warnings), qPrintable(error));
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join("; ")));
+        QCOMPARE(data.custom.size(), size_t(1));
+        const BrushSettings &pencil = data.custom[0].settings;
+        QCOMPARE(pencil.name, QStringLiteral("My pencil"));
+        QCOMPARE(pencil.size, 6.0);
+        QCOMPARE(pencil.pressureSize.gamma, 1.5);
+        QCOMPARE(pencil.textureMode, TextureMode::Subtract);
+        QCOMPARE(pencil.tiltSize, 1.5);
+        // New properties take their defaults, so the brush draws as it did in milestone 6.
+        QCOMPARE(pencil.count, 1);
+        QCOMPARE(pencil.stamp, BrushStamp::Tip);
+        QCOMPARE(pencil.taperEnd, 0.0);
+        QVERIFY(!pencil.hasColorDynamics());
+        for (const ParameterDynamics &d : pencil.dynamics)
+            QVERIFY(!d.enabled);
+        QCOMPARE(data.overrides.at("builtin.solid-round").opacity, 0.5);
+        QCOMPARE(data.paintId, QStringLiteral("custom.1"));
+        QCOMPARE(data.favorites, QStringList({"custom.1", "builtin.clean-ink"}));
+        // Written back as version 2, and read again unchanged.
+        const QByteArray v2 = BrushPresetStore::encode(data);
+        QCOMPARE(QJsonDocument::fromJson(v2).object()["version"].toInt(), 2);
+        BrushPresetStore::Data again;
+        QVERIFY(BrushPresetStore::decode(v2, &again, &error, &warnings));
+        QVERIFY(again.custom[0].settings == pencil);
+    }
+
+    void goldenImages()
+    {
+        // Representative strokes compared with committed reference images. A small tolerance
+        // allows for floating-point differences between compilers and CPUs; anything more is a
+        // visual regression to investigate (DRAWAPP_WRITE_GOLDEN=1 rewrites them after a
+        // deliberate change).
+        std::vector<std::pair<QString, BrushSettings>> cases;
+        for (const BrushPreset &p : BrushPresets::builtIns())
+            cases.emplace_back(p.id.mid(8), p.settings);
+        BrushSettings spray = baseSettings();
+        spray.stamp = BrushStamp::Spray;
+        spray.size = 40;
+        cases.emplace_back(QStringLiteral("m9-spray"), spray);
+        BrushSettings hatch = baseSettings();
+        hatch.stamp = BrushStamp::Hatching;
+        hatch.size = 50;
+        cases.emplace_back(QStringLiteral("m9-hatching"), hatch);
+        BrushSettings color = baseSettings();
+        color.hueJitter = 90;
+        color.size = 30;
+        cases.emplace_back(QStringLiteral("m9-hue-jitter"), color);
+        cases.emplace_back(QStringLiteral("m9-golden-wet-ink"), goldenBrush());
+        BrushSettings taper = baseSettings();
+        taper.size = 30;
+        taper.taperStart = 80;
+        taper.taperEnd = 80;
+        set(taper, "dynamics.size", dynamicsMap(Sensor::Pressure, SensorCurve::exponential(0.6), 0.3));
+        cases.emplace_back(QStringLiteral("m9-taper-dynamics"), taper);
+        for (const auto &[name, settings] : cases) {
+            const QImage img = render(settings, standardStroke(), stripes());
+            const QString path = goldenPath(QStringLiteral("stroke-%1.png").arg(name));
+            if (writeGolden())
+                QVERIFY(img.save(path));
+            const QImage ref = QImage(path).convertToFormat(QImage::Format_ARGB32_Premultiplied);
+            QVERIFY2(!ref.isNull(), qPrintable("missing " + path + " (run with DRAWAPP_WRITE_GOLDEN=1)"));
+            QString why;
+            QVERIFY2(closeImages(img, ref, 3, 0.01, &why), qPrintable(name + ": " + why));
+        }
     }
 
     void builtInPresetsStillRender()

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BrushPresetStore.h"
+#include "BrushStudio.h"
 
 #include <QObject>
 #include <QTimer>
@@ -37,6 +38,8 @@ class BrushLibrary : public QObject
     Q_PROPERTY(bool currentFavorite READ currentFavorite NOTIFY presetsChanged)
     // Problems reading or writing the store file, for the user; empty when all is well.
     Q_PROPERTY(QString storeStatus READ storeStatus NOTIFY storeStatusChanged)
+    // The Brush Studio, which edits one preset on a copy.
+    Q_PROPERTY(BrushStudio *studio READ studio CONSTANT)
 
 public:
     explicit BrushLibrary(QObject *parent = nullptr);
@@ -65,6 +68,7 @@ public:
     bool currentHasSavedChanges() const;
     bool currentFavorite() const { return m_data.favorites.contains(currentId()); }
     QString storeStatus() const { return m_storeStatus; }
+    BrushStudio *studio() { return m_studio; }
 
     // Selects a preset for its kind: erasers become the eraser brush, all others the paint brush.
     Q_INVOKABLE bool select(const QString &id);
@@ -87,6 +91,11 @@ public:
     BrushSettings savedSettings(const QString &id) const;
     BrushSettings workingSettings(const QString &id) const;
     bool hasPreset(const QString &id) const;
+    // A new custom preset with these settings, named name, selected for its kind. Returns its id,
+    // or "" when the library is full (storeStatus says so).
+    QString addPreset(const BrushSettings &settings, const QString &name);
+    // Replaces a preset's settings (saved and working), as the Brush Studio's Done does.
+    void storePreset(const QString &id, const BrushSettings &settings);
     // One setting by registry id (or "pressureX.field") with the type rules of setValue; false when
     // the key or the kind of value is not accepted. Not sanitised.
     static bool applyValue(BrushSettings *settings, const QString &key, const QVariant &value);
@@ -118,4 +127,5 @@ private:
     bool m_storeWritable = false; // false without a path or after refusing an unusable file
     QString m_storeStatus;
     QTimer m_saveTimer;
+    BrushStudio *m_studio; // child
 };

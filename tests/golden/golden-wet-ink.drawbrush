@@ -1,0 +1,171 @@
+{
+    "format": "drawapp-brush",
+    "metadata": {
+        "app": "DrawApp",
+        "settingsVersion": 2
+    },
+    "settings": {
+        "accumulation": "uniform",
+        "airbrush": false,
+        "airbrushRate": 30,
+        "angle": 0,
+        "angleJitter": 0,
+        "blend": "wet",
+        "count": 2,
+        "countJitter": 0,
+        "dynamics": {
+            "opacity": {
+                "combine": "max",
+                "enabled": true,
+                "minimum": 0.25,
+                "sensors": [
+                    {
+                        "curve": [
+                            [
+                                0,
+                                0
+                            ],
+                            [
+                                0.125,
+                                0.02368307135172497
+                            ],
+                            [
+                                0.25,
+                                0.08246924442330589
+                            ],
+                            [
+                                0.375,
+                                0.1711024711574641
+                            ],
+                            [
+                                0.5,
+                                0.2871745887492587
+                            ],
+                            [
+                                0.625,
+                                0.4291252122289522
+                            ],
+                            [
+                                0.75,
+                                0.5958134105899568
+                            ],
+                            [
+                                0.875,
+                                0.7863474729277848
+                            ],
+                            [
+                                1,
+                                1
+                            ]
+                        ],
+                        "sensor": "pressure"
+                    },
+                    {
+                        "curve": [
+                            [
+                                0,
+                                1
+                            ],
+                            [
+                                1,
+                                0
+                            ]
+                        ],
+                        "range": 3,
+                        "sensor": "speed"
+                    }
+                ]
+            }
+        },
+        "flipX": false,
+        "flipY": false,
+        "flow": 1,
+        "flowJitter": 0,
+        "followDirection": false,
+        "fullTiltAngle": 60,
+        "hardness": 1,
+        "hatchAngle": 45,
+        "hatchSpacing": 6,
+        "hatchThickness": 1.5,
+        "hueJitter": 12,
+        "jitterFilter": 0,
+        "lightnessJitter": 0,
+        "minimumSize": 1,
+        "name": "Golden wet ink",
+        "opacity": 1,
+        "opacityJitter": 0,
+        "paintMode": "normal",
+        "pressureFlow": {
+            "enabled": false,
+            "gamma": 1,
+            "minimum": 0
+        },
+        "pressureOpacity": {
+            "enabled": false,
+            "gamma": 1,
+            "minimum": 0
+        },
+        "pressureSize": {
+            "enabled": true,
+            "gamma": 1.4,
+            "minimum": 0.2
+        },
+        "pressureSmoothing": 0,
+        "randomFlipX": false,
+        "randomFlipY": false,
+        "roundness": 1,
+        "roundnessJitter": 0,
+        "saturationJitter": 0,
+        "scatter": 0.2,
+        "scatterBothAxes": false,
+        "size": 18,
+        "sizeJitter": 0,
+        "smoothing": 0,
+        "smoothingFinish": true,
+        "smudgeColorRate": 0,
+        "smudgeMode": "smear",
+        "smudgePickup": 0.25,
+        "smudgePreserveAlpha": false,
+        "smudgeStrength": 0.6,
+        "spacing": 0.12,
+        "spacingJitter": 0,
+        "sprayDensity": 30,
+        "sprayParticleJitter": 0,
+        "sprayParticleSize": 2,
+        "stamp": "tip",
+        "strokeHueJitter": 0,
+        "strokeLightnessJitter": 0,
+        "strokeSaturationJitter": 0,
+        "strokeSizeJitter": 0,
+        "taperEnd": 60,
+        "taperEndSize": 0.1,
+        "taperOpacity": 0,
+        "taperShape": 1,
+        "taperStart": 40,
+        "taperStartSize": 0.1,
+        "texture": "canvas",
+        "textureBrightness": 0,
+        "textureContrast": 1,
+        "textureEachDab": false,
+        "textureInvert": false,
+        "textureMode": "multiply",
+        "textureMoving": false,
+        "textureRandomOffset": false,
+        "textureRotation": 30,
+        "textureScale": 1,
+        "textureStrength": 0.35,
+        "tiltAzimuthThreshold": 15,
+        "tiltOpacity": 1,
+        "tiltSize": 1,
+        "tip": "",
+        "tipDensity": 1,
+        "tipImage": "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAAAAABWESUoAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAfUlEQVQ4jdXOnRqEUBRG4TXdSxAEAwNBEARBEATBQBAEAwMDQVedBun5e75NA21d79n7wN/nARynmMzacAewG2AzNvyME1/jDx80WNFgQYMZDd5oMKHBiAYDGvRo0KFBiwYNGtThgwBU0UUfvKLug2fcPVAmuguKVHdAnuxcrmgkBLGueSkAAAAASUVORK5CYII=",
+        "wetAttack": 0.6,
+        "wetDilution": 0,
+        "wetLoad": 0.8,
+        "wetLoadLength": 400,
+        "wetPull": 0.4,
+        "wetnessJitter": 0
+    },
+    "version": 2
+}

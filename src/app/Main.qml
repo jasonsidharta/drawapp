@@ -377,6 +377,7 @@ ApplicationWindow {
                             objectName: "brushPanel"
                             canvas: canvas
                             width: brushScroll.availableWidth
+                            onStudioRequested: window.openStudio()
                         }
                     }
                 }
@@ -529,7 +530,8 @@ ApplicationWindow {
                     implicitHeight: 40
                     horizontalAlignment: TextInput.AlignRight
                     inputMethodHints: Qt.ImhFormattedNumbersOnly
-                    validator: DoubleValidator { notation: DoubleValidator.StandardNotation }
+                    // Not DoubleValidator: its locale fix-up turns "1.5" into "15" where "." groups digits.
+                    validator: RegularExpressionValidator { regularExpression: /-?[0-9]*([.,][0-9]*)?/ }
                     text: activeFocus ? text : value.toFixed(decimals)
                     onEditingFinished: {
                         const v = Number(text.replace(",", "."))
@@ -939,6 +941,37 @@ ApplicationWindow {
                   + canvas.documentSize.height + " px"
                   + (canvas.recoveryStatus ? "   ·   " + canvas.recoveryStatus : "")
                   + "   ·   Wheel: zoom   ·   Middle-drag or Space+drag: pan"
+        }
+    }
+
+    function openStudio() {
+        brushPopup.close()
+        if (canvas.brushes.studio.open())
+            studioPopup.open()
+    }
+
+    // The Brush Studio, over the whole window. Closing it any other way than Done cancels.
+    Popup {
+        id: studioPopup
+        objectName: "studioPopup"
+        parent: Overlay.overlay
+        x: 8
+        y: 8
+        width: window.width - 16
+        height: window.height - 16
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        padding: 10
+        onClosed: {
+            if (canvas.brushes.studio.active)
+                canvas.brushes.studio.cancel()
+            canvas.forceActiveFocus()
+        }
+        BrushStudioPage {
+            objectName: "brushStudioPage"
+            anchors.fill: parent
+            canvas: canvas
+            onCloseRequested: studioPopup.close()
         }
     }
 
