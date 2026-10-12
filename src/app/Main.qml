@@ -687,12 +687,24 @@ ApplicationWindow {
                         height: 40
                         radius: 4
                         // Theme colors, so rows stay readable in light and dark Windows themes.
-                        color: modelData.active ? window.palette.highlight : window.palette.base
-                        border.color: modelData.active ? window.palette.highlight : window.palette.mid
+                        // Active: highlighted. Also selected (for multi-layer transform, copy, cut,
+                        // clear): a lighter highlight and a highlighted border.
+                        color: modelData.active ? window.palette.highlight
+                             : modelData.selected ? Qt.tint(window.palette.base, "#552f6fdf") : window.palette.base
+                        border.color: modelData.active || modelData.selected ? window.palette.highlight : window.palette.mid
+                        border.width: modelData.selected && !modelData.active ? 2 : 1
 
                         MouseArea {
                             anchors.fill: parent
-                            onClicked: canvas.setActiveLayer(parent.modelData.id)
+                            // Ctrl/Shift+click adds or removes a layer from the selection; a long
+                            // press does the same by touch. A plain click selects only this layer.
+                            onClicked: (mouse) => {
+                                if (mouse.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+                                    canvas.setLayerSelected(parent.modelData.id, !parent.modelData.selected)
+                                else
+                                    canvas.setActiveLayer(parent.modelData.id)
+                            }
+                            onPressAndHold: canvas.setLayerSelected(parent.modelData.id, !parent.modelData.selected)
                             onDoubleClicked: window.openRename(parent.modelData)
                         }
                         RowLayout {
@@ -731,6 +743,17 @@ ApplicationWindow {
                             }
                         }
                     }
+                }
+
+                Label {
+                    objectName: "layerSelectionHint"
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 11
+                    opacity: 0.8
+                    readonly property int selectedCount: canvas.layers.filter(l => l.selected).length
+                    text: selectedCount > 1 ? selectedCount + " layers selected: Transform, Copy, Cut and Clear use all of them."
+                                            : "Ctrl+click or long-press to select several layers."
                 }
 
                 GridLayout {

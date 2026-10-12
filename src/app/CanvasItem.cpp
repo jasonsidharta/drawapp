@@ -241,6 +241,11 @@ void CanvasItem::applyHistoryResult(const UndoCommand::Result &result)
     }
     if (result.selection)
         selectionUpdated();
+    if (result.structure || result.activate) {
+        if (result.activate)
+            m_selectedLayers = {result.activate};
+        sanitizeLayerSelection();
+    }
     // Selection-only steps do not change artwork (nothing new for recovery).
     if (!result.dirty.isEmpty() || result.structure || result.activate)
         markContentChanged();
@@ -282,6 +287,7 @@ QVariantList CanvasItem::layers() const
         row.insert(QStringLiteral("opacity"), layer.opacity);
         row.insert(QStringLiteral("locked"), layer.locked);
         row.insert(QStringLiteral("active"), layer.id == m_document.activeLayerId());
+        row.insert(QStringLiteral("selected"), layer.id == m_document.activeLayerId() || m_selectedLayers.contains(layer.id));
         list.append(row);
     }
     return list;
@@ -290,10 +296,54 @@ QVariantList CanvasItem::layers() const
 void CanvasItem::setActiveLayer(int id)
 {
     finishPendingEdits();
-    if (quint64(id) == m_document.activeLayerId() || m_document.indexOf(quint64(id)) < 0)
+    if (m_document.indexOf(quint64(id)) < 0)
+        return;
+    if (quint64(id) == m_document.activeLayerId() && m_selectedLayers.size() <= 1)
         return;
     m_document.setActiveLayer(quint64(id)); // selection only: not an edit, not undoable
+    m_selectedLayers = {quint64(id)};       // a plain choice selects this layer only
     emit layersChanged();
+}
+
+void CanvasItem::setLayerSelected(int id, bool selected)
+{
+    finishPendingEdits();
+    const quint64 layerId = quint64(id);
+    if (m_document.indexOf(layerId) < 0)
+        return;
+    sanitizeLayerSelection();
+    if (selected) {
+        m_selectedLayers.insert(layerId);
+    } else if (m_selectedLayers.size() > 1) {
+        m_selectedLayers.remove(layerId);
+        // The active layer is always selected: hand it to the topmost remaining one.
+        if (layerId == m_document.activeLayerId())
+            m_document.setActiveLayer(selectedLayerIds().back());
+    }
+    emit layersChanged();
+}
+
+std::vector<quint64> CanvasItem::selectedLayerIds() const
+{
+    std::vector<quint64> ids;
+    for (int i = 0; i < m_document.count(); ++i) {
+        const quint64 id = m_document.layer(i).id;
+        if (id == m_document.activeLayerId() || m_selectedLayers.contains(id))
+            ids.push_back(id);
+    }
+    return ids;
+}
+
+void CanvasItem::sanitizeLayerSelection()
+{
+    for (auto it = m_selectedLayers.begin(); it != m_selectedLayers.end();) {
+        if (m_document.indexOf(*it) < 0)
+            it = m_selectedLayers.erase(it);
+        else
+            ++it;
+    }
+    if (m_document.activeLayerId())
+        m_selectedLayers.insert(m_document.activeLayerId());
 }
 
 QString CanvasItem::activeLayerBlockReason() const
@@ -324,6 +374,7 @@ void CanvasItem::addLayer()
     const quint64 id = layer.id;
     m_document.insertLayer(index, std::move(layer));
     m_document.setActiveLayer(id);
+    m_selectedLayers = {id};
     pushCommand(UndoCommand::layerInserted(id, index, QStringLiteral("Add layer")));
     markContentChanged();
     emit layersChanged();
@@ -345,6 +396,7 @@ void CanvasItem::duplicateLayer(int id)
     const quint64 newId = copy.id;
     m_document.insertLayer(source + 1, std::move(copy));
     m_document.setActiveLayer(newId);
+    m_selectedLayers = {newId};
     m_document.refreshComposite();
     updateAll();
     pushCommand(UndoCommand::layerInserted(newId, source + 1, QStringLiteral("Duplicate layer")));
@@ -363,6 +415,7 @@ void CanvasItem::deleteLayer(int id)
         return;
     }
     LayerData removed = m_document.takeLayer(index); // the layer below becomes active if needed
+    sanitizeLayerSelection();
     m_document.refreshComposite();
     updateAll();
     pushCommand(UndoCommand::layerRemoved(std::move(removed), index, QStringLiteral("Delete layer")));
@@ -518,6 +571,7 @@ void CanvasItem::replaceDocument(const LayeredDocument &document)
     // The previous document was saved or explicitly discarded: its recovery data goes too.
     discardRecoveryFile();
     m_document = document;
+    m_selectedLayers.clear();
     m_reselect = Selection();
     m_selectionOutline = QPainterPath();
     m_history.clear();

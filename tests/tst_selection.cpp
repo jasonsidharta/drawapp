@@ -495,6 +495,107 @@ private slots:
         QCOMPARE(rendered(t), artwork());
     }
 
+    // --- multi-layer transforms ---
+    void multiLayerTransformKeepsLayersAligned()
+    {
+        // Ink (a ring) and colour (a fill inside it) with different content bounds, plus a
+        // shared registration dot at (200, 150) on both.
+        QImage ink(DocSize, QImage::Format_ARGB32_Premultiplied), colour(DocSize, QImage::Format_ARGB32_Premultiplied);
+        ink.fill(Qt::transparent);
+        colour.fill(Qt::transparent);
+        {
+            QPainter p(&ink);
+            p.setPen(QPen(Qt::black, 4));
+            p.drawEllipse(QPointF(200, 150), 80, 70);
+            p.fillRect(QRect(199, 149, 2, 2), Qt::black);
+            QPainter c(&colour);
+            c.fillRect(QRect(150, 110, 100, 80), QColor(240, 200, 170));
+            c.fillRect(QRect(199, 149, 2, 2), QColor(255, 0, 0));
+        }
+        TransformSession t;
+        QVERIFY(t.begin({ink, colour}, Selection()));
+        QCOMPARE(t.partCount(), 2);
+        QVERIFY(t.sourceRect().contains(QRect(118, 78, 164, 144))); // the union of both layers
+        t.setSize(t.width() * 1.4, t.height() * 1.4);
+        t.setRotation(25);
+        t.moveBy(QPointF(30, 10));
+        QImage outInk(DocSize, QImage::Format_ARGB32_Premultiplied), outColour(DocSize, QImage::Format_ARGB32_Premultiplied);
+        t.render(0, outInk, outInk.rect(), TransformSession::Quality::Final);
+        t.render(1, outColour, outColour.rect(), TransformSession::Quality::Final);
+        // The registration dot lands at the same place on both layers.
+        const QPointF dot = t.mapToDocument(QPointF(200, 150));
+        QVERIFY(qAlpha(outInk.pixel(dot.toPoint())) > 100);
+        QVERIFY(qRed(outColour.pixel(dot.toPoint())) > 150 && qGreen(outColour.pixel(dot.toPoint())) < 120);
+        // renderRegion gives the same pixels as render.
+        const QRect area = t.changedRect();
+        const QImage region = t.renderRegion(1, area, TransformSession::Quality::Final);
+        QCOMPARE(region, outColour.copy(area));
+    }
+
+    void multiLayerCachesStayWithinTheSourceRectangle()
+    {
+        const QSize big(2048, 1536);
+        QImage a(big, QImage::Format_ARGB32_Premultiplied), b(big, QImage::Format_ARGB32_Premultiplied);
+        a.fill(Qt::red);
+        b.fill(Qt::blue);
+        QPainterPath r;
+        r.addRect(QRectF(100, 100, 200, 100));
+        TransformSession t;
+        QVERIFY(t.begin({a, b}, Selection().combined(Selection::rasterize(big, r), SelectionMode::Replace)));
+        // Per layer: base and source over 200 × 100 plus reductions, never a full-canvas copy.
+        QVERIFY2(t.byteSize() < 2 * 200 * 100 * 4 * 3 + 200 * 100 + 4096, qPrintable(QString::number(t.byteSize())));
+        QCOMPARE(rendered(t).isNull(), false);
+        QVERIFY(!t.begin({a, QImage(QSize(10, 10), QImage::Format_ARGB32_Premultiplied)}, Selection())); // sizes differ
+    }
+
+    void multiLayerIdentityIsExactForEveryLayer()
+    {
+        QImage a = artwork(), b(DocSize, QImage::Format_ARGB32_Premultiplied);
+        b.fill(QColor(10, 120, 60, 128));
+        const Selection soft = Selection().combined(Selection::rasterize(DocSize, ellipsePath(QRectF(40, 40, 260, 180))), SelectionMode::Replace);
+        TransformSession t;
+        QVERIFY(t.begin({a, b}, soft));
+        QImage outA(DocSize, QImage::Format_ARGB32_Premultiplied), outB(DocSize, QImage::Format_ARGB32_Premultiplied);
+        t.render(0, outA, outA.rect(), TransformSession::Quality::Final);
+        t.render(1, outB, outB.rect(), TransformSession::Quality::Final);
+        QCOMPARE(outA, a);
+        QCOMPARE(outB, b);
+    }
+
+    void groupUndoIsOneStep()
+    {
+        LayeredDocument doc(DocSize);
+        LayerData second;
+        second.id = doc.allocateId();
+        second.name = "Two";
+        second.image = QImage(DocSize, QImage::Format_ARGB32_Premultiplied);
+        second.image.fill(Qt::transparent);
+        doc.insertLayer(1, second);
+        const QImage a0 = doc.layer(0).image.copy(), b0 = doc.layer(1).image.copy();
+        std::vector<UndoCommand> children;
+        for (int i = 0; i < 2; ++i) {
+            TileSnapshot tiles;
+            tiles.capture(doc.pixels(i), QRect(0, 0, 100, 100));
+            doc.pixels(i).fill(i ? Qt::blue : Qt::red);
+            children.push_back(UndoCommand::pixels(doc.layer(i).id, std::move(tiles), "Fill"));
+        }
+        const Selection before = doc.selection();
+        doc.setSelection(Selection::all(DocSize));
+        UndoHistory history;
+        history.push(UndoCommand::group(std::move(children), "Transform").withSelection(before));
+        QCOMPARE(history.undoCount(), 1);
+        const QImage a1 = doc.layer(0).image.copy(), b1 = doc.layer(1).image.copy();
+        const UndoCommand::Result r = history.undo(doc);
+        QVERIFY(r.selection);
+        QCOMPARE(doc.layer(0).image.copy(0, 0, 100, 100), a0.copy(0, 0, 100, 100));
+        QCOMPARE(doc.layer(1).image.copy(0, 0, 100, 100), b0.copy(0, 0, 100, 100));
+        QVERIFY(!doc.selection().isActive());
+        history.redo(doc);
+        QCOMPARE(doc.layer(0).image, a1);
+        QCOMPARE(doc.layer(1).image, b1);
+        QVERIFY(doc.selection().isActive());
+    }
+
     void handlesAreHitWhereTheyAreDrawn()
     {
         TransformSession t;

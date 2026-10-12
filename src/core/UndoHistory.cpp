@@ -64,6 +64,24 @@ UndoCommand UndoCommand::selection(const Selection &before, const QString &label
     return c;
 }
 
+UndoCommand UndoCommand::group(std::vector<UndoCommand> children, const QString &label)
+{
+    UndoCommand c;
+    c.m_kind = Kind::Group;
+    c.m_label = label;
+    c.m_children = std::move(children);
+    return c;
+}
+
+bool UndoCommand::changesArtwork() const
+{
+    if (m_kind == Kind::Selection)
+        return false;
+    if (m_kind == Kind::Group)
+        return std::any_of(m_children.begin(), m_children.end(), [](const UndoCommand &c) { return c.changesArtwork(); });
+    return true;
+}
+
 UndoCommand &UndoCommand::withSelection(const Selection &before)
 {
     m_selection = before;
@@ -76,6 +94,12 @@ qsizetype UndoCommand::byteSize() const
     switch (m_kind) {
     case Kind::Selection:
         return selectionBytes;
+    case Kind::Group: {
+        qsizetype bytes = selectionBytes;
+        for (const UndoCommand &c : m_children)
+            bytes += c.byteSize();
+        return bytes;
+    }
     case Kind::Pixels:
         return m_tiles.byteSize() + selectionBytes;
     case Kind::Presence:
@@ -91,6 +115,30 @@ UndoCommand::Result UndoCommand::swap(LayeredDocument &doc)
     Result result;
     const QRect all(QPoint(0, 0), doc.size());
     switch (m_kind) {
+    case Kind::Group: {
+        auto apply = [&](UndoCommand &child) {
+            const Result r = child.swap(doc);
+            result.dirty |= r.dirty;
+            result.structure |= r.structure;
+            result.selection |= r.selection;
+            if (r.activate)
+                result.activate = r.activate;
+        };
+        if (m_applied)
+            for (auto it = m_children.rbegin(); it != m_children.rend(); ++it)
+                apply(*it);
+        else
+            for (UndoCommand &child : m_children)
+                apply(child);
+        m_applied = !m_applied;
+        if (m_selection) {
+            const Selection current = doc.selection();
+            doc.setSelection(*m_selection);
+            m_selection = current;
+            result.selection = true;
+        }
+        break;
+    }
     case Kind::Selection: {
         const Selection current = doc.selection();
         doc.setSelection(*m_selection);

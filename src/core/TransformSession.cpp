@@ -170,62 +170,96 @@ double sign(double v)
 
 } // namespace
 
+namespace {
+
+QRect contentBounds(const QImage &layer)
+{
+    int left = layer.width(), right = -1, top = layer.height(), bottom = -1;
+    for (int y = 0; y < layer.height(); ++y) {
+        const QRgb *row = reinterpret_cast<const QRgb *>(layer.constScanLine(y));
+        int x0 = 0;
+        while (x0 < layer.width() && !qAlpha(row[x0]))
+            ++x0;
+        if (x0 == layer.width())
+            continue;
+        int x1 = layer.width() - 1;
+        while (!qAlpha(row[x1]))
+            --x1;
+        left = std::min(left, x0);
+        right = std::max(right, x1);
+        top = std::min(top, y);
+        bottom = y;
+    }
+    return right < 0 ? QRect() : QRect(QPoint(left, top), QPoint(right, bottom));
+}
+
+} // namespace
+
 bool TransformSession::begin(const QImage &layer, const Selection &selection)
 {
+    return begin(std::vector<QImage>{layer}, selection);
+}
+
+bool TransformSession::begin(const std::vector<QImage> &layers, const Selection &selection)
+{
     end();
-    if (layer.isNull() || layer.format() != QImage::Format_ARGB32_Premultiplied)
+    if (layers.empty())
         return false;
+    const QSize size = layers.front().size();
+    for (const QImage &layer : layers)
+        if (layer.isNull() || layer.size() != size || layer.format() != QImage::Format_ARGB32_Premultiplied)
+            return false;
+    // One source rectangle for every layer, so all of them share one mapping and stay aligned.
     QRect rect;
-    QImage source;
     if (selection.isActive()) {
         if (selection.isEmpty())
             return false;
-        rect = selection.bounds() & layer.rect();
-        if (rect.isEmpty())
-            return false;
-        // source = layer × s, base = layer − source: exactly complementary.
-        source = QImage(rect.size(), QImage::Format_ARGB32_Premultiplied);
-        m_base = layer.copy();
+        rect = selection.bounds() & QRect(QPoint(0, 0), size);
+    } else {
+        for (const QImage &layer : layers)
+            rect |= contentBounds(layer);
+    }
+    if (rect.isEmpty())
+        return false;
+    std::vector<Part> parts;
+    parts.reserve(layers.size());
+    for (const QImage &layer : layers) {
+        Part part;
+        part.original = layer; // shared, not copied: read only
+        part.base = QImage(rect.size(), QImage::Format_ARGB32_Premultiplied);
+        QImage source(rect.size(), QImage::Format_ARGB32_Premultiplied);
+        if (part.base.isNull() || source.isNull())
+            return false; // out of memory: nothing started
+        // source = layer × s, base = layer − source (exactly complementary). Without a selection
+        // everything in the rectangle is source.
         for (int y = rect.top(); y <= rect.bottom(); ++y) {
-            const uchar *s = selection.mask().constScanLine(y);
-            QRgb *base = reinterpret_cast<QRgb *>(m_base.scanLine(y));
+            const QRgb *in = reinterpret_cast<const QRgb *>(layer.constScanLine(y));
+            const uchar *s = selection.isActive() ? selection.mask().constScanLine(y) : nullptr;
+            QRgb *base = reinterpret_cast<QRgb *>(part.base.scanLine(y - rect.top()));
             QRgb *src = reinterpret_cast<QRgb *>(source.scanLine(y - rect.top()));
             for (int x = rect.left(); x <= rect.right(); ++x) {
-                const QRgb p = base[x];
-                const quint32 c = s[x];
-                const QRgb taken = qRgba(int(mul255(qRed(p), c)), int(mul255(qGreen(p), c)), int(mul255(qBlue(p), c)),
-                                         int(mul255(qAlpha(p), c)));
+                const QRgb p = in[x];
+                const quint32 c = s ? s[x] : 255;
+                const QRgb taken = c == 255 ? p
+                                            : qRgba(int(mul255(qRed(p), c)), int(mul255(qGreen(p), c)),
+                                                    int(mul255(qBlue(p), c)), int(mul255(qAlpha(p), c)));
                 src[x - rect.left()] = taken;
-                base[x] = qRgba(qRed(p) - qRed(taken), qGreen(p) - qGreen(taken), qBlue(p) - qBlue(taken),
-                                qAlpha(p) - qAlpha(taken));
+                base[x - rect.left()] = qRgba(qRed(p) - qRed(taken), qGreen(p) - qGreen(taken), qBlue(p) - qBlue(taken),
+                                              qAlpha(p) - qAlpha(taken));
             }
         }
+        part.source.push_back(source);
+        while (part.source.back().width() > 1 || part.source.back().height() > 1)
+            part.source.push_back(halve(part.source.back()));
+        parts.push_back(std::move(part));
+    }
+    if (selection.isActive()) {
         m_sourceMask = selection.mask().copy(rect);
         m_selection = selection;
-    } else {
-        // The layer's content bounds.
-        int left = layer.width(), right = -1, top = layer.height(), bottom = -1;
-        for (int y = 0; y < layer.height(); ++y) {
-            const QRgb *row = reinterpret_cast<const QRgb *>(layer.constScanLine(y));
-            for (int x = 0; x < layer.width(); ++x) {
-                if (qAlpha(row[x])) {
-                    left = std::min(left, x);
-                    right = std::max(right, x);
-                    top = std::min(top, y);
-                    bottom = y;
-                }
-            }
-        }
-        if (right < 0)
-            return false;
-        rect = QRect(QPoint(left, top), QPoint(right, bottom));
-        source = layer.copy(rect);
     }
-    m_docSize = layer.size();
+    m_parts = std::move(parts);
+    m_docSize = size;
     m_sourceRect = rect;
-    m_source.push_back(source);
-    while (m_source.back().width() > 1 || m_source.back().height() > 1)
-        m_source.push_back(halve(m_source.back()));
     reset();
     return true;
 }
@@ -235,9 +269,19 @@ void TransformSession::end()
     m_docSize = QSize();
     m_sourceRect = QRect();
     m_selection = Selection();
-    m_base = QImage();
-    m_source.clear();
+    m_parts.clear();
     m_sourceMask = QImage();
+}
+
+qsizetype TransformSession::byteSize() const
+{
+    qsizetype bytes = m_sourceMask.sizeInBytes();
+    for (const Part &part : m_parts) {
+        bytes += part.base.sizeInBytes();
+        for (const QImage &level : part.source)
+            bytes += level.sizeInBytes();
+    }
+    return bytes;
 }
 
 void TransformSession::reset()
@@ -494,53 +538,81 @@ TransformSession::Handle TransformSession::hitTest(const QPointF &pos, double to
 
 void TransformSession::render(QImage &out, const QRect &requested, Quality quality) const
 {
-    if (!isActive() || out.size() != m_docSize || out.format() != QImage::Format_ARGB32_Premultiplied)
+    render(0, out, requested, quality);
+}
+
+void TransformSession::render(int partIndex, QImage &out, const QRect &requested, Quality quality) const
+{
+    if (!isActive() || partIndex < 0 || partIndex >= int(m_parts.size()) || out.size() != m_docSize
+        || out.format() != QImage::Format_ARGB32_Premultiplied)
         return;
     const QRect area = requested & out.rect();
     if (area.isEmpty())
         return;
+    renderRows(m_parts[size_t(partIndex)], area, quality,
+               [&](int y) { return reinterpret_cast<QRgb *>(out.scanLine(y)) + area.left(); });
+}
+
+QImage TransformSession::renderRegion(int partIndex, const QRect &requested, Quality quality) const
+{
+    if (!isActive() || partIndex < 0 || partIndex >= int(m_parts.size()))
+        return {};
+    const QRect area = requested & QRect(QPoint(0, 0), m_docSize);
+    if (area.isEmpty())
+        return {};
+    if (partIndex == m_failRegionPart)
+        return {}; // simulated allocation failure (tests)
+    QImage region(area.size(), QImage::Format_ARGB32_Premultiplied);
+    if (region.isNull())
+        return {}; // out of memory
+    renderRows(m_parts[size_t(partIndex)], area, quality,
+               [&](int y) { return reinterpret_cast<QRgb *>(region.scanLine(y - area.top())); });
+    return region;
+}
+
+template <typename RowFn>
+void TransformSession::renderRows(const Part &part, const QRect &area, Quality quality, RowFn rowAt) const
+{
+    // Base pixels: inside the source rectangle the remainder (layer − source), outside it the
+    // original layer.
+    auto baseRow = [&](int y, QRgb *dst, int x0, int x1) {
+        const QRgb *orig = reinterpret_cast<const QRgb *>(part.original.constScanLine(y));
+        const bool inRows = y >= m_sourceRect.top() && y <= m_sourceRect.bottom();
+        const QRgb *base = inRows ? reinterpret_cast<const QRgb *>(part.base.constScanLine(y - m_sourceRect.top())) : nullptr;
+        for (int x = x0; x < x1; ++x)
+            dst[x - x0] = (base && x >= m_sourceRect.left() && x <= m_sourceRect.right()) ? base[x - m_sourceRect.left()] : orig[x];
+    };
     if (isIdentity()) {
         // Nothing moved: base + source is exactly the original layer (with a soft selection,
         // "source over base" would not be: two 50 % halves composite to 75 %).
         for (int y = area.top(); y <= area.bottom(); ++y) {
-            QRgb *row = reinterpret_cast<QRgb *>(out.scanLine(y));
-            const QRgb *base = m_base.isNull() ? nullptr : reinterpret_cast<const QRgb *>(m_base.constScanLine(y));
-            const bool inSource = y >= m_sourceRect.top() && y <= m_sourceRect.bottom();
-            const QRgb *src = inSource ? reinterpret_cast<const QRgb *>(m_source.front().constScanLine(y - m_sourceRect.top())) : nullptr;
-            for (int x = area.left(); x <= area.right(); ++x) {
-                const QRgb b = base ? base[x] : 0;
-                const QRgb p = (src && x >= m_sourceRect.left() && x <= m_sourceRect.right()) ? src[x - m_sourceRect.left()] : 0;
-                row[x] = qRgba(qRed(b) + qRed(p), qGreen(b) + qGreen(p), qBlue(b) + qBlue(p), qAlpha(b) + qAlpha(p));
-            }
+            QRgb *row = rowAt(y);
+            const QRgb *orig = reinterpret_cast<const QRgb *>(part.original.constScanLine(y));
+            for (int x = area.left(); x <= area.right(); ++x)
+                row[x - area.left()] = orig[x];
         }
         return;
     }
     const QRect target = targetRect() & area;
     parallelRows(area.top(), area.bottom() + 1, [&](int y) {
-        QRgb *row = reinterpret_cast<QRgb *>(out.scanLine(y));
-        const QRgb *base = m_base.isNull() ? nullptr : reinterpret_cast<const QRgb *>(m_base.constScanLine(y));
-        if (y < target.top() || y > target.bottom() || target.isEmpty()) {
-            for (int x = area.left(); x <= area.right(); ++x)
-                row[x] = base ? base[x] : 0;
+        QRgb *row = rowAt(y); // row[0] is x = area.left()
+        baseRow(y, row, area.left(), area.right() + 1);
+        if (target.isEmpty() || y < target.top() || y > target.bottom())
             return;
-        }
-        for (int x = area.left(); x < target.left(); ++x)
-            row[x] = base ? base[x] : 0;
-        for (int x = target.right() + 1; x <= area.right(); ++x)
-            row[x] = base ? base[x] : 0;
-        sampleRow(y, target.left(), target.right() + 1, row, base, quality);
+        sampleRow(part, y, target.left(), target.right() + 1, row + (target.left() - area.left()), quality);
     });
 }
 
-void TransformSession::sampleRow(int y, int x0, int x1, QRgb *out, const QRgb *base, Quality quality) const
+void TransformSession::sampleRow(const Part &part, int y, int x0, int x1, QRgb *out, Quality quality) const
 {
+    // out[i] is pixel x0 + i and already holds the base; the transformed source goes over it.
     // The reduction level whose scale is in (0.5, 1] for the smaller scale, so large reductions
     // are prefiltered instead of aliasing.
     const double shrink = std::min(std::abs(m_sx), std::abs(m_sy));
     int level = 0;
     if (shrink < 1.0)
-        level = std::min(int(m_source.size()) - 1, std::max(0, int(std::floor(std::log2(1.0 / shrink)))));
-    const QImage &img = m_source[size_t(level)];
+        level = std::min(int(part.source.size()) - 1, std::max(0, int(std::floor(std::log2(1.0 / shrink)))));
+    const QImage &img = part.source[size_t(level)];
     const double levelScaleX = double(img.width()) / m_sourceRect.width();
     const double levelScaleY = double(img.height()) / m_sourceRect.height();
     const QPointF origin = m_sourceRect.topLeft();
@@ -551,15 +623,15 @@ void TransformSession::sampleRow(int y, int x0, int x1, QRgb *out, const QRgb *b
     const double fx = p.x() - 0.5, fy = p.y() - 0.5;
     if (std::abs(std::abs(step.x()) - 1) < 1e-9 && std::abs(step.y()) < 1e-9 && std::abs(fx - std::round(fx)) < 1e-6
         && std::abs(fy - std::round(fy)) < 1e-6) {
-        const QImage &src = m_source.front();
+        const QImage &src = part.source.front();
         const int sy = int(std::round(fy));
         const int dx = step.x() > 0 ? 1 : -1;
         const QRgb *srcRow = (sy >= 0 && sy < src.height()) ? reinterpret_cast<const QRgb *>(src.constScanLine(sy)) : nullptr;
         int sx = int(std::round(fx));
         for (int x = x0; x < x1; ++x, sx += dx) {
             const QRgb s = (srcRow && sx >= 0 && sx < src.width()) ? srcRow[sx] : 0;
-            const QRgb under = base ? base[x] : 0;
-            out[x] = qAlpha(s) ? over(s, under) : under;
+            if (qAlpha(s))
+                out[x - x0] = over(s, out[x - x0]);
         }
         return;
     }
@@ -568,8 +640,8 @@ void TransformSession::sampleRow(int y, int x0, int x1, QRgb *out, const QRgb *b
         QRgb src = 0;
         if (sx > -2 && sy > -2 && sx < img.width() + 2 && sy < img.height() + 2)
             src = quality == Quality::Final ? bicubic(img, sx, sy) : bilinear(img, sx, sy);
-        const QRgb under = base ? base[x] : 0;
-        out[x] = qAlpha(src) ? over(src, under) : under;
+        if (qAlpha(src))
+            out[x - x0] = over(src, out[x - x0]);
     }
 }
 

@@ -10,6 +10,7 @@
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace {
 
@@ -154,12 +155,26 @@ void CanvasItem::reselect()
     setSelectionWithUndo(m_reselect, QStringLiteral("Reselect"));
 }
 
+QString CanvasItem::selectedLayersBlockReason(const QString &action) const
+{
+    for (const quint64 id : selectedLayerIds()) {
+        const LayerData &layer = m_document.layer(m_document.indexOf(id));
+        if (layer.locked)
+            return QStringLiteral("Can't %1: layer \"%2\" is locked. Unlock it or leave it out of the selected layers.")
+                .arg(action, layer.name);
+        if (!layer.visible)
+            return QStringLiteral("Can't %1: layer \"%2\" is hidden. Show it or leave it out of the selected layers.")
+                .arg(action, layer.name);
+    }
+    return {};
+}
+
 void CanvasItem::clearSelected()
 {
     finishPendingEdits();
-    const QString reason = activeLayerBlockReason();
+    const QString reason = selectedLayersBlockReason(QStringLiteral("clear"));
     if (!reason.isEmpty()) {
-        emit notice(QString(reason).replace(QStringLiteral("Can't paint"), QStringLiteral("Can't clear")));
+        emit notice(reason);
         return;
     }
     const Selection &selected = m_document.selection();
@@ -167,33 +182,42 @@ void CanvasItem::clearSelected()
         emit notice(QStringLiteral("Nothing is selected, so nothing was cleared."));
         return;
     }
-    const int index = m_document.activeIndex();
-    QImage &layer = m_document.pixels(index);
-    TileSnapshot before;
-    QRect changed;
-    if (!selected.isActive()) {
-        changed = RasterDocument::clear(layer, &before);
-    } else {
-        // Keeps layer × (1 − selection), the exact complement of what Copy takes.
-        changed = selected.bounds();
-        before.capture(layer, changed);
-        for (int y = changed.top(); y <= changed.bottom(); ++y) {
-            const uchar *s = selected.mask().constScanLine(y);
-            QRgb *row = reinterpret_cast<QRgb *>(layer.scanLine(y));
-            for (int x = changed.left(); x <= changed.right(); ++x) {
-                const QRgb p = row[x];
-                const quint32 c = s[x];
-                row[x] = qRgba(int(qRed(p) - mul255(qRed(p), c)), int(qGreen(p) - mul255(qGreen(p), c)),
-                               int(qBlue(p) - mul255(qBlue(p), c)), int(qAlpha(p) - mul255(qAlpha(p), c)));
+    const QString label = selected.isActive() ? QStringLiteral("Clear selection") : QStringLiteral("Clear layer");
+    std::vector<UndoCommand> children;
+    QRect changedAll;
+    for (const quint64 id : selectedLayerIds()) {
+        QImage &layer = m_document.pixels(m_document.indexOf(id));
+        TileSnapshot before;
+        QRect changed;
+        if (!selected.isActive()) {
+            changed = RasterDocument::clear(layer, &before);
+        } else {
+            // Keeps layer × (1 − selection), the exact complement of what Copy takes.
+            changed = selected.bounds();
+            before.capture(layer, changed);
+            for (int y = changed.top(); y <= changed.bottom(); ++y) {
+                const uchar *s = selected.mask().constScanLine(y);
+                QRgb *row = reinterpret_cast<QRgb *>(layer.scanLine(y));
+                for (int x = changed.left(); x <= changed.right(); ++x) {
+                    const QRgb p = row[x];
+                    const quint32 c = s[x];
+                    row[x] = qRgba(int(qRed(p) - mul255(qRed(p), c)), int(qGreen(p) - mul255(qGreen(p), c)),
+                                   int(qBlue(p) - mul255(qBlue(p), c)), int(qAlpha(p) - mul255(qAlpha(p), c)));
+                }
             }
         }
+        before.dropUnchanged(layer);
+        if (!before.isEmpty()) {
+            children.push_back(UndoCommand::pixels(id, std::move(before), label));
+            changedAll |= changed;
+        }
     }
-    const QString label = selected.isActive() ? QStringLiteral("Clear selection") : QStringLiteral("Clear layer");
-    if (commitPixels(m_document.activeLayerId(), std::move(before), label)) {
-        m_document.refreshComposite(changed);
-        markContentChanged();
-        updateDocumentRect(changed);
-    }
+    if (children.empty())
+        return;
+    pushCommand(children.size() == 1 ? std::move(children.front()) : UndoCommand::group(std::move(children), label));
+    m_document.refreshComposite(changedAll);
+    markContentChanged();
+    updateDocumentRect(changedAll);
 }
 
 // --- selection gestures ---
@@ -285,20 +309,27 @@ QString CanvasItem::beginTransform()
     if (fileBusy())
         return QStringLiteral("Wait until the current file operation has finished.");
     finishPendingEdits();
-    const QString blocked = activeLayerBlockReason();
+    const QString blocked = selectedLayersBlockReason(QStringLiteral("transform"));
     if (!blocked.isEmpty())
-        return QString(blocked).replace(QStringLiteral("Can't paint"), QStringLiteral("Can't transform"));
+        return blocked;
     const Selection &selected = m_document.selection();
     if (selected.isEmpty())
         return QStringLiteral("Nothing is selected, so there is nothing to transform.");
-    const int index = m_document.activeIndex();
-    if (!m_transform.begin(m_document.layer(index).image, selected))
-        return QStringLiteral("The layer \"%1\" has nothing to transform.").arg(m_document.layer(index).name);
-    m_transformLayerId = m_document.activeLayerId();
+    // Every selected layer moves together, with one geometry.
+    const std::vector<quint64> ids = selectedLayerIds();
+    std::vector<QImage> images;
+    for (const quint64 id : ids)
+        images.push_back(m_document.layer(m_document.indexOf(id)).image);
+    if (!m_transform.begin(images, selected)) {
+        if (ids.size() == 1)
+            return QStringLiteral("The layer \"%1\" has nothing to transform.").arg(m_document.layer(m_document.indexOf(ids.front())).name);
+        return QStringLiteral("The selected layers have nothing to transform.");
+    }
+    m_transformLayerIds = ids;
     m_toolBeforeTransform = m_tool == Transform ? Brush : m_tool;
     m_tool = Transform;
     // The preview lives in copies; the document is not touched until Apply.
-    m_previewLayer = m_document.layer(index).image;
+    m_previewLayers = images;
     m_previewComposite = m_document.composite();
     m_previewRect = QRect();
     updateTransformPreview(TransformSession::Quality::Final);
@@ -311,14 +342,16 @@ void CanvasItem::updateTransformPreview(TransformSession::Quality quality)
 {
     if (!m_transform.isActive())
         return;
-    const int index = m_document.indexOf(m_transformLayerId);
-    if (index < 0)
-        return;
     const QRect now = m_transform.changedRect();
     const QRect area = (now | m_previewRect) & QRect(QPoint(0, 0), m_document.size());
-    m_transform.render(m_previewLayer, area, quality);
     std::vector<LayerData> layers = m_document.layers(); // shallow: images are shared
-    layers[size_t(index)].image = m_previewLayer;
+    for (size_t i = 0; i < m_transformLayerIds.size(); ++i) {
+        const int index = m_document.indexOf(m_transformLayerIds[i]);
+        if (index < 0)
+            continue;
+        m_transform.render(int(i), m_previewLayers[i], area, quality);
+        layers[size_t(index)].image = m_previewLayers[i];
+    }
     compositeLayers(m_previewComposite, area, layers);
     m_previewRect = now;
     updateDocumentRect(area);
@@ -329,7 +362,8 @@ void CanvasItem::updateTransformPreview(TransformSession::Quality quality)
 void CanvasItem::endTransformSession()
 {
     m_transform.end();
-    m_previewLayer = QImage();
+    m_transformLayerIds.clear();
+    m_previewLayers.clear();
     m_previewComposite = QImage();
     m_previewRect = QRect();
     m_dragHandle = TransformSession::Handle::None;
@@ -347,26 +381,76 @@ void CanvasItem::applyTransform()
 {
     if (!m_transform.isActive())
         return;
-    const int index = m_document.indexOf(m_transformLayerId);
-    if (index < 0 || m_transform.isIdentity()) {
+    if (m_transform.isIdentity()) {
         endTransformSession(); // nothing moved: nothing to record
         updateAll();
         return;
     }
-    // Rendered once more from the source at full quality, straight into the layer. Pixels moved
-    // beyond the canvas are cut off here (layers are canvas-sized).
+    // Transaction: first prepare everything that can fail (each layer's result, the undo tiles,
+    // the new selection), then change the document. A failure before that point leaves the
+    // document exactly as it was. Pixels moved beyond the canvas are cut off (layers are
+    // canvas-sized).
     const QRect changed = m_transform.changedRect();
-    TileSnapshot before;
-    before.capture(m_document.pixels(index), changed);
-    m_transform.render(m_document.pixels(index), changed, TransformSession::Quality::Final);
+    struct Prepared
+    {
+        quint64 id;
+        QImage region;
+        TileSnapshot before;
+    };
+    std::vector<Prepared> prepared;
+    Selection newSelection;
+    bool ok = true;
+    try {
+        for (size_t i = 0; i < m_transformLayerIds.size() && ok; ++i) {
+            const quint64 id = m_transformLayerIds[i];
+            const int index = m_document.indexOf(id);
+            if (index < 0) {
+                ok = false;
+                break;
+            }
+            Prepared p{id, m_transform.renderRegion(int(i), changed, TransformSession::Quality::Final), TileSnapshot()};
+            // Also makes the layer's pixels private (a recovery snapshot may share them).
+            QImage &layer = m_document.pixels(index);
+            if (p.region.isNull() || layer.bits() == nullptr) {
+                ok = false;
+                break;
+            }
+            p.before.capture(layer, changed);
+            if (p.before.byteSize() <= 0 && !changed.isEmpty()) {
+                ok = false;
+                break;
+            }
+            prepared.push_back(std::move(p));
+        }
+        if (ok && m_transform.hasSelection())
+            newSelection = m_transform.transformedSelection();
+    } catch (const std::bad_alloc &) {
+        ok = false;
+    }
+    if (!ok || (m_transform.hasSelection() && !newSelection.isActive())) {
+        emit notice(QStringLiteral("Not enough memory to apply the transform. Nothing was changed; the preview is still open."));
+        return;
+    }
+    // Commit: copies into existing images only, which cannot fail.
+    std::vector<UndoCommand> children;
+    for (Prepared &p : prepared) {
+        QImage &layer = m_document.pixels(m_document.indexOf(p.id));
+        for (int y = 0; y < p.region.height(); ++y)
+            std::memcpy(layer.scanLine(changed.top() + y) + changed.left() * 4, p.region.constScanLine(y),
+                        size_t(p.region.width()) * 4);
+        p.before.dropUnchanged(layer);
+        if (!p.before.isEmpty())
+            children.push_back(UndoCommand::pixels(p.id, std::move(p.before), QStringLiteral("Transform")));
+    }
     const Selection oldSelection = m_document.selection();
     if (m_transform.hasSelection())
-        m_document.setSelection(m_transform.transformedSelection()); // follows the pixels
-    before.dropUnchanged(m_document.layer(index).image);
-    UndoCommand command = UndoCommand::pixels(m_transformLayerId, std::move(before), QStringLiteral("Transform"));
-    if (m_transform.hasSelection())
-        command.withSelection(oldSelection);
-    pushCommand(std::move(command));
+        m_document.setSelection(newSelection); // follows the pixels
+    if (!children.empty() || m_transform.hasSelection()) {
+        UndoCommand command = UndoCommand::group(std::move(children), QStringLiteral("Transform"));
+        if (m_transform.hasSelection())
+            command.withSelection(oldSelection);
+        pushCommand(std::move(command));
+    }
     m_document.refreshComposite(changed);
     markContentChanged();
     endTransformSession();
@@ -503,7 +587,7 @@ void CanvasItem::finishTransformDrag()
 
 bool CanvasItem::canPaste() const
 {
-    if (!m_clipImage.isNull())
+    if (!m_clipboard.empty())
         return true;
     const QClipboard *clipboard = QGuiApplication::clipboard();
     return clipboard && !clipboard->image().isNull();
@@ -512,54 +596,70 @@ bool CanvasItem::canPaste() const
 QString CanvasItem::copySelection()
 {
     finishPendingEdits();
-    const int index = m_document.activeIndex();
-    if (index < 0)
+    if (m_document.activeIndex() < 0)
         return QStringLiteral("There is no active layer.");
     const Selection &selected = m_document.selection();
     if (selected.isEmpty())
         return QStringLiteral("Nothing is selected, so nothing was copied.");
-    const QImage &layer = m_document.layer(index).image;
-    QImage taken;
-    QRect rect;
-    if (selected.isActive()) {
-        rect = selected.bounds();
-        taken = layer.copy(rect);
-        for (int y = 0; y < rect.height(); ++y) {
-            const uchar *s = selected.mask().constScanLine(y + rect.top()) + rect.left();
-            QRgb *row = reinterpret_cast<QRgb *>(taken.scanLine(y));
-            for (int x = 0; x < rect.width(); ++x) {
-                const QRgb p = row[x];
-                row[x] = qRgba(int(mul255(qRed(p), s[x])), int(mul255(qGreen(p), s[x])), int(mul255(qBlue(p), s[x])),
-                               int(mul255(qAlpha(p), s[x])));
+    // One item per selected layer (bottom to top) that has visible pixels in the selection.
+    std::vector<ClipItem> items;
+    for (const quint64 id : selectedLayerIds()) {
+        const LayerData &source = m_document.layer(m_document.indexOf(id));
+        const QImage &layer = source.image;
+        QImage taken;
+        QRect rect;
+        if (selected.isActive()) {
+            rect = selected.bounds();
+            taken = layer.copy(rect);
+            for (int y = 0; y < rect.height(); ++y) {
+                const uchar *s = selected.mask().constScanLine(y + rect.top()) + rect.left();
+                QRgb *row = reinterpret_cast<QRgb *>(taken.scanLine(y));
+                for (int x = 0; x < rect.width(); ++x) {
+                    const QRgb p = row[x];
+                    row[x] = qRgba(int(mul255(qRed(p), s[x])), int(mul255(qGreen(p), s[x])), int(mul255(qBlue(p), s[x])),
+                                   int(mul255(qAlpha(p), s[x])));
+                }
+            }
+        } else {
+            rect = layer.rect();
+            taken = layer;
+        }
+        // Trim fully transparent margins, keeping the position.
+        int left = taken.width(), right = -1, top = taken.height(), bottom = -1;
+        for (int y = 0; y < taken.height(); ++y) {
+            const QRgb *row = reinterpret_cast<const QRgb *>(taken.constScanLine(y));
+            for (int x = 0; x < taken.width(); ++x) {
+                if (qAlpha(row[x])) {
+                    left = std::min(left, x);
+                    right = std::max(right, x);
+                    top = std::min(top, y);
+                    bottom = y;
+                }
             }
         }
-    } else {
-        rect = layer.rect();
-        taken = layer;
+        if (right < 0)
+            continue;
+        const QRect trimmed(QPoint(left, top), QPoint(right, bottom));
+        items.push_back({source.name, taken.copy(trimmed), rect.topLeft() + trimmed.topLeft()});
     }
-    // Trim fully transparent margins, keeping the position.
-    int left = taken.width(), right = -1, top = taken.height(), bottom = -1;
-    for (int y = 0; y < taken.height(); ++y) {
-        const QRgb *row = reinterpret_cast<const QRgb *>(taken.constScanLine(y));
-        for (int x = 0; x < taken.width(); ++x) {
-            if (qAlpha(row[x])) {
-                left = std::min(left, x);
-                right = std::max(right, x);
-                top = std::min(top, y);
-                bottom = y;
-            }
-        }
-    }
-    if (right < 0)
-        return selected.isActive() ? QStringLiteral("The selected area of this layer is empty, so nothing was copied.")
-                                   : QStringLiteral("This layer is empty, so nothing was copied.");
-    const QRect trimmed(QPoint(left, top), QPoint(right, bottom));
-    m_clipImage = taken.copy(trimmed);
-    m_clipOrigin = rect.topLeft() + trimmed.topLeft();
+    if (items.empty())
+        return selected.isActive() ? QStringLiteral("The selected area of the selected layers is empty, so nothing was copied.")
+                                   : QStringLiteral("The selected layers are empty, so nothing was copied.");
+    m_clipboard = std::move(items);
     m_clipDocSize = m_document.size();
-    // Also offered to other applications (straight alpha, as they expect).
-    if (QClipboard *clipboard = QGuiApplication::clipboard())
-        clipboard->setImage(m_clipImage.convertToFormat(QImage::Format_ARGB32));
+    // Other applications get one flattened image (straight alpha, as they expect).
+    if (QClipboard *clipboard = QGuiApplication::clipboard()) {
+        QRect bounds;
+        for (const ClipItem &item : m_clipboard)
+            bounds |= QRect(item.origin, item.image.size());
+        QImage flat(bounds.size(), QImage::Format_ARGB32_Premultiplied);
+        flat.fill(Qt::transparent);
+        QPainter p(&flat);
+        for (const ClipItem &item : m_clipboard)
+            p.drawImage(item.origin - bounds.topLeft(), item.image);
+        p.end();
+        clipboard->setImage(flat.convertToFormat(QImage::Format_ARGB32));
+    }
     emit clipboardChanged();
     return {};
 }
@@ -567,13 +667,14 @@ QString CanvasItem::copySelection()
 QString CanvasItem::cutSelection()
 {
     finishPendingEdits();
-    const QString blocked = activeLayerBlockReason();
+    const QString blocked = selectedLayersBlockReason(QStringLiteral("cut"));
     if (!blocked.isEmpty())
-        return QString(blocked).replace(QStringLiteral("Can't paint"), QStringLiteral("Can't cut"));
+        return blocked;
     const QString copied = copySelection();
     if (!copied.isEmpty())
         return copied;
-    // Leaves layer × (1 − selection): pasting the copy back in place restores soft edges.
+    // Leaves layer × (1 − selection) on every selected layer: pasting the copy back in place
+    // restores soft edges.
     const int steps = m_history.undoCount();
     clearSelected();
     if (m_history.undoCount() == steps + 1)
@@ -585,38 +686,56 @@ QString CanvasItem::cutSelection()
 QString CanvasItem::paste()
 {
     finishPendingEdits();
-    QImage image;
-    QPoint origin;
-    if (!m_clipImage.isNull()) {
-        image = m_clipImage;
-        origin = m_clipOrigin;
-        // From a document of another size, or off this canvas: centred instead.
-        if (m_clipDocSize != m_document.size() || !QRect(origin, image.size()).intersects(QRect(QPoint(0, 0), m_document.size())))
-            origin = QPoint((m_document.size().width() - image.width()) / 2, (m_document.size().height() - image.height()) / 2);
+    std::vector<ClipItem> items = m_clipboard;
+    const QRect canvas(QPoint(0, 0), m_document.size());
+    if (!items.empty()) {
+        // From a canvas of another size, or entirely off this canvas: centred as a group.
+        QRect bounds;
+        for (const ClipItem &item : items)
+            bounds |= QRect(item.origin, item.image.size());
+        if (m_clipDocSize != m_document.size() || !bounds.intersects(canvas)) {
+            const QPoint shift = canvas.center() - bounds.center();
+            for (ClipItem &item : items)
+                item.origin += shift;
+        }
     } else if (const QClipboard *clipboard = QGuiApplication::clipboard(); clipboard && !clipboard->image().isNull()) {
         // Another application's image: centred, at its own pixel size (cut off at the canvas).
-        image = clipboard->image().convertToFormat(QImage::Format_ARGB32_Premultiplied);
-        origin = QPoint((m_document.size().width() - image.width()) / 2, (m_document.size().height() - image.height()) / 2);
+        const QImage image = clipboard->image().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        items.push_back({QStringLiteral("Pasted"), image,
+                         QPoint((canvas.width() - image.width()) / 2, (canvas.height() - image.height()) / 2)});
     } else {
         return QStringLiteral("There is nothing to paste.");
     }
-    if (m_document.count() >= maxLayers())
+    if (m_document.count() + int(items.size()) > maxLayers())
         return QStringLiteral("This canvas can have at most %1 layers.").arg(maxLayers());
-    LayerData layer;
-    layer.id = m_document.allocateId();
-    layer.name = QStringLiteral("Pasted");
-    layer.image = RasterDocument::blank(m_document.size());
-    {
-        QPainter p(&layer.image);
-        p.setCompositionMode(QPainter::CompositionMode_Source);
-        p.drawImage(origin, image);
+    // New layers above the topmost selected layer, bottom to top as copied; one undo step.
+    int index = 0;
+    for (const quint64 id : selectedLayerIds())
+        index = std::max(index, m_document.indexOf(id) + 1);
+    std::vector<UndoCommand> children;
+    std::vector<quint64> added;
+    QRect changed;
+    for (const ClipItem &item : items) {
+        LayerData layer;
+        layer.id = m_document.allocateId();
+        layer.name = items.size() == 1 && item.name == QLatin1String("Pasted") ? item.name
+                                                                               : QStringLiteral("%1 (pasted)").arg(item.name);
+        layer.image = RasterDocument::blank(m_document.size());
+        {
+            QPainter p(&layer.image);
+            p.setCompositionMode(QPainter::CompositionMode_Source);
+            p.drawImage(item.origin, item.image);
+        }
+        const quint64 id = layer.id;
+        m_document.insertLayer(index, std::move(layer));
+        children.push_back(UndoCommand::layerInserted(id, index, QStringLiteral("Paste")));
+        added.push_back(id);
+        changed |= QRect(item.origin, item.image.size()) & canvas;
+        ++index;
     }
-    const int index = m_document.activeIndex() + 1;
-    const quint64 id = layer.id;
-    m_document.insertLayer(index, std::move(layer));
-    m_document.setActiveLayer(id);
-    pushCommand(UndoCommand::layerInserted(id, index, QStringLiteral("Paste")));
-    const QRect changed = QRect(origin, image.size()) & QRect(QPoint(0, 0), m_document.size());
+    m_document.setActiveLayer(added.back());
+    m_selectedLayers = QSet<quint64>(added.begin(), added.end()); // ready to transform together
+    pushCommand(children.size() == 1 ? std::move(children.front()) : UndoCommand::group(std::move(children), QStringLiteral("Paste")));
     m_document.refreshComposite(changed);
     markContentChanged();
     updateDocumentRect(changed);

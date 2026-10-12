@@ -8,6 +8,7 @@
 #include <QString>
 #include <deque>
 #include <optional>
+#include <vector>
 
 class LayeredDocument;
 
@@ -38,8 +39,11 @@ public:
     // The selection changed; before is the previous selection. Selection changes do not change
     // artwork, so they never make the document "unsaved" (see UndoHistory::stateId).
     static UndoCommand selection(const Selection &before, const QString &label);
-    // Adds a selection change to a pixel command, undone and redone with it (transform apply).
+    // Adds a selection change to a pixel or group command, undone and redone with it.
     UndoCommand &withSelection(const Selection &before);
+    // Several commands as one undo step (a multi-layer transform, cut or paste). Undo swaps them
+    // in reverse order, redo in order.
+    static UndoCommand group(std::vector<UndoCommand> children, const QString &label);
 
     struct Result
     {
@@ -56,10 +60,10 @@ public:
     // selection mask).
     qsizetype byteSize() const;
     // False for selection-only commands.
-    bool changesArtwork() const { return m_kind != Kind::Selection; }
+    bool changesArtwork() const;
 
 private:
-    enum class Kind { Pixels, Presence, Properties, Move, Selection };
+    enum class Kind { Pixels, Presence, Properties, Move, Selection, Group };
     Kind m_kind = Kind::Pixels;
     QString m_label;
     quint64 m_layerId = 0;
@@ -67,7 +71,9 @@ private:
     std::optional<LayerData> m_stored; // Presence: the layer while it is not in the document
     int m_index = 0;                   // Presence: position to restore; Move: the other position
     LayerProperties m_props;
-    std::optional<Selection> m_selection; // Selection, or Pixels with a selection change
+    std::optional<Selection> m_selection; // Selection, or Pixels/Group with a selection change
+    std::vector<UndoCommand> m_children;  // Group
+    bool m_applied = true;                // Group: the next swap undoes
 };
 
 // Linear undo/redo under one memory budget shared by undo and redo entries. Pushing an edit drops

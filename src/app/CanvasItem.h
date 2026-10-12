@@ -124,6 +124,7 @@ public:
     void selectPath(const QPainterPath &docPath, SelectionMode mode);
     const Selection &selection() const { return m_document.selection(); }
     const TransformSession &transformSession() const { return m_transform; }
+    TransformSession &transformSessionForTesting() { return m_transform; }
     // What the view shows: the document, or the transform preview while one is open.
     const QImage &displayedComposite() const;
 
@@ -256,6 +257,10 @@ public:
     int layerCount() const { return m_document.count(); }
     int maxLayers() const { return LayeredDocument::maxLayersFor(m_document.size()); }
     Q_INVOKABLE void setActiveLayer(int id);
+    // Multi-layer selection for transforms and copy, cut, paste, clear (Ctrl+click or long press).
+    Q_INVOKABLE void setLayerSelected(int id, bool selected);
+    // The selected layers' ids, bottom to top (always at least the active layer).
+    std::vector<quint64> selectedLayerIds() const;
     Q_INVOKABLE void addLayer();
     Q_INVOKABLE void duplicateLayer(int id);
     Q_INVOKABLE void deleteLayer(int id);
@@ -347,6 +352,10 @@ private:
     void finishTransformDrag();
     void abortPointerGesture();
     void setSelectionWithUndo(const Selection &next, const QString &label);
+    // Empty if every selected layer can be edited, otherwise why not (naming the layer).
+    QString selectedLayersBlockReason(const QString &action) const;
+    // Drops ids that no longer exist and makes sure the active layer is selected.
+    void sanitizeLayerSelection();
     void selectionUpdated();
     void updateTransformPreview(TransformSession::Quality quality);
     // Ends what is in progress before another document edit: a stroke or gesture, and an open
@@ -493,10 +502,10 @@ private:
 
     // --- transform ---
     TransformSession m_transform;
-    quint64 m_transformLayerId = 0;
+    std::vector<quint64> m_transformLayerIds; // bottom to top
     Tool m_toolBeforeTransform = Brush;
     bool m_keepAspect = true;
-    QImage m_previewLayer;     // the transformed layer, rendered from the session's source
+    std::vector<QImage> m_previewLayers; // the transformed layers, rendered from the session's source
     QImage m_previewComposite; // the document with the preview layer, what the view shows
     QRect m_previewRect;       // area the preview last differed from the document in
     TransformSession::Handle m_dragHandle = TransformSession::Handle::None;
@@ -506,9 +515,17 @@ private:
     double m_dragStartAngle = 0;
 
     // --- clipboard (internal; also offered to the system clipboard) ---
-    QImage m_clipImage;
-    QPoint m_clipOrigin;
+    struct ClipItem
+    {
+        QString name;   // the layer it came from
+        QImage image;   // premultiplied, trimmed to its visible pixels
+        QPoint origin;  // where it was in the document
+    };
+    std::vector<ClipItem> m_clipboard; // one item per copied layer, bottom to top
     QSize m_clipDocSize;
+
+    // Layers selected in the panel (always including the active one). View state, not history.
+    QSet<quint64> m_selectedLayers;
     qreal m_lastPressure = 1.0;
     QPointF m_lastTilt;
     bool m_lastHasTilt = false;

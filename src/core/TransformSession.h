@@ -8,12 +8,15 @@
 #include <QRect>
 #include <vector>
 
-// An interactive affine transform (move, scale, rotate, flip) of one layer's pixels: the selected
-// part when there is a selection, otherwise the whole layer's artwork.
+// An interactive affine transform (move, scale, rotate, flip) of one or more layers' pixels: the
+// selected part when there is a selection, otherwise each layer's artwork. All layers share one
+// geometry over one source rectangle (the selection's bounds, or the union of the layers'
+// content), so they stay aligned with each other.
 //
-// begin() caches the source once:
-//   source = layer × selection   (cropped to the selection's bounds, or to the layer's content)
+// begin() caches, per layer, over the source rectangle only:
+//   source = layer × selection
 //   base   = layer × (1 − selection), with complementary rounding so source + base = layer
+// Outside the rectangle the original layer is read (shared, not copied).
 // Every preview is rendered from this cache (never from an earlier preview), into a separate
 // image: the document is not touched until the caller applies the result. Colour is resampled
 // premultiplied and clamped to alpha, so transparent pixels cannot leak colour into edges.
@@ -37,6 +40,12 @@ public:
     // the session inactive, when there is nothing to transform: an empty selection, or no
     // selection and a fully transparent layer.
     bool begin(const QImage &layer, const Selection &selection);
+    // Several layers (all the document's size): one part each, in the given order. Returns false,
+    // leaving the session inactive, if there is nothing to transform or memory runs out.
+    bool begin(const std::vector<QImage> &layers, const Selection &selection);
+    int partCount() const { return int(m_parts.size()); }
+    // Memory held by the session's caches.
+    qsizetype byteSize() const;
     void end();
     bool isActive() const { return !m_sourceRect.isEmpty(); }
 
@@ -87,7 +96,12 @@ public:
     // --- rendering ---
     // Writes the transformed layer (base with the transformed source over it) into out
     // (document size) within area.
-    void render(QImage &out, const QRect &area, Quality quality) const;
+    void render(QImage &out, const QRect &area, Quality quality) const; // part 0
+    void render(int part, QImage &out, const QRect &area, Quality quality) const;
+    // The transformed layer within area, as a new image of area's size (null if out of memory).
+    QImage renderRegion(int part, const QRect &area, Quality quality) const;
+    // Tests: renderRegion for this part behaves as if memory ran out (-1 = off).
+    void failRenderRegionForTesting(int part) { m_failRegionPart = part; }
     // The selection after Apply: the source's mask, transformed. "None" when there was none.
     Selection transformedSelection() const;
 
@@ -97,15 +111,23 @@ public:
 private:
     QPointF localHandle(Handle handle) const; // relative to c0, unscaled
     void keepPivotAt(const QPointF &pivotDoc);
-    void sampleRow(int y, int x0, int x1, QRgb *out, const QRgb *base, Quality quality) const;
+    struct Part
+    {
+        QImage original;              // the layer as it was (shared)
+        QImage base;                  // layer − source over the source rectangle
+        std::vector<QImage> source;   // source pixels and 2× reductions (premultiplied ARGB32)
+    };
+    template <typename RowFn>
+    void renderRows(const Part &part, const QRect &area, Quality quality, RowFn rowAt) const;
+    void sampleRow(const Part &part, int y, int x0, int x1, QRgb *out, Quality quality) const;
     void clampScales();
     void snapUnscaledMove();
 
     QSize m_docSize;
     QRect m_sourceRect;
     Selection m_selection;
-    QImage m_base;                 // document size; null when the whole layer is the source
-    std::vector<QImage> m_source;  // source pixels and 2× reductions (premultiplied ARGB32)
+    std::vector<Part> m_parts;
+    int m_failRegionPart = -1;
     QImage m_sourceMask;           // the selection over m_sourceRect (Grayscale8), when selected
 
     QPointF m_center;

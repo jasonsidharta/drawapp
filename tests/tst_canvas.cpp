@@ -12,6 +12,7 @@
 #include "RecoveryManager.h"
 #include "ViewRenderer.h"
 
+#include <QClipboard>
 #include <QDir>
 #include <QFile>
 #include <QSemaphore>
@@ -171,6 +172,7 @@ private slots:
 
     void init()
     {
+        QGuiApplication::clipboard()->clear(); // each test starts with nothing to paste
         m_window = std::make_unique<QQuickWindow>();
         m_window->resize(900, 640);
         m_canvas = new CanvasItem(m_window->contentItem());
@@ -2308,6 +2310,134 @@ private slots:
         QVERIFY(!m_canvas->isTransforming());
         QVERIFY(!m_canvas->hasSelection());
         QCOMPARE(qAlpha(doc().pixel(300, 300)), 0);
+    }
+
+    // --- multi-layer editing ---
+
+    // Two layers: colour (bottom) and ink (top), both with content around (300, 250) doc px.
+    std::pair<int, int> twoLayerCharacter()
+    {
+        const int colour = m_canvas->activeLayerId();
+        m_canvas->setBrushColor(QColor(240, 200, 170));
+        m_canvas->setBrushSize(120);
+        m_canvas->drawStroke(docCurve({250, 250}, {350, 250}, 0));
+        m_canvas->addLayer();
+        const int ink = m_canvas->activeLayerId();
+        m_canvas->setBrushColor(QColor(20, 20, 30));
+        m_canvas->setBrushSize(8);
+        m_canvas->drawStroke(docCurve({200, 200}, {400, 300}, 30));
+        return {colour, ink};
+    }
+
+    void multiLayerTransformIsOneStepAndSurvivesSaving()
+    {
+        const auto [colour, ink] = twoLayerCharacter();
+        m_canvas->setLayerSelected(colour, true);
+        QCOMPARE(int(m_canvas->selectedLayerIds().size()), 2);
+        const QImage colour0 = layerImage(layerIndex(colour)).copy(), ink0 = layerImage(layerIndex(ink)).copy();
+        const int steps = m_canvas->history().undoCount();
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        QCOMPARE(m_canvas->transformSession().partCount(), 2);
+        m_canvas->setTransformValue("width", m_canvas->transformWidth() * 1.5);
+        m_canvas->setTransformValue("rotation", 20);
+        QCOMPARE(layerImage(layerIndex(colour)), colour0); // preview only
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        m_canvas->applyTransform();
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Transform"));
+        const QImage colour1 = layerImage(layerIndex(colour)).copy(), ink1 = layerImage(layerIndex(ink)).copy();
+        QVERIFY(colour1 != colour0 && ink1 != ink0); // both layers moved
+        m_canvas->undo();
+        QCOMPARE(layerImage(layerIndex(colour)), colour0);
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        m_canvas->redo();
+        QCOMPARE(layerImage(layerIndex(colour)), colour1);
+        QCOMPARE(layerImage(layerIndex(ink)), ink1);
+        QTemporaryDir dir;
+        QCOMPARE(saveAs(QUrl::fromLocalFile(dir.filePath("multi.drawapp"))), QString());
+        const ProjectFile::LoadResult loaded = ProjectFile::load(dir.filePath("multi.drawapp"));
+        QCOMPARE(loaded.document.layers.size(), size_t(2));
+        QCOMPARE(loaded.document.layers[0].image, colour1);
+        QCOMPARE(loaded.document.layers[1].image, ink1);
+    }
+
+    void multiLayerTransformRefusesLockedOrHiddenLayers()
+    {
+        const auto [colour, ink] = twoLayerCharacter();
+        m_canvas->setLayerSelected(colour, true);
+        m_canvas->setLayerLocked(colour, true);
+        const QString locked = m_canvas->beginTransform();
+        QVERIFY2(locked.contains("locked") && locked.contains("Layer 1"), qPrintable(locked));
+        QVERIFY(!m_canvas->isTransforming());
+        m_canvas->setLayerLocked(colour, false);
+        m_canvas->setLayerVisible(colour, false);
+        QVERIFY(m_canvas->beginTransform().contains("hidden"));
+        m_canvas->setLayerVisible(colour, true);
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->cancelTransform();
+        Q_UNUSED(ink);
+    }
+
+    void multiLayerCancelAndFailedApplyChangeNothing()
+    {
+        const auto [colour, ink] = twoLayerCharacter();
+        m_canvas->setLayerSelected(colour, true);
+        const QImage colour0 = layerImage(layerIndex(colour)).copy(), ink0 = layerImage(layerIndex(ink)).copy();
+        const int steps = m_canvas->history().undoCount();
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("x", 600);
+        m_canvas->cancelTransform();
+        QCOMPARE(layerImage(layerIndex(colour)), colour0);
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        // Apply that runs out of memory on the second layer: nothing changes, the preview stays.
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("x", 600);
+        m_canvas->transformSessionForTesting().failRenderRegionForTesting(1);
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        m_canvas->applyTransform();
+        QVERIFY(m_canvas->isTransforming());
+        QVERIFY(!notices.isEmpty() && notices.last().at(0).toString().contains("Nothing was changed"));
+        QCOMPARE(layerImage(layerIndex(colour)), colour0);
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        m_canvas->transformSessionForTesting().failRenderRegionForTesting(-1);
+        m_canvas->applyTransform();
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+    }
+
+    void multiLayerCopyCutPaste()
+    {
+        const auto [colour, ink] = twoLayerCharacter();
+        m_canvas->setLayerSelected(colour, true);
+        QPainterPath r;
+        r.addRect(QRectF(150, 150, 300, 200));
+        m_canvas->selectPath(r, SelectionMode::Replace);
+        const QImage composite = doc().copy();
+        QCOMPARE(m_canvas->copySelection(), QString());
+        const int steps = m_canvas->history().undoCount();
+        QCOMPARE(m_canvas->paste(), QString());
+        QCOMPARE(m_canvas->layerCount(), 4);
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1); // one step for both new layers
+        // Order and names follow the copied layers; the new layers are selected together.
+        QCOMPARE(m_canvas->document().layer(2).name, QStringLiteral("Layer 1 (pasted)"));
+        QCOMPARE(m_canvas->document().layer(3).name, QStringLiteral("Layer 2 (pasted)"));
+        QCOMPARE(int(m_canvas->selectedLayerIds().size()), 2);
+        m_canvas->undo();
+        QCOMPARE(m_canvas->layerCount(), 2);
+        QCOMPARE(int(m_canvas->selectedLayerIds().size()), 1);
+        // Cut from both layers, paste back: the picture is the same.
+        m_canvas->setActiveLayer(ink);
+        m_canvas->setLayerSelected(colour, true);
+        QCOMPARE(m_canvas->cutSelection(), QString());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Cut"));
+        QCOMPARE(qAlpha(layerImage(layerIndex(colour)).pixel(300, 250)), 0);
+        QCOMPARE(qAlpha(layerImage(layerIndex(ink)).pixel(300, 250)), 0);
+        QCOMPARE(m_canvas->paste(), QString());
+        QCOMPARE(doc(), composite);
+        m_canvas->undo();
+        m_canvas->undo();
+        QCOMPARE(doc(), composite);
+        QCOMPARE(m_canvas->layerCount(), 2);
     }
 
     // --- clipboard ---
