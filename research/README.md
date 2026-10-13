@@ -55,3 +55,13 @@ no Qt.
 - `milestone9-procreate-brush-studio.md`: Procreate's documented Brush Studio.
 - `milestone9-architecture-decisions.md`: decisions D1–D11 with reasons.
 - `milestone9-feature-parity.md`: what DrawApp has, newly has, partly has or lacks.
+
+## Milestone 11
+
+- `m11-brush-architecture.md`: baseline verification, audit of the brush engine, decisions A1–A10, coordination with the parallel milestone, stage plan.
+- `m11-krita-engines.md`: Krita's bristle, colour smudge, paint thickness, height texturing, smoothing, hatching, spray and sketch engines (source study at 25840ee8).
+- `m11-photocraft.md`: PhotoCraft's dab deposition, wet edges, mixer brush and procedural tips (source study at 20cb95bc).
+- `m11-procreate.md`: Procreate's documented Brush Studio behaviour (rendering, wet mix, stabilisation, taper, grain).
+- `m11-top30-brushes.md`: the 30 top Krita Artists brush resources (accessed 2026-10-12), engines verified from preset files where possible, compatibility matrix.
+- `m11-paint-simulation.md`: libmypaint smudge and spectral mixing, pigment-mixing libraries and licences, watercolour literature, bristle and dry-media models, stroke geometry, hypotheses.
+- `m11-licenses.md`: every external source, its licence, and what was (not) copied.
