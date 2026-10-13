@@ -50,6 +50,17 @@ future feature with no work scheduled.
 - Milestone 8: selections (rectangle, ellipse, lasso; add, subtract, intersect; soft edges) that
   every brush respects, and move, scale, rotate and flip of the selection or the layer, with
   handles, numeric entry, Apply and Cancel; copy, cut and paste to a new layer.
+- Milestone 11: new kinds of brushes, with 30 new presets.
+  - Graphite, charcoal, chalk and pastel that catch in the paper's grain.
+  - Inking pens with smooth curves, sharp corners and a taper that keeps up with the pen.
+  - Blenders that mix colours like paint.
+  - Bristle brushes that streak and run dry.
+  - Watercolour that stays wet, bleeds into wet paint and dries with darker edges. It is a
+    simplified simulation.
+  - Hair, fur, grass, leaves, splatter, stitched patterns and cross-hatching.
+
+  The brush list has categories and search. Tested on Windows and an Android emulator; not yet
+  with a real pen or by artists.
 - Milestone 10: large canvases. New canvas up to 16384 × 16384 and 64 layers at any size; memory
   is used only where something is painted, within a limit (half of the device's memory on
   desktop, a quarter on Android) shown in a Memory usage dialog. Zooming out stays fast on large

@@ -334,6 +334,26 @@ and decisions: `research/milestone9-*.md`.
 - **Speed.** The milestone 6 rasteriser loop and a direct grain lookup are used when no new
   per-pixel feature is active, so ordinary presets run at the milestone 6 speed (BENCHMARKS.md).
 
+## Brush system: milestone 11 engines
+
+Full description: `docs/brush-engine-architecture.md` (milestone 11 sections). Report:
+`docs/m11-final-report.md`. Limitations: `docs/m11-known-limitations.md`. Research and
+decisions: `research/m11-*.md`.
+
+- **One pipeline, pluggable deposits.** `StrokeEngine` keeps the shared pipeline. What a dab does
+  is a `StrokeDeposit` (coverage, dry media, bristles, procedural, carried smudge and wet paint,
+  watercolour), chosen from `blend` and `stamp`. Milestone 10 presets render bit-identically
+  (330 exact reference renders).
+- **New engines.** Dry media; ink (curves, corners, live end taper); colour mixing with optional
+  Kubelka–Munk pigment mixing; bristles (a 2D contact model); watercolour (`WetLayer`, a bounded
+  cellular approximation with a canvas wet session in `CanvasItemWet.cpp`); and procedural
+  strands, grass, foliage, splatter and patterns.
+- **Registry.** 45 milestone 11 properties in engine groups. Every property is checked to change
+  rendering on every engine it claims; the panel shows only settings that apply. Presets have
+  derived categories and search.
+- **Bounds.** No dense full-canvas buffers in the brush path. Watercolour state is per wetted
+  tile and charged to the memory budget, and it runs under time budgets on the canvas.
+
 ## Selections, transforms and the clipboard (milestone 8)
 
 Research notes: `research/selections-transforms.md` (Krita and PhotoCraft read for concepts only).

@@ -395,6 +395,14 @@ Integration points milestone 11 **does** modify (brush-side, narrow):
 **Required interface changes in Codex-owned subsystems: none identified.** If one arises, work
 stops before the change and it is reported (specification §2).
 
+**As built (stage 12):**
+- None of the files listed as not modified was changed; no interface change was needed.
+- `CanvasItem` received one-line hooks into the new `CanvasItemWet.cpp`, and
+  `CanvasItemSelection.cpp` one line in `finishPendingEdits`.
+- `BrushPanel.qml` and `BrushLibrary` gained categories, search and `applies`.
+- A pre-existing milestone 10 issue was found and reported: transform apply can make the memory
+  evictor drop undo steps with an almost empty budget (`docs/m11-artist-workflows.md`).
+
 ## 7. Stages
 
 | Stage | Content | Exit check |

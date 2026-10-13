@@ -158,6 +158,25 @@ on the offscreen platform), Android at runtime.
 | Physical pen, palm rejection, tablet performance | **Not done** (no hardware) | milestone 7 |
 | Krita and PhotoCraft comparison | **Not run** (not installed / no Rust toolchain); manual procedure written | `docs/milestone9-performance.md` |
 
+## Milestone 11: advanced brush technologies (done with stated gaps; no pen hardware or artist evaluation)
+
+Report: `docs/m11-final-report.md` (all 16 completion criteria met as written).
+
+- **Done:**
+  - dry media, ink, mixing, bristle, watercolour and procedural engines, with 30 presets;
+  - a registry audit across every claimed engine;
+  - categories and search;
+  - A/B benchmarks against milestone 10;
+  - Android builds and emulator checks.
+- **Gaps:** nothing physically verified; watercolour is a bounded approximation; a small
+  per-event regression on dense documents cannot be ruled out (`docs/m11-performance.md`). See
+  `docs/m11-known-limitations.md`.
+- **Next:**
+  - hands-on artist sessions with a real pen;
+  - arm64 on a physical device;
+  - profiling the small-dab overhead;
+  - the transform-apply undo shedding found while testing (milestone 10.5).
+
 ## Milestone 10: sparse tiled storage, memory budget and asynchronous rendering (done, with gaps)
 
 Report: `docs/milestone10-final-report.md`. All 15 completion criteria met; gaps below.

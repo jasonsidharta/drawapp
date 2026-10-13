@@ -1,7 +1,7 @@
-# Brush engine architecture (milestone 9)
+# Brush engine architecture (milestones 9 and 11)
 
 How a stroke becomes pixels in DrawApp, which parts are shared by every brush, and where each
-milestone 9 feature lives. Everything here exists in the code; planned work is labelled. The
+milestone 9 and milestone 11 feature lives (milestone 11: the last sections). Everything here exists in the code; planned work is labelled. The
 property-by-property reference is `docs/brush-settings-specification.md` (generated from the
 code). The preset files are described in `docs/brush-preset-format.md`.
 
@@ -214,11 +214,129 @@ through the selection once.
 Per input event, every touched pixel is recomposited once, whatever the number of dabs. Measured
 costs per engine are in `docs/milestone9-performance.md`.
 
+## Milestone 11: deposit strategies and the new engines
+
+Research and decisions: `research/m11-brush-architecture.md` (A1–A10),
+`research/m11-paint-simulation.md` (models and hypotheses), `research/m11-licenses.md` (sources;
+nothing was copied). Measurements: `docs/m11-performance.md`.
+
+### One pipeline, pluggable deposits
+
+`StrokeEngine` still runs everything every brush shares, in this order: input filters,
+smoothing, the optional curve (`StrokeCurve`), path sensors, taper, spacing, dynamics and
+`DabParams`. What a placed dab *does* is now a `StrokeDeposit` (`StrokeDeposit.h`), chosen from
+`blend` and `stamp` when the stroke starts:
+
+| Deposit | Engines |
+|---|---|
+| `CoverageDeposit` | paint, erase, spray, hatching: the milestone 6/9 coverage model, moved unchanged |
+| `DryDeposit` (coverage) | dry media: paper tooth × pressure-dependent penetration |
+| `BristleDeposit` (coverage) | bristles: per-bristle capsules, reservoirs and pickup |
+| `ProceduralDeposit` (coverage) | strands, grass, foliage, splatter, pattern |
+| `CarriedDeposit` | smudge (smear, dulling, mix) and wet paint |
+| `WatercolorDeposit` | watercolour, on a `WetLayer` |
+
+Shared state is `StrokeContext`: settings, colour, seed, texture, clip, the allocation-failure
+flag and the canvas wet layer. Raster helpers are in `BrushRaster.h`.
+
+Every deposit follows the contract in `StrokeDeposit.h`:
+- capture into the undo snapshot before changing a tile;
+- change only the reported area and respect the selection once per pixel;
+- stop cleanly when memory is refused;
+- be deterministic (seeded).
+
+Coverage-type deposits can redraw dabs from their buffers. That is what the live end taper uses
+(`supportsRebuild`); bristles cannot, so they keep the hold-back.
+
+**Compatibility.** The milestone 10 presets and feature scenarios render bit-identically:
+`tst_brushengine::milestone10EngineReference` holds 330 exact renders from the unmodified
+milestone 10 engine. Milestone 11 settings default to the old behaviour. They are written to
+preset files only when used, the file versions stay at 2, and older builds skip new-engine
+presets one by one (verified with the milestone 10 decoder; see
+`research/m11-brush-architecture.md` A2).
+
+### The engines
+
+- **Dry media** (stamp `dry`):
+  - The paper is a document-space height field: the texture, "paper" by default. A dab pixel
+    deposits tip × smoothstep(penetration − (1 − height)). Penetration follows pressure
+    (`pressureDepth`) and tilt (`dryTiltDepth`): light marks catch the peaks, heavy marks fill
+    the valleys, and repeated strokes meet the same tooth.
+  - Streaks follow the stroke heading; the rim can crumble (`dryEdgeBreakup`); seeded grit
+    adds holes.
+  - Presets: Graphite 2H/HB/6B, Vine and Compressed Charcoal, Chalk, Soft Pastel.
+- **Ink** (shared pipeline):
+  - optional centripetal Catmull–Rom between samples, with one sample of latency; corners
+    sharper than `cornerAngle` stay sharp;
+  - speed-adaptive smoothing (`smoothingSpeedAdapt`);
+  - live end taper (`taperLive`): the line reaches the pen while drawing, and the tail is
+    re-spaced with the taper at pen-up, rebuilding only the tiles it touched.
+  - Presets: G-Pen, Fine Liner, Brush Pen, Dry Ink.
+- **Mixing** (blend `smudge`, mode `mix`):
+  - One carried colour, picked up centre-weighted (`smudgeRadius`). It lasts as long as
+    `smudgeLength` says, is joined by the brush colour (colour rate, with dynamics), and is
+    laid down with depletion.
+  - Mixing is premultiplied and alpha-aware. Optional `pigmentMixing` uses per-channel
+    Kubelka–Munk in linear light (`PigmentMix`) for smudge, wet paint and bristles.
+  - Presets: Oil Blender, Colour Mixer, Smear Knife.
+- **Bristles** (stamp `bristle`): a 2D contact approximation, not a physical simulation.
+  - Bristles sit at seeded places in the dab's footprint (round or flat by roundness). Each
+    draws an anti-aliased capsule from dab to dab.
+  - Pressure splays the bristles, and longer bristles touch first.
+  - Each bristle has its own reservoir; a drying bristle skips the paper's valleys, then stops.
+  - Each bristle picks up the layer's colour from before the stroke.
+  - Presets: Round Bristle, Flat Bristle, Dry Brush.
+- **Watercolour** (blend `watercolor`; `WetLayer.h`): a bounded cellular approximation, not a
+  fluid solver.
+  - **State:** per wetted 64 × 64 tile there is water, suspended and settled pigment, and the
+    base pixels.
+  - **Brush input:** the brush wets its contact area up to its own wetness and exchanges paint
+    with the wash.
+  - **Each 16 ms step**, double-buffered:
+    - water flows only between wet cells, so wet-on-dry edges stay hard;
+    - near the edge, lower pressure and faster evaporation leave pigment at the rim;
+    - pigment settles faster in the paper's valleys (granulation);
+    - new water lifts settled pigment.
+  - **Display:** a multiply glaze with a 5-point anti-aliasing average.
+  - **Canvas session:** `CanvasItemWet.cpp`. The paint stays wet after pen-up and dries on a
+    20 Hz timer with time budgets. The stroke's undo step stays open until the paint dries.
+    The next watercolour stroke on the layer paints wet-on-wet. Any other edit, undo or redo
+    fixes the paint as it looks, and saving says the file holds the paint as it looks now.
+  - **Performance:** steps and pixel computation run on up to 8 threads with results identical
+    to one thread. Dry tiles go dormant.
+  - Presets: Watercolour Wash, Watercolour Round.
+- **Procedural** (stamps `strands`, `grass`, `foliage`, `splatter`, `pattern`):
+  - Geometry is generated per dab from the seed and dab index: tapered capsule polylines,
+    ellipses and leaf lenses.
+  - Each element is rasterised into a scratch buffer (largest coverage per pixel), then
+    deposited once.
+  - Elements point along the stroke, up, or by the brush angle (`procDirection`).
+  - Hatching gains cross-hatch passes by pressure (`hatchCrossPasses`); spray gains a Gaussian
+    distribution.
+  - Presets: Hair, Fur, Grass, Foliage, Splatter, Stitches, Chevron Trim, Crosshatch Pen,
+    Airbrush Spray.
+
+### Registry and presets
+
+The registry holds the 120-property milestone 9 design target, of which 96 are implemented, and
+45 milestone 11 properties in engine groups: Ink and Stroke, Dry Media, Mixing, Bristles,
+Watercolour and Procedural. Each property lists the engines it works with.
+
+`tst_brushengine::everyPropertyChangesRenderingOnEveryEngineItClaims` renders every implemented
+property on **every** engine it claims (1035 pairs). The panel shows only settings that apply
+(`BrushLibrary::applies`); the Studio dims the others and says they do not apply.
+
+Presets have a category, derived from what they do: Basic, Erasers, Ink, Dry Media, Bristles,
+Blending, Watercolour, Nature & Patterns or Effects. The panel groups by category and has
+search. There are 38 built-in presets.
+
 ## Not built (planned or out of scope)
 
-- Brush engines: bristle simulation, clone, sketch "connect" lines, filters and particle physics.
-- Physics: fluid or pigment simulation, drying.
-- Rendering: GPU rendering and multi-threaded dab rendering. Measurements did not show a need at
-  the measured sizes (`docs/milestone9-performance.md`).
+- Brush engines: a physical (3D) bristle simulation (milestone 11 has a 2D contact model),
+  clone, sketch "connect" lines, filters and particle physics.
+- Physics: a fluid simulation of watercolour (milestone 11 has a bounded cellular
+  approximation), oil paint thickness and impasto, wet paint stored in files.
+- Rendering: GPU rendering. Dab rendering is single-threaded; only the watercolour wet layer uses
+  threads (`docs/m11-performance.md`).
 - Preset import: Krita `.kpp` and Procreate `.brush` (see `docs/brush-preset-format.md`).
 - The 26 planned properties in the specification.

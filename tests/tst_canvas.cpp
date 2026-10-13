@@ -13,6 +13,7 @@
 #include "ViewRenderer.h"
 
 #include <QClipboard>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QSemaphore>
@@ -2230,6 +2231,131 @@ private slots:
         const QImage saved = ProjectFile::load(path).document.composite();
         QCOMPARE(doc(), saved);
         QVERIFY(saved != dried);
+    }
+
+    // --- milestone 11 artist workflow (scripted; docs/m11-artist-workflows.md) ---
+
+    void artistWorkflowWithMilestone11Brushes()
+    {
+        // A small illustration made with the new engines across layers, with a selection, a
+        // transform, save and reopen, and the whole history undone and redone. Strokes are
+        // synthetic (simulated pressure), not an artist's hands.
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("m11-workflow.drawapp"));
+        const QImage blank = doc().copy();
+        const int startSteps = m_canvas->history().undoCount();
+        const quint64 startState = m_canvas->history().stateId();
+        auto use = [&](const char *preset, QColor color) {
+            QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.") + QLatin1String(preset)));
+            m_canvas->setBrushColor(color);
+        };
+        auto curve = [](QPointF a, QPointF b, qreal bend) { return docCurve(a, b, bend); };
+        // The picture after each action, by history state (a hash of the composite), to check that
+        // undo and redo reproduce every step still in the history (state ids stay valid when the
+        // undo budget drops the oldest steps; undo depths would not).
+        std::map<quint64, QByteArray> states;
+        auto picture = [&] {
+            const QImage d = doc();
+            return QCryptographicHash::hash(QByteArrayView(reinterpret_cast<const char *>(d.constBits()), d.sizeInBytes()),
+                                            QCryptographicHash::Sha256);
+        };
+        auto mark = [&] { states[m_canvas->history().stateId()] = picture(); };
+        mark();
+        // 1. Sketch in graphite.
+        use("graphite-hb", QColor(60, 60, 70));
+        QVERIFY(m_canvas->drawStroke(curve({300, 900}, {1700, 900}, -300)));
+        QVERIFY(m_canvas->drawStroke(curve({400, 1200}, {1600, 1150}, 60)));
+        mark();
+        // 2. A watercolour wash on its own layer, wet-on-wet, then dried.
+        m_canvas->addLayer();
+        use("watercolor-wash", QColor(70, 120, 190));
+        QVERIFY(m_canvas->drawStroke(curve({250, 500}, {1800, 520}, 40)));
+        use("watercolor-wash", QColor(200, 120, 60));
+        QVERIFY(m_canvas->drawStroke(curve({900, 300}, {1000, 800}, 0)));
+        dryWetPaint();
+        mark();
+        // 3. Ink on top.
+        m_canvas->addLayer();
+        const int inkLayer = m_canvas->activeLayerId();
+        use("g-pen", QColor(20, 20, 30));
+        QVERIFY(m_canvas->drawStroke(curve({300, 900}, {1700, 900}, -300)));
+        mark();
+        // 4. Splatter limited to a selection.
+        QPainterPath box;
+        box.addRect(QRectF(1100, 200, 600, 500));
+        m_canvas->selectPath(box, SelectionMode::Replace);
+        use("splatter", QColor(180, 40, 60));
+        const QImage beforeSplatter = doc().copy();
+        QVERIFY(m_canvas->drawStroke(curve({800, 450}, {1900, 450}, 0)));
+        const QImage afterSplatter = doc();
+        for (int y = 0; y < afterSplatter.height(); y += 5)
+            for (int x = 0; x < afterSplatter.width(); x += 5)
+                if (!QRect(1100, 200, 600, 500).contains(x, y))
+                    QVERIFY2(afterSplatter.pixel(x, y) == beforeSplatter.pixel(x, y), "splatter outside the selection");
+        QVERIFY(afterSplatter != beforeSplatter);
+        m_canvas->deselect();
+        mark();
+        // 5. Grass, foliage and bristle paint on a new layer.
+        m_canvas->addLayer();
+        use("grass", QColor(60, 140, 60));
+        QVERIFY(m_canvas->drawStroke(curve({100, 1400}, {1900, 1420}, 0)));
+        use("foliage", QColor(70, 150, 70));
+        QVERIFY(m_canvas->drawStroke(curve({1300, 1000}, {1800, 1100}, -80)));
+        use("round-bristle", QColor(200, 160, 60));
+        QVERIFY(m_canvas->drawStroke(curve({200, 200}, {700, 260}, 30)));
+        mark();
+        // 6. Move the ink layer with a transform.
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        m_canvas->setActiveLayer(inkLayer);
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        m_canvas->setTransformValue("x", m_canvas->transformX() + 40);
+        m_canvas->applyTransform();
+        QVERIFY(waitForApply());
+        QTest::qWait(50); // queued notices
+        // Seen on the development machine: applying this transform makes the memory evictor drop
+        // the oldest undo steps although the budget is nearly empty ("the memory limit of
+        // 7870 MiB" with 12 MiB used). The milestone 10 baseline does the same in this sequence
+        // with its own brushes (10 of 14 steps dropped), so it predates milestone 11; reported for
+        // milestone 10.5 (transform and memory budget code, not changed here). Logged, not failed.
+        for (const QList<QVariant> &n : notices)
+            qInfo("notice during the transform: %s", qPrintable(n.at(0).toString()));
+        mark();
+        const QImage finished = doc().copy();
+        QVERIFY(finished != blank);
+        const int steps = m_canvas->history().undoCount();
+        qInfo("milestone 11 workflow: %d undo steps, %d layers", steps - startSteps, m_canvas->layerCount());
+        screenshot("m11_workflow");
+        // 7. Back through the whole history and forward again: at every state recorded above, the
+        //    same picture. (Memory pressure may have dropped the oldest steps: logged, not failed.)
+        int checked = 0;
+        while (m_canvas->history().canUndo()) {
+            m_canvas->undo();
+            if (const auto it = states.find(m_canvas->history().stateId()); it != states.end()) {
+                QVERIFY2(picture() == it->second, qPrintable(QStringLiteral("undo to state %1").arg(it->first)));
+                ++checked;
+            }
+        }
+        if (m_canvas->history().stateId() == startState)
+            QCOMPARE(doc(), blank);
+        else
+            qInfo("the oldest steps of the session were dropped from the history (%d kept)", steps - startSteps);
+        while (m_canvas->history().canRedo()) {
+            m_canvas->redo();
+            if (const auto it = states.find(m_canvas->history().stateId()); it != states.end()) {
+                QVERIFY2(picture() == it->second, qPrintable(QStringLiteral("redo to state %1").arg(it->first)));
+                ++checked;
+            }
+        }
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        QCOMPARE(doc(), finished);
+        qInfo("undo/redo matched the recorded picture at %d depths", checked);
+        QVERIFY(checked >= 6);
+        // 8. Save and reopen: the same picture.
+        QCOMPARE(saveAs(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(ProjectFile::load(path).document.composite(), finished);
+        QCOMPARE(open(QUrl::fromLocalFile(path)), QString());
+        QCOMPARE(doc(), finished);
+        QCOMPARE(m_canvas->layerCount(), 4);
     }
 
     // --- selections on the canvas ---
