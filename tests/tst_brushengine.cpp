@@ -283,6 +283,7 @@ std::map<QString, Scenario> scenarios()
     auto oval = [](BrushSettings &s) { s.roundness = 0.3; };
     auto asym = [](BrushSettings &s) { s.tipImage = BrushProperties::tipFromImage(asymmetricImage()); };
     auto none = [](BrushSettings &) {};
+    auto mixMode = [](BrushSettings &s) { s.smudgeMode = SmudgeMode::Mix; };
     auto dry = [](BrushSettings &s) {
         s.stamp = BrushStamp::Dry;
         s.texture = QStringLiteral("rough");
@@ -400,6 +401,12 @@ std::map<QString, Scenario> scenarios()
         {"hatchAngle", {none, -30.0}},
         {"hatchSpacing", {none, 12.0}},
         {"hatchThickness", {none, 4.0}},
+        // Mixing (milestone 11), on the smudge engine in mix mode
+        {"smudgeLength", {mixMode, 0.95}},
+        {"smudgeRadius", {mixMode, 0.25}},
+        {"smudgeDepletion", {mixMode, 0.9}},
+        {"pigmentMixing", {[=](BrushSettings &s) { mixMode(s); s.smudgeColorRate = 0.5; }, true}},
+        {"dynamics.colorRate", {[](BrushSettings &s) { s.smudgeColorRate = 0.6; }, randomDyn}},
         // Ink and stroke (milestone 11)
         {"curveInterpolation", {none, true}},
         {"cornerAngle", {[](BrushSettings &s) { s.curveInterpolation = true; s.smoothing = 80; }, 10.0}},

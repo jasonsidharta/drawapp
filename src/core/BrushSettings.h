@@ -37,8 +37,10 @@ enum class TextureMode { Multiply, Subtract };
 // How painted colour combines with the layer (Paint only).
 enum class PaintMode { Normal, Multiply, Screen, Behind, PreserveAlpha };
 
-// Smudge: drag the carried patch pixel by pixel (Smear), or carry one averaged colour (Dulling).
-enum class SmudgeMode { Smear, Dulling };
+// Smudge: drag the carried patch pixel by pixel (Smear), or carry one averaged colour (Dulling),
+// or (milestone 11) Mix: one carried colour that blends the canvas it passes with what it carries
+// and the brush colour, alpha-aware and optionally paint-like (research/m11-paint-simulation.md §6).
+enum class SmudgeMode { Smear, Dulling, Mix };
 
 // A pressure response: value = minimum + (1 − minimum) × pressure^gamma. Disabled = 1.
 // Input without pressure (mouse, touch) gives 1.
@@ -155,6 +157,11 @@ struct BrushSettings
     SmudgeMode smudgeMode = SmudgeMode::Smear;
     double smudgeColorRate = 0.0; // brush colour mixed into the carried paint per pass
     bool smudgePreserveAlpha = false;
+    // Milestone 11 mixing.
+    double smudgeLength = 0.5;     // Mix: how long picked-up colour persists (0 = replaced at once)
+    double smudgeRadius = 1.0;     // Mix: the pickup area, as a share of the dab (centre-weighted)
+    double smudgeDepletion = 0.0;  // carried paint lost per 100 px of travel (0..1)
+    bool pigmentMixing = false;    // mix colours like paint (Kubelka–Munk) instead of RGB
 
     // --- Wet paint ---
     double wetLoad = 1.0;         // how much brush colour the patch holds at the start

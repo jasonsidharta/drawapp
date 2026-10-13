@@ -577,6 +577,9 @@ StrokeEngine::DabParams StrokeEngine::paramsFor(const Dab &dab) const
     if (m_dyn[int(DynamicTarget::SmudgeStrength)].evaluate(r, &v))
         carried *= v;
     d.strength = std::clamp(carried * strength, 0.0, 1.0);
+    d.colorRate = st.smudgeColorRate;
+    if (m_dyn[int(DynamicTarget::ColorRate)].evaluate(r, &v))
+        d.colorRate *= v;
 
     double passFlow = st.flow * st.pressureFlow.apply(pressure);
     if (m_dyn[int(DynamicTarget::Flow)].evaluate(r, &v))

@@ -36,6 +36,7 @@ add_library(drawcore STATIC
     src/core/StrokeEngine.cpp src/core/StrokeEngine.h
     src/core/StrokeContext.h src/core/BrushRaster.h
     src/core/StrokeCurve.cpp src/core/StrokeCurve.h
+    src/core/PigmentMix.cpp src/core/PigmentMix.h
     src/core/StrokeDeposit.cpp src/core/StrokeDeposit.h
     src/core/CoverageDeposit.cpp src/core/CoverageDeposit.h
     src/core/CarriedDeposit.cpp src/core/CarriedDeposit.h

@@ -302,6 +302,66 @@ std::vector<BrushPreset> makeBuiltIns()
         s.smoothing = 20;
         list.push_back(preset("dry-ink", "Dry Ink", s));
     }
+
+    // --- Milestone 11: smudge and colour mixing (CarriedDeposit, mix mode) ---
+    // Blends what is on the canvas like paint, adding none of its own.
+    {
+        BrushSettings s;
+        s.blend = BrushBlend::Smudge;
+        s.smudgeMode = SmudgeMode::Mix;
+        s.size = 40;
+        s.hardness = 0.4;
+        s.spacing = 0.06;
+        s.pressureSize = {true, 0.6, 1.0};
+        s.pressureOpacity = {true, 0.2, 1.0}; // pressure sets how firmly the mix is laid down
+        s.smudgeStrength = 0.8;
+        s.smudgeLength = 0.8;
+        s.smudgeRadius = 0.6;
+        s.pigmentMixing = true;
+        list.push_back(preset("oil-blender", "Oil Blender", s));
+    }
+    // One tool for painting and blending: a light touch blends the canvas, pressure adds the brush
+    // colour (colour rate follows pressure), mixed like paint.
+    {
+        BrushSettings s;
+        s.blend = BrushBlend::Smudge;
+        s.smudgeMode = SmudgeMode::Mix;
+        s.size = 32;
+        s.hardness = 0.55;
+        s.roundness = 0.8;
+        s.followDirection = true;
+        s.spacing = 0.05;
+        s.pressureSize = {true, 0.5, 1.0};
+        s.smudgeStrength = 0.9;
+        s.smudgeLength = 0.6;
+        s.smudgeRadius = 0.7;
+        s.smudgeColorRate = 0.8;
+        s.smudgeDepletion = 0.05;
+        s.pigmentMixing = true;
+        ParameterDynamics d;
+        d.enabled = true;
+        d.minimum = 0.0;
+        // Firm: below about a third of the pressure range almost no paint joins (0.3³ ≈ 3 %).
+        d.mappings.push_back({Sensor::Pressure, SensorCurve::exponential(3.0), 0});
+        s.dynamicsFor(DynamicTarget::ColorRate) = d;
+        list.push_back(preset("color-mixer", "Colour Mixer", s));
+    }
+    // A flat knife that drags the paint as it is (smear), pixel by pixel.
+    {
+        BrushSettings s;
+        s.blend = BrushBlend::Smudge;
+        s.smudgeMode = SmudgeMode::Smear;
+        s.size = 36;
+        s.hardness = 0.9;
+        s.roundness = 0.25;
+        s.angle = 90; // the broad edge across the stroke, as a palette knife is dragged
+        s.followDirection = true;
+        s.spacing = 0.04;
+        s.pressureSize = {false, 0.0, 1.0};
+        s.smudgeStrength = 0.95;
+        s.smudgePickup = 0.08;
+        list.push_back(preset("smear-knife", "Smear Knife", s));
+    }
     return list;
 }
 

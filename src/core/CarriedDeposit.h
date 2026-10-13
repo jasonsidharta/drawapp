@@ -26,6 +26,9 @@ private:
     void carry(StrokeSurface &image, const DabParams &dab, const QRect &rect, const TileSnapshot &before);
     void carryInto(QImage &target, const QPoint &origin, const DabParams &dab, const QRect &rect);
     void loadPatch(const StrokeSurface &image, const DabParams &dab);
+    // Mix mode: the alpha-weighted average of the area under the dab (centre-weighted pickup).
+    bool sample(const QImage &area, const QPoint &origin, const DabParams &dab, const QRect &rect, float out[4]) const;
+    void mixInto(QImage &target, const QPoint &origin, const DabParams &dab, const QRect &rect);
     QRgb workPixel(const StrokeSurface &image, int x, int y) const;
 
     std::vector<float> m_patch;
@@ -35,4 +38,7 @@ private:
     std::unordered_map<qint64, QImage> m_work;
     // The dab's area, reused from dab to dab (grown when needed) instead of a new image per dab.
     QImage m_region;
+    // Mix mode: the one carried colour (premultiplied RGBA floats 0..255).
+    float m_mixColor[4] = {0, 0, 0, 0};
+    bool m_mixLoaded = false;
 };

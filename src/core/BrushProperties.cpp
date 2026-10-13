@@ -786,14 +786,16 @@ std::vector<BrushProperty> build()
         .tests("tst_brush::smudgeCarriesColour, smudgeTransparencyRules, tst_brushengine::everyImplementedPropertyChangesRendering")
         .access(number(&BrushSettings::smudgePickup));
     add("smudgeMode", "Smudge mode", PropertyType::Choice)
-        .options({"smear", "dulling"}, {"Smear", "Dulling"})
+        .options({"smear", "dulling", "mix"}, {"Smear", "Dulling", "Mix (one carried colour)"})
         .engines(EngineSmudge)
         .desc("Smear drags the paint pixel by pixel; dulling carries one averaged colour (softer, blends to flat "
-              "colour).")
-        .render("Dulling replaces the carried patch by its coverage-weighted average after each pickup.")
-        .cost("Dulling: one extra pass over the patch per dab.")
-        .tests("tst_brushengine::smudgeModes, tst_brushengine::everyImplementedPropertyChangesRendering")
-        .access(choice(&BrushSettings::smudgeMode, {"smear", "dulling"}));
+              "colour); mix (milestone 11) carries one colour that blends what it passes with what it carries and the "
+              "brush colour, for as long as the smudge length says.")
+        .render("Dulling replaces the carried patch by its coverage-weighted average after each pickup. Mix keeps one "
+                "premultiplied colour, mixed with the centre-weighted average under each dab.")
+        .cost("Dulling: one extra pass over the patch per dab. Mix: one sampling pass and one deposit pass per dab.")
+        .tests("tst_brushengine::smudgeModes, tst_brushmedia::mix*, tst_brushengine::everyImplementedPropertyChangesRendering")
+        .access(choice(&BrushSettings::smudgeMode, {"smear", "dulling", "mix"}));
     add("smudgeColorRate", "Colour rate", PropertyType::Number)
         .percent()
         .engines(EngineSmudge)
@@ -814,12 +816,30 @@ std::vector<BrushProperty> build()
     add("sampleMerged", "Sample all layers", PropertyType::Bool)
         .desc("Planned: smudge picks up colour from all visible layers. Not implemented.");
     add("smudgeRadius", "Smudge radius", PropertyType::Number)
-        .percent(0, 2)
-        .desc("Planned: dulling samples an area larger or smaller than the dab. Not implemented.");
+        .percent(0.25, 1)
+        .engines(EngineSmudge)
+        .since(11)
+        .desc("The part of the dab colour is picked up from (milestone 11, for smudge mode Mix): smaller values sample "
+              "the middle only, so the dab's edges do not pull in neighbouring colours. Dulling and smear sample the "
+              "whole dab as before.")
+        .render("Mix: the tip evaluated at the distance divided by this share weights the sample.")
+        .cost("None.")
+        .needs("Smudge mode Mix")
+        .tests("tst_brushmedia::mix*, tst_brushengine::everyImplementedPropertyChangesRendering")
+        .access(number(&BrushSettings::smudgeRadius));
     add("moreBlendModes", "Overlay and colour modes", PropertyType::Choice)
         .desc("Planned: overlay, soft light, hue, saturation, colour and luminosity blend modes. Not implemented.");
     add("pigmentMixing", "Pigment mixing", PropertyType::Bool)
-        .desc("Planned: subtractive (paint-like) colour mixing for smudge and wet paint. Not implemented.");
+        .engines(EngineSmudge | EngineWet)
+        .since(11)
+        .desc("Mixes colours like paint instead of light (milestone 11): blue and yellow give green rather than grey. "
+              "Per-channel Kubelka–Munk in linear light; pure screen primaries mix towards black (three channels cannot "
+              "hold pigment spectra).")
+        .render("Every colour mix of the carried paint (pickup, colour rate, lay-down; wet paint refill and pickup) goes "
+                "through K/S = (1 − R)² / 2R per channel, weighted by alpha.")
+        .cost("Per pixel of each dab: three table look-ups and three square roots per mix.")
+        .tests("tst_brushmedia::mix*, tst_brushmedia::pigment*, tst_brushengine::everyImplementedPropertyChangesRendering")
+        .access(flag(&BrushSettings::pigmentMixing));
     add("blurMode", "Blur mode", PropertyType::Bool)
         .desc("Planned: soften pixels in place instead of carrying paint. Not implemented.");
 
@@ -1023,6 +1043,34 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::hatchThickness));
 
+    // ------------------------------------------------------------------- Mixing (milestone 11)
+    g = QStringLiteral("Mixing");
+    const char *const MixTests = "tst_brushmedia::mix*";
+    add("smudgeLength", "Smudge length", PropertyType::Number)
+        .percent()
+        .engines(EngineSmudge)
+        .since(11)
+        .desc("How long a picked-up colour persists: short lengths follow the canvas closely, long ones drag a colour "
+              "far into the next one.")
+        .render("Mix: the carried colour takes on the area under each dab by (1 − length), per pass.")
+        .cost("None.")
+        .needs("Smudge mode Mix")
+        .tests(MixTests)
+        .access(number(&BrushSettings::smudgeLength));
+    add("smudgeDepletion", "Depletion", PropertyType::Number)
+        .percent(0, 0.99)
+        .engines(EngineSmudge)
+        .since(11)
+        .desc("The carried paint runs out as the stroke goes on: this share is lost per 100 px of travel.")
+        .render("Mix: lay-down strength × (1 − depletion)^(distance / 100 px).")
+        .cost("Per dab: one power.")
+        .needs("Smudge mode Mix")
+        .tests(MixTests)
+        .access(number(&BrushSettings::smudgeDepletion));
+    dyn(DynamicTarget::ColorRate, "Colour rate dynamics", EngineSmudge,
+        "Colour rate × value: for example pressure adds paint while a light touch only blends.", "Colour rate above 0");
+    e.back().p.since = 11;
+
     // ------------------------------------------------------------ Ink and stroke (milestone 11)
     g = QStringLiteral("Ink and Stroke");
     const char *const InkTests = "tst_brushmedia::ink*";
@@ -1189,7 +1237,7 @@ QStringList BrushProperties::designGroups()
 
 QStringList BrushProperties::engineGroups()
 {
-    return {QStringLiteral("Ink and Stroke"), QStringLiteral("Dry Media")};
+    return {QStringLiteral("Ink and Stroke"), QStringLiteral("Dry Media"), QStringLiteral("Mixing")};
 }
 
 QStringList BrushProperties::groups()

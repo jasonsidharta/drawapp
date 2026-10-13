@@ -1,5 +1,6 @@
 #include "CarriedDeposit.h"
 
+#include "PigmentMix.h"
 #include "TileSnapshot.h"
 
 #include <cmath>
@@ -72,13 +73,14 @@ void CarriedDeposit::loadPatch(const StrokeSurface &image, const DabParams &dab)
 void CarriedDeposit::carry(StrokeSurface &image, const DabParams &dab, const QRect &rect, const TileSnapshot &before)
 {
     const BrushSettings &st = m_ctx.settings;
-    if (m_patch.empty()) {
+    const bool mixMode = st.blend == BrushBlend::Smudge && st.smudgeMode == SmudgeMode::Mix;
+    if (m_patch.empty() && !mixMode) {
         // Large enough for the biggest dab this stroke can make (every other size factor is ≤ 1).
         const double largest = st.size * std::max(1.0, st.tiltSize);
         m_patchSize = int(std::ceil(largest)) + 4;
         m_patch.assign(size_t(m_patchSize) * m_patchSize * 4, 0.0f);
     }
-    if (!m_patchLoaded) {
+    if (!m_patchLoaded && !mixMode) {
         loadPatch(image, dab);
         m_patchLoaded = true;
         if (st.blend == BrushBlend::Smudge)
@@ -104,7 +106,21 @@ void CarriedDeposit::carry(StrokeSurface &image, const DabParams &dab, const QRe
         for (int x = rect.left(); x <= rect.right(); ++x)
             line[x - rect.left()] = workPixel(image, x, y);
     }
-    carryInto(region, rect.topLeft(), dab, rect);
+    if (mixMode) {
+        if (!m_mixLoaded) {
+            // The first dab only picks up (as smudge's first dab loads its patch).
+            float picked[4];
+            if (!sample(region, rect.topLeft(), dab, rect, picked))
+                std::fill(picked, picked + 4, 0.0f);
+            std::copy(picked, picked + 4, m_mixColor);
+            m_mixLoaded = true;
+            m_patchLoaded = true; // later dabs capture before they change pixels
+            return;
+        }
+        mixInto(region, rect.topLeft(), dab, rect);
+    } else {
+        carryInto(region, rect.topLeft(), dab, rect);
+    }
     if (m_ctx.clip.isNull()) {
         for (int y = rect.top(); y <= rect.bottom(); ++y) {
             const QRgb *line = reinterpret_cast<const QRgb *>(region.constScanLine(y - rect.top()));
@@ -191,7 +207,7 @@ void CarriedDeposit::carryInto(QImage &target, const QPoint &origin, const DabPa
         brush[3] = 255.0f * alpha;
     } else {
         take = perPass(st.smudgePickup);
-        tint = perPass(st.smudgeColorRate);
+        tint = perPass(dab.colorRate);
         brush[0] = float(qRed(dab.color));
         brush[1] = float(qGreen(dab.color));
         brush[2] = float(qBlue(dab.color));
@@ -224,21 +240,38 @@ void CarriedDeposit::carryInto(QImage &target, const QPoint &origin, const DabPa
             const float fv = float(v);
             float r[4];
             if (wet) {
-                for (int k = 0; k < 4; ++k)
-                    c[k] += (brush[k] - c[k]) * tint * fv;
+                if (!st.pigmentMixing) {
+                    for (int k = 0; k < 4; ++k)
+                        c[k] += (brush[k] - c[k]) * tint * fv;
+                } else {
+                    PigmentMix::mix(c, brush, tint * fv, true); // milestone 11: refilled like paint
+                }
                 // The carried paint composited over the pixel (never lowers its alpha).
                 const float a = lay * fv;
                 const float keep = 1.0f - a * c[3] / 255.0f;
-                for (int k = 0; k < 4; ++k) {
+                for (int k = 0; k < 4; ++k)
                     r[k] = c[k] * a + d[k] * keep;
-                    c[k] += (d[k] - c[k]) * take * fv; // picks up the pixel as it was before this dab
+                if (!st.pigmentMixing) {
+                    for (int k = 0; k < 4; ++k)
+                        c[k] += (d[k] - c[k]) * take * fv; // picks up the pixel as it was before this dab
+                } else {
+                    PigmentMix::mix(c, d, take * fv, true);
                 }
             } else {
-                for (int k = 0; k < 4; ++k) {
-                    r[k] = d[k] + (c[k] - d[k]) * lay * fv;
-                    c[k] += (d[k] - c[k]) * take * fv;
+                if (!st.pigmentMixing) {
+                    for (int k = 0; k < 4; ++k) {
+                        r[k] = d[k] + (c[k] - d[k]) * lay * fv;
+                        c[k] += (d[k] - c[k]) * take * fv;
+                        if (tint > 0)
+                            c[k] += (brush[k] - c[k]) * tint * fv;
+                    }
+                } else {
+                    // Milestone 11: the same three steps, mixed like paint.
+                    std::copy(d, d + 4, r);
+                    PigmentMix::mix(r, c, lay * fv, true);
+                    PigmentMix::mix(c, d, take * fv, true);
                     if (tint > 0)
-                        c[k] += (brush[k] - c[k]) * tint * fv;
+                        PigmentMix::mix(c, brush, tint * fv, true);
                 }
                 if (dulling) {
                     for (int k = 0; k < 4; ++k)
@@ -271,5 +304,97 @@ void CarriedDeposit::carryInto(QImage &target, const QPoint &origin, const DabPa
                                float(sum[3] / weight)};
         for (int i = 0; i < m_patchSize * m_patchSize; ++i)
             std::memcpy(&m_patch[size_t(i) * 4], mean, sizeof(mean));
+    }
+}
+
+bool CarriedDeposit::sample(const QImage &area, const QPoint &origin, const DabParams &dab, const QRect &rect, float out[4]) const
+{
+    // Centre-weighted: the tip evaluated at the distance scaled by the pickup radius, so a smaller
+    // radius samples the middle of the dab. Premultiplied averaging is alpha-aware: transparent
+    // pixels lower the carried alpha and add no colour.
+    const BrushSettings &st = m_ctx.settings;
+    const double scale = 1.0 / std::clamp(st.smudgeRadius, 0.25, 1.0);
+    const DabShape shape(dab, st, m_ctx.tip);
+    double sum[4] = {0, 0, 0, 0}, weight = 0;
+    for (int y = rect.top(); y <= rect.bottom(); ++y) {
+        const QRgb *line = reinterpret_cast<const QRgb *>(area.constScanLine(y - origin.y()));
+        const double dy = (y + 0.5 - dab.center.y()) * scale;
+        for (int x = rect.left(); x <= rect.right(); ++x) {
+            const double v = shape.value((x + 0.5 - dab.center.x()) * scale, dy);
+            if (v <= 0.0)
+                continue;
+            const QRgb p = line[x - origin.x()];
+            sum[0] += v * qRed(p);
+            sum[1] += v * qGreen(p);
+            sum[2] += v * qBlue(p);
+            sum[3] += v * qAlpha(p);
+            weight += v;
+        }
+    }
+    if (weight <= 0)
+        return false;
+    for (int k = 0; k < 4; ++k)
+        out[k] = float(sum[k] / weight);
+    return true;
+}
+
+void CarriedDeposit::mixInto(QImage &target, const QPoint &origin, const DabParams &dab, const QRect &rect)
+{
+    // Mix: one carried colour C. Per dab (all rates per pass, normalised to the spacing):
+    //   1. C takes on the area's colour by (1 − smudge length): short lengths follow the canvas,
+    //      long ones carry a colour far;
+    //   2. the brush colour joins by the colour rate (× its dynamics: pressure can add paint);
+    //   3. C is laid down with strength × tip, weakened by depletion over the distance travelled.
+    // Every step mixes premultiplied colours (alpha-aware: carrying transparency over paint lifts
+    // it, carrying paint over transparency deposits it without dark fringes), linearly or like
+    // paint (pigment mixing).
+    const BrushSettings &st = m_ctx.settings;
+    const bool pigment = st.pigmentMixing;
+    const double fraction = m_ctx.passExponent(dab.stepFraction);
+    auto perPass = [&](double rate) { return float(1.0 - std::pow(1.0 - std::clamp(rate, 0.0, 1.0), fraction)); };
+    float picked[4];
+    if (sample(target, origin, dab, rect, picked))
+        PigmentMix::mix(m_mixColor, picked, perPass(1.0 - st.smudgeLength), pigment);
+    const float tint = perPass(dab.colorRate);
+    if (tint > 0) {
+        const float brush[4] = {float(qRed(dab.color)), float(qGreen(dab.color)), float(qBlue(dab.color)), 255.0f};
+        PigmentMix::mix(m_mixColor, brush, tint, pigment);
+    }
+    double lay = perPass(dab.strength);
+    if (st.smudgeDepletion > 0)
+        lay *= std::pow(1.0 - std::clamp(st.smudgeDepletion, 0.0, 0.999), dab.distance / 100.0);
+    const DabShape shape(dab, st, m_ctx.tip);
+    const bool keepAlpha = st.smudgePreserveAlpha;
+    for (int y = rect.top(); y <= rect.bottom(); ++y) {
+        QRgb *line = reinterpret_cast<QRgb *>(target.scanLine(y - origin.y()));
+        const double dy = y + 0.5 - dab.center.y();
+        for (int x = rect.left(); x <= rect.right(); ++x) {
+            double v = shape.value(x + 0.5 - dab.center.x(), dy);
+            if (v <= 0.0)
+                continue;
+            if (m_ctx.texture)
+                v *= 1.0 - dab.textureStrength * (1.0 - m_ctx.grain(x + 0.5, y + 0.5));
+            if (v <= 0.0)
+                continue;
+            const QRgb p = line[x - origin.x()];
+            float r[4] = {float(qRed(p)), float(qGreen(p)), float(qBlue(p)), float(qAlpha(p))};
+            const float d3 = r[3];
+            PigmentMix::mix(r, m_mixColor, float(lay * v), pigment);
+            if (keepAlpha) {
+                if (r[3] > 0.5f && d3 > 0) {
+                    const float scale = d3 / r[3];
+                    for (int k = 0; k < 3; ++k)
+                        r[k] *= scale;
+                } else {
+                    r[0] = float(qRed(p));
+                    r[1] = float(qGreen(p));
+                    r[2] = float(qBlue(p));
+                }
+                r[3] = d3;
+            }
+            const int alpha = std::clamp(int(std::lround(r[3])), 0, 255);
+            line[x - origin.x()] = qRgba(std::clamp(int(std::lround(r[0])), 0, alpha), std::clamp(int(std::lround(r[1])), 0, alpha),
+                                         std::clamp(int(std::lround(r[2])), 0, alpha), alpha);
+        }
     }
 }

@@ -9,6 +9,7 @@
 #include "BrushProperties.h"
 #include "BrushTips.h"
 #include "MemoryBudget.h"
+#include "PigmentMix.h"
 #include "StrokeEngine.h"
 #include "TiledImage.h"
 #include "TileSnapshot.h"
@@ -16,6 +17,7 @@
 #include <QFile>
 #include <QPainter>
 #include <QtTest>
+#include <array>
 #include <cmath>
 #include <functional>
 
@@ -758,6 +760,287 @@ private slots:
             QImage img = canvas(QSize(400, 200), Qt::white);
             paint(img, p->settings, wobble());
             paint(img, p->settings, line({50, 160}, {350, 150}, 8, 0.7), 11); // sparse, fast
+            checkGolden(id, img);
+        }
+    }
+
+    // --- smudge and mixing (A6, research/m11-paint-simulation.md §6) ---
+
+    void mixFourOperationsAreDistinct()
+    {
+        // Over 8 px red/blue stripes, with a yellow brush colour, along the same stroke:
+        // - smearing moves the pixels: the stripe structure survives (high variation along x);
+        // - mixing carries one colour: the stripes average out (low variation) and no yellow appears;
+        // - painting deposits the brush colour: yellow, flat;
+        // - wet paint deposits and picks up: yellow mixed into the stripes, still structured.
+        QImage stripes = canvas(QSize(400, 200));
+        {
+            QPainter p(&stripes);
+            for (int x = 0; x < 400; x += 16) {
+                p.fillRect(QRect(x, 0, 8, 200), QColor(220, 30, 30));
+                p.fillRect(QRect(x + 8, 0, 8, 200), QColor(30, 60, 220));
+            }
+        }
+        const QColor yellow(240, 200, 20);
+        const auto stroke = line({30, 100}, {370, 100}, 80);
+        auto stats = [](const QImage &img) {
+            // Along the centre line, x 120..280: mean colour and mean |Δ| of red between neighbours.
+            double r = 0, g = 0, b = 0, variation = 0;
+            int n = 0;
+            for (int x = 120; x <= 280; ++x) {
+                const QColor c = img.pixelColor(x, 100);
+                r += c.red();
+                g += c.green();
+                b += c.blue();
+                variation += std::abs(qRed(img.pixel(x + 1, 100)) - qRed(img.pixel(x, 100)));
+                ++n;
+            }
+            return std::array<double, 4>{r / n, g / n, b / n, variation / n};
+        };
+        BrushSettings smear;
+        smear.blend = BrushBlend::Smudge;
+        smear.size = 30;
+        smear.smudgeStrength = 0.9;
+        smear.smudgePickup = 0.1;
+        smear.pressureSize = {false, 0, 1};
+        BrushSettings mix = smear;
+        mix.smudgeMode = SmudgeMode::Mix;
+        mix.smudgeLength = 0.85;
+        BrushSettings paintBrush;
+        paintBrush.size = 30;
+        paintBrush.pressureSize = {false, 0, 1};
+        BrushSettings wet = smear;
+        wet.blend = BrushBlend::WetPaint;
+        const auto s = stats(render(smear, stroke, stripes, 7, yellow));
+        const auto m = stats(render(mix, stroke, stripes, 7, yellow));
+        const auto p = stats(render(paintBrush, stroke, stripes, 7, yellow));
+        const auto w = stats(render(wet, stroke, stripes, 7, yellow));
+        qInfo("variation: smear %.1f, mix %.1f, paint %.1f, wet %.1f; green: smear %.0f, mix %.0f, paint %.0f, wet %.0f",
+              s[3], m[3], p[3], w[3], s[1], m[1], p[1], w[1]);
+        QVERIFY2(s[3] > 4 * m[3], "smearing keeps structure, mixing averages it");
+        QVERIFY2(m[1] < 80, "mixing adds no brush colour without a colour rate");
+        QVERIFY2(p[0] > 225 && p[1] > 185 && p[2] < 40 && p[3] < 1, "painting deposits flat brush colour");
+        QVERIFY2(w[1] > s[1] + 40 && w[3] > m[3], "wet paint deposits brush colour into structured paint");
+        // Mixing averages the two stripe colours (neither red nor blue dominates).
+        QVERIFY2(std::abs(m[0] - m[2]) < 70, qPrintable(QStringLiteral("mix r %1 b %2").arg(m[0]).arg(m[2])));
+    }
+
+    void mixCarriesColourAsFarAsTheLengthSays()
+    {
+        // From red into white: a long smudge length drags red much further than a short one.
+        QImage img = canvas(QSize(400, 200), Qt::white);
+        {
+            QPainter p(&img);
+            p.fillRect(QRect(0, 0, 110, 200), QColor(210, 30, 40));
+        }
+        BrushSettings s;
+        s.blend = BrushBlend::Smudge;
+        s.smudgeMode = SmudgeMode::Mix;
+        s.size = 30;
+        s.smudgeStrength = 0.9;
+        s.pressureSize = {false, 0, 1};
+        auto redness = [](const QImage &out) {
+            std::vector<double> r;
+            for (int x = 140; x <= 380; x += 40) {
+                const QColor c = out.pixelColor(x, 100);
+                r.push_back(c.red() - c.green());
+            }
+            return r;
+        };
+        s.smudgeLength = 0.3;
+        const auto shortRed = redness(render(s, line({30, 100}, {390, 100}, 90), img));
+        s.smudgeLength = 0.92;
+        const auto longRed = redness(render(s, line({30, 100}, {390, 100}, 90), img));
+        double sumShort = 0, sumLong = 0;
+        for (size_t i = 0; i < longRed.size(); ++i) {
+            sumShort += shortRed[i];
+            sumLong += longRed[i];
+        }
+        qInfo("redness beyond the red: short length %.0f, long length %.0f", sumShort, sumLong);
+        QVERIFY2(sumLong > 3 * sumShort + 30, qPrintable(QStringLiteral("%1 vs %2").arg(sumLong).arg(sumShort)));
+        QVERIFY2(longRed.front() > longRed.back(), "the carried colour fades with distance");
+    }
+
+    void pigmentMixingTurnsBlueAndYellowGreen()
+    {
+        // The mixing model on its own, then through a brush: blue paint under a yellow colour rate.
+        const float blue[3] = {25, 60, 200}, yellow[3] = {245, 210, 20};
+        float paint[3];
+        PigmentMix::mixStraight(blue, yellow, 0.5, paint);
+        qInfo("blue + yellow, pigment: %.0f %.0f %.0f (RGB average 135 135 110)", paint[0], paint[1], paint[2]);
+        QVERIFY2(paint[1] > paint[0] + 15 && paint[1] > paint[2] + 15, "green dominates");
+        // Transparency never darkens: mixing with a fully transparent colour keeps the other.
+        float c[4] = {200, 40, 40, 255};
+        const float clear[4] = {0, 0, 0, 0};
+        PigmentMix::mix(c, clear, 0.5f, true);
+        QVERIFY(std::abs(c[0] / c[3] * 255 - 200) < 1 && std::abs(c[3] - 127.5f) < 0.5f);
+
+        QImage img = canvas(QSize(400, 200), QColor(25, 60, 200));
+        BrushSettings s;
+        s.blend = BrushBlend::Smudge;
+        s.smudgeMode = SmudgeMode::Mix;
+        s.size = 40;
+        s.smudgeStrength = 0.95;
+        s.smudgeLength = 0.5;
+        s.smudgeColorRate = 0.6;
+        s.pressureSize = {false, 0, 1};
+        const auto stroke = line({30, 100}, {370, 100}, 80);
+        const QColor rgb = render(s, stroke, img, 7, QColor(245, 210, 20)).pixelColor(250, 100);
+        s.pigmentMixing = true;
+        const QColor km = render(s, stroke, img, 7, QColor(245, 210, 20)).pixelColor(250, 100);
+        qInfo("on the canvas: RGB mix %d %d %d, pigment mix %d %d %d", rgb.red(), rgb.green(), rgb.blue(), km.red(),
+              km.green(), km.blue());
+        const int greenRgb = rgb.green() - std::max(rgb.red(), rgb.blue()), greenKm = km.green() - std::max(km.red(), km.blue());
+        QVERIFY2(greenKm > greenRgb + 15, qPrintable(QStringLiteral("%1 vs %2").arg(greenKm).arg(greenRgb)));
+    }
+
+    void mixIsAlphaAware()
+    {
+        // Carried red over transparency deposits red (partly transparent, no dark fringe); carried
+        // transparency over red lifts it (erases towards the carried alpha).
+        QImage half = canvas();
+        {
+            QPainter p(&half);
+            p.fillRect(QRect(0, 0, 200, 200), QColor(210, 30, 40));
+        }
+        BrushSettings s;
+        s.blend = BrushBlend::Smudge;
+        s.smudgeMode = SmudgeMode::Mix;
+        s.size = 30;
+        s.smudgeStrength = 0.8;
+        s.smudgeLength = 0.9;
+        s.pressureSize = {false, 0, 1};
+        for (const bool pigment : {false, true}) {
+            s.pigmentMixing = pigment;
+            const QImage out = render(s, line({40, 100}, {360, 100}, 80), half);
+            QVERIFY(validPremultiplied(out));
+            int checked = 0;
+            for (int x = 210; x < 300; ++x) {
+                const QRgb p = out.pixel(x, 100);
+                if (qAlpha(p) < 20)
+                    continue;
+                ++checked;
+                const double r = qRed(p) * 255.0 / qAlpha(p), g = qGreen(p) * 255.0 / qAlpha(p);
+                QVERIFY2(r > 170 && g < 70, qPrintable(QStringLiteral("x %1: %2 %3 (alpha %4)").arg(x).arg(r).arg(g).arg(qAlpha(p))));
+            }
+            QVERIFY2(checked > 30, qPrintable(QString::number(checked)));
+            const QImage back = render(s, line({360, 100}, {40, 100}, 80), half);
+            QVERIFY2(qAlpha(back.pixel(180, 100)) < 200, qPrintable(QString::number(qAlpha(back.pixel(180, 100)))));
+            QVERIFY(validPremultiplied(back));
+        }
+    }
+
+    void mixDepletesAndFollowsPressure()
+    {
+        // Depletion weakens the carried paint with distance; the colour mixer's colour rate follows
+        // pressure (a light touch blends, pressure paints).
+        QImage img = canvas(QSize(400, 200), Qt::white);
+        {
+            QPainter p(&img);
+            p.fillRect(QRect(0, 0, 60, 200), QColor(20, 30, 160));
+        }
+        BrushSettings s;
+        s.blend = BrushBlend::Smudge;
+        s.smudgeMode = SmudgeMode::Mix;
+        s.size = 30;
+        s.smudgeStrength = 0.9;
+        s.smudgeLength = 0.97;
+        s.pressureSize = {false, 0, 1};
+        const auto stroke = line({20, 100}, {380, 100}, 90);
+        const int plain = 255 - qRed(render(s, stroke, img).pixel(330, 100));
+        s.smudgeDepletion = 0.8;
+        const int depleted = 255 - qRed(render(s, stroke, img).pixel(330, 100));
+        qInfo("carried blue at x 330: %d without depletion, %d with", plain, depleted);
+        QVERIFY2(depleted < plain / 2, qPrintable(QStringLiteral("%1 vs %2").arg(depleted).arg(plain)));
+
+        const BrushSettings mixer = BrushPresets::builtIn(QStringLiteral("builtin.color-mixer"))->settings;
+        const QImage white = canvas(QSize(400, 200), Qt::white);
+        const QColor orange(230, 120, 20);
+        const QColor light = render(mixer, line({30, 100}, {370, 100}, 80, 0.1), white, 7, orange).pixelColor(250, 100);
+        const QColor firm = render(mixer, line({30, 100}, {370, 100}, 80, 1.0), white, 7, orange).pixelColor(250, 100);
+        qInfo("colour mixer on white: light pressure %d %d %d, firm %d %d %d", light.red(), light.green(), light.blue(),
+              firm.red(), firm.green(), firm.blue());
+        // A light touch adds only a trace per dab (colour rate × 0.1³); over this 340 px stroke the
+        // trace accumulates to a pale tint (measured blue ≈ 184 of 255), while full pressure paints
+        // (blue ≈ 25, the brush colour's 20).
+        QVERIFY2(light.blue() > firm.blue() + 120, "pressure adds the brush colour, a light touch mostly blends");
+        QVERIFY2(firm.blue() < 60, "full pressure paints");
+        // Without pressure data the dynamics keep their base value: full colour rate.
+        auto noPressure = line({30, 100}, {370, 100}, 80);
+        for (StrokeSample &t : noPressure)
+            t.hasPressure = false;
+        QVERIFY(render(mixer, noPressure, white, 7, orange).pixelColor(250, 100).blue() < 120);
+    }
+
+    void mixOnTilesSeamsAndSelections()
+    {
+        // Mix and smear across tile seams through a soft selection: tiled = dense, undo exact.
+        QImage clip(400, 200, QImage::Format_Grayscale8);
+        clip.fill(0);
+        {
+            QPainter p(&clip);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(Qt::white);
+            p.drawEllipse(QRectF(40, 20, 300, 150));
+        }
+        QImage bg = canvas();
+        {
+            QPainter p(&bg);
+            for (int i = 0; i < 12; ++i)
+                p.fillRect(QRect(i * 34, 0, 17, 200), QColor::fromHsv(i * 30, 220, 230, 160 + (i % 3) * 40));
+        }
+        std::vector<StrokeSample> seam;
+        for (int i = 0; i <= 60; ++i)
+            seam.push_back(sample(20 + i * 6.0, i < 30 ? 64.0 : 128.0 - (i - 30) * 2.1, 0.3 + 0.7 * (i % 10) / 10.0, i * 4.0));
+        for (const QString &id : {QStringLiteral("builtin.oil-blender"), QStringLiteral("builtin.color-mixer"),
+                                  QStringLiteral("builtin.smear-knife")}) {
+            const BrushSettings s = BrushPresets::builtIn(id)->settings;
+            for (const QImage &mask : {QImage(), clip}) {
+                QImage dense = bg.copy();
+                TiledImage tiled = TiledImage::fromImage(bg);
+                TileSnapshot db, tb;
+                StrokeEngine a(s, Ink, 7, 0), b(s, Ink, 7, 0);
+                if (!mask.isNull()) {
+                    a.setClipMask(mask);
+                    b.setClipMask(mask);
+                }
+                a.begin(dense, seam.front(), db);
+                b.begin(tiled, seam.front(), tb);
+                for (size_t i = 1; i < seam.size(); ++i) {
+                    a.moveTo(dense, seam[i], db);
+                    b.moveTo(tiled, seam[i], tb);
+                }
+                a.finish(dense, db);
+                b.finish(tiled, tb);
+                QVERIFY2(validPremultiplied(dense), qPrintable(id));
+                QVERIFY2(tiled == dense, qPrintable(id));
+                QVERIFY2(differingPixels(dense, bg) > 200, qPrintable(id));
+                if (!mask.isNull()) // outside the selection nothing changed
+                    for (int y = 0; y < 200; y += 3)
+                        for (int x = 0; x < 400; x += 3)
+                            if (qGray(clip.pixel(x, y)) == 0)
+                                QVERIFY(dense.pixel(x, y) == bg.pixel(x, y));
+                tb.swapWith(tiled);
+                QVERIFY(tiled == bg);
+            }
+        }
+    }
+
+    void mixPresetGoldenImages()
+    {
+        QImage base = canvas(QSize(400, 200));
+        {
+            QPainter p(&base);
+            p.fillRect(QRect(0, 0, 400, 200), QColor(240, 236, 228));
+            p.fillRect(QRect(40, 40, 120, 120), QColor(30, 70, 190));
+            p.fillRect(QRect(220, 40, 120, 120), QColor(235, 200, 30));
+        }
+        for (const QString &id : {QStringLiteral("oil-blender"), QStringLiteral("color-mixer"), QStringLiteral("smear-knife")}) {
+            const BrushPreset *p = BrushPresets::builtIn(QStringLiteral("builtin.") + id);
+            QVERIFY2(p, qPrintable(id));
+            QImage img = base.copy();
+            paint(img, p->settings, wobble(), 7, QColor(200, 60, 40));
             checkGolden(id, img);
         }
     }

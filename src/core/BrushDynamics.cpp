@@ -41,10 +41,10 @@ const SensorInfo sensorInfo[SensorCount] = {
 
 const char *const targetIds[DynamicTargetCount] = {"size", "opacity", "flow", "spacing", "rotation", "roundness",
                                                     "scatter", "textureStrength", "hue", "saturation", "lightness",
-                                                    "smudgeStrength"};
+                                                    "smudgeStrength", "colorRate"};
 const char *const targetLabels[DynamicTargetCount] = {"Size", "Opacity", "Flow", "Spacing", "Rotation", "Roundness",
                                                       "Scatter", "Texture strength", "Hue", "Saturation", "Lightness",
-                                                      "Smudge strength"};
+                                                      "Smudge strength", "Colour rate"};
 const char *const combineIds[] = {"multiply", "add", "max", "min", "difference"};
 
 double clamp01(double v)

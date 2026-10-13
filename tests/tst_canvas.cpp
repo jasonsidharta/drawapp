@@ -2051,13 +2051,25 @@ private slots:
         left.addRect(QRectF(0, 0, 1024, 1536));
         m_canvas->selectPath(left, SelectionMode::Replace);
         QVERIFY(m_canvas->hasSelection());
-        qreal y = 560; // each preset on its own path across the dark band
+        // Each preset on its own path across the dark band (y 550..850). The paths wrap within the
+        // band, so blenders, which add no colour of their own (milestone 11 has 22 presets), still
+        // cross the band's edge where there is something to blend.
+        int index = 0;
         for (const BrushPreset &p : BrushPresets::builtIns()) {
+            // A colour of its own, so a preset painting over an earlier one in the same colour still
+            // shows (and blenders find different colours to mix).
+            const QColor color = QColor::fromHsv((index * 47) % 360, 200, 200);
+            const qreal y = 560 + (30 * index++) % 210;
             const QImage before = doc().copy();
             QVERIFY(m_canvas->brushes()->select(p.id));
-            m_canvas->setBrushColor(QColor(40, 90, 200));
+            m_canvas->setBrushColor(color);
             QVERIFY(m_canvas->drawStroke(docCurve({200, y}, {1900, y + 120})));
-            y += 30;
+            const QImage after = doc();
+            int changed = 0;
+            for (int py = 0; py < after.height(); ++py)
+                for (int px = 0; px < 1024; ++px)
+                    changed += after.pixel(px, py) != before.pixel(px, py);
+            qInfo("%s at y %.0f: %d pixels changed", qPrintable(p.id), y, changed);
             QVERIFY2(doc() != before, qPrintable(p.id));
             for (int y = 0; y < tiledDoc().height(); y += 7)
                 for (int x = 1024; x < tiledDoc().width(); x += 7)

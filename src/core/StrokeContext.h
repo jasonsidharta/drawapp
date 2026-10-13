@@ -30,6 +30,7 @@ struct DabParams
     double passFlow = 1; // the flow setting: what one pass deposits (towards the ceiling)
     double angle = 0;    // radians
     double strength = 0; // smudge: strength; wet paint: attack
+    double colorRate = 0; // smudge: brush colour mixed into the carried paint (setting × dynamics)
     double roundness = 1;
     bool flipX = false;
     bool flipY = false;

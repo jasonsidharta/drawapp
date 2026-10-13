@@ -151,6 +151,7 @@ enum class DynamicTarget {
     Saturation,
     Lightness,
     SmudgeStrength,
+    ColorRate, // milestone 11: brush colour mixed into carried paint (smudge mix, colour rate)
     Count
 };
 

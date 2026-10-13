@@ -15,14 +15,15 @@ A property counts as **implemented** only if it changes rendering: `tst_brusheng
 | Texture and Grain | 12 | 0 | 12 |
 | Shape Dynamics | 11 | 1 | 12 |
 | Color Dynamics | 9 | 1 | 10 |
-| Blending and Smudge | 7 | 5 | 12 |
+| Blending and Smudge | 9 | 3 | 12 |
 | Wet Paint | 6 | 4 | 10 |
 | Stabilization | 4 | 4 | 8 |
 | Taper | 6 | 2 | 8 |
 | Special Effects | 6 | 0 | 6 |
 | Ink and Stroke | 4 | 0 | 4 |
 | Dry Media | 9 | 0 | 9 |
-| **Total** | **107** | **26** | **133** |
+| Mixing | 3 | 0 | 3 |
+| **Total** | **112** | **24** | **136** |
 
 The two engine selectors (`blend`, `stamp`) are listed under Engine and not counted.
 
@@ -1171,18 +1172,18 @@ How quickly the carried paint takes on the colour it passes (short smears at hig
 
 ### Smudge mode — `smudgeMode`
 
-Smear drags the paint pixel by pixel; dulling carries one averaged colour (softer, blends to flat colour).
+Smear drags the paint pixel by pixel; dulling carries one averaged colour (softer, blends to flat colour); mix (milestone 11) carries one colour that blends what it passes with what it carries and the brush colour, for as long as the smudge length says.
 
 - Status: implemented (Brush Studio)
 - Type: option
-- Range: Smear / Dulling
+- Range: Smear / Dulling / Mix (one carried colour)
 - Default: Smear
 - Engines: smudge
 - Sensors: —
-- Serialisation: `smudgeMode`: one of "smear", "dulling"
-- Rendering: Dulling replaces the carried patch by its coverage-weighted average after each pickup.
-- Cost: Dulling: one extra pass over the patch per dab.
-- Tests: tst_brushengine::smudgeModes, tst_brushengine::everyImplementedPropertyChangesRendering
+- Serialisation: `smudgeMode`: one of "smear", "dulling", "mix"
+- Rendering: Dulling replaces the carried patch by its coverage-weighted average after each pickup. Mix keeps one premultiplied colour, mixed with the centre-weighted average under each dab.
+- Cost: Dulling: one extra pass over the patch per dab. Mix: one sampling pass and one deposit pass per dab.
+- Tests: tst_brushengine::smudgeModes, tst_brushmedia::mix*, tst_brushengine::everyImplementedPropertyChangesRendering
 
 ### Colour rate — `smudgeColorRate`
 
@@ -1236,12 +1237,21 @@ Planned: smudge picks up colour from all visible layers. Not implemented.
 - Status: **planned, not implemented**
 - Type: boolean
 
-### Smudge radius — `smudgeRadius` (planned)
+### Smudge radius — `smudgeRadius`
 
-Planned: dulling samples an area larger or smaller than the dab. Not implemented.
+The part of the dab colour is picked up from (milestone 11, for smudge mode Mix): smaller values sample the middle only, so the dab's edges do not pull in neighbouring colours. Dulling and smear sample the whole dab as before.
 
-- Status: **planned, not implemented**
+- Status: implemented (Brush Studio)
 - Type: number
+- Range: 25 … 100 %
+- Default: 100 %
+- Engines: smudge
+- Sensors: —
+- Has an effect with: Smudge mode Mix
+- Serialisation: `smudgeRadius`: JSON number
+- Rendering: Mix: the tip evaluated at the distance divided by this share weights the sample.
+- Cost: None.
+- Tests: tst_brushmedia::mix*, tst_brushengine::everyImplementedPropertyChangesRendering
 
 ### Overlay and colour modes — `moreBlendModes` (planned)
 
@@ -1250,12 +1260,20 @@ Planned: overlay, soft light, hue, saturation, colour and luminosity blend modes
 - Status: **planned, not implemented**
 - Type: option
 
-### Pigment mixing — `pigmentMixing` (planned)
+### Pigment mixing — `pigmentMixing`
 
-Planned: subtractive (paint-like) colour mixing for smudge and wet paint. Not implemented.
+Mixes colours like paint instead of light (milestone 11): blue and yellow give green rather than grey. Per-channel Kubelka–Munk in linear light; pure screen primaries mix towards black (three channels cannot hold pigment spectra).
 
-- Status: **planned, not implemented**
+- Status: implemented (Brush Studio)
 - Type: boolean
+- Range: on / off
+- Default: off
+- Engines: smudge, wet paint
+- Sensors: —
+- Serialisation: `pigmentMixing`: true/false
+- Rendering: Every colour mix of the carried paint (pickup, colour rate, lay-down; wet paint refill and pickup) goes through K/S = (1 − R)² / 2R per channel, weighted by alpha.
+- Cost: Per pixel of each dab: three table look-ups and three square roots per mix.
+- Tests: tst_brushmedia::mix*, tst_brushmedia::pigment*, tst_brushengine::everyImplementedPropertyChangesRendering
 
 ### Blur mode — `blurMode` (planned)
 
@@ -1889,6 +1907,56 @@ Penetration at full tilt, as a share of the upright value: shading with the side
 - Rendering: Penetration × (1 + (value − 1) × tilt amount).
 - Cost: None.
 - Tests: tst_brushmedia::dry*
+
+## Mixing
+
+### Smudge length — `smudgeLength`
+
+How long a picked-up colour persists: short lengths follow the canvas closely, long ones drag a colour far into the next one.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 50 %
+- Engines: smudge
+- Sensors: —
+- Has an effect with: Smudge mode Mix
+- Serialisation: `smudgeLength`: JSON number
+- Rendering: Mix: the carried colour takes on the area under each dab by (1 − length), per pass.
+- Cost: None.
+- Tests: tst_brushmedia::mix*
+
+### Depletion — `smudgeDepletion`
+
+The carried paint runs out as the stroke goes on: this share is lost per 100 px of travel.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 99 %
+- Default: 0 %
+- Engines: smudge
+- Sensors: —
+- Has an effect with: Smudge mode Mix
+- Serialisation: `smudgeDepletion`: JSON number
+- Rendering: Mix: lay-down strength × (1 − depletion)^(distance / 100 px).
+- Cost: Per dab: one power.
+- Tests: tst_brushmedia::mix*
+
+### Colour rate dynamics — `dynamics.colorRate`
+
+Makes the parameter follow sensors (pressure, tilt, direction, speed, distance, time, random …) through response curves; several sensors combine by the chosen rule. Off by default.
+
+- Status: implemented (Brush Studio)
+- Type: dynamics
+- Range: minimum 0 … 100 %, up to 4 sensors, curves of 2 … 16 points in 0 … 1
+- Default: {"combine":"multiply","enabled":false,"minimum":0,"sensors":[]}
+- Engines: smudge
+- Sensors: all sensors
+- Has an effect with: Colour rate above 0
+- Serialisation: `dynamics` → `colorRate`: {enabled, minimum, combine, sensors: [{sensor, curve, range}]}
+- Rendering: Colour rate × value: for example pressure adds paint while a light touch only blends.
+- Cost: Per dab: one table look-up per sensor (256-entry curve tables built once per stroke).
+- Tests: tst_brushengine::dynamics*, tst_brushengine::everyImplementedPropertyChangesRendering
 
 ## Engine
 
