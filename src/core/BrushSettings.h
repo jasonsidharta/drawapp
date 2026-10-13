@@ -170,6 +170,12 @@ struct BrushSettings
     double jitterFilter = 0.0;      // px: input moves shorter than this are held back
     bool smoothingFinish = true;    // pen up draws the smoothing string's tail to the pen
 
+    // --- Ink and stroke geometry --- (milestone 11; research/m11-brush-architecture.md, A4)
+    bool curveInterpolation = false; // centripetal Catmull–Rom between input samples (one sample of latency)
+    double cornerAngle = 70.0;       // degrees: sharper turns stay corners
+    bool taperLive = false;          // end taper without holding the line back (the tail is redrawn at pen-up)
+    double smoothingSpeedAdapt = 0.0; // 0..1: the smoothing string shortens at speed
+
     // --- Taper --- (lengths in px; sizes as a share of the size)
     double taperStart = 0.0;
     double taperEnd = 0.0;

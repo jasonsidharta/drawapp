@@ -2,6 +2,7 @@
 
 #include "BrushSettings.h"
 #include "StrokeContext.h"
+#include "StrokeCurve.h"
 #include "StrokeSurface.h"
 #include "StrokeSmoother.h"
 #include "StrokeSpacer.h"
@@ -172,6 +173,10 @@ private:
     DabParams paramsFor(const Dab &dab) const;
     QRgb dabColor(const SensorReadings &readings, qint64 index) const;
     void renderDab(StrokeSurface &image, const DabParams &dab, TileSnapshot &before, QRect &dirty);
+    // Renders a dab placed by the pipeline and, for the live end taper, records it.
+    void renderPlaced(StrokeSurface &image, const Dab &dab, bool timed, TileSnapshot &before, QRect &dirty);
+    void applyLiveTaper(StrokeSurface &image, TileSnapshot &before, QRect &dirty);
+    void adaptSmoothing(const StrokeSample &sample);
     void flushDeposit(StrokeSurface &image, const TileSnapshot &before);
 
     StrokeContext m_ctx; // settings, colour, seed and what every deposit strategy shares
@@ -184,6 +189,30 @@ private:
     bool m_anyDynamics = false;
 
     StrokeSmoother m_smoother;
+    StrokeCurve m_curve;
+    std::vector<StrokeSample> m_unbent; // smoother output before curve interpolation
+    double m_baseRadius = 0;            // the smoothing string at rest
+    // Speed-adaptive smoothing: raw input speed, px/ms, smoothed.
+    double m_rawSpeed = 0;
+    bool m_rawSpeedKnown = false;
+    QPointF m_rawPos;
+    double m_rawTimeMs = -1;
+    // Corner preservation through the smoother: the last two raw input positions.
+    QPointF m_cornerPrev, m_cornerLast;
+    int m_cornerCount = 0;
+    // Live end taper: every placed dab and the path, so the tail can be drawn again at pen-up.
+    struct Record
+    {
+        Dab dab;
+        DabParams params;
+        QRect rect;
+        QPointF heading;
+        bool headingKnown = false;
+        bool timed = false;
+    };
+    bool m_liveTaper = false;
+    std::vector<Record> m_records;
+    std::vector<StrokeSample> m_path;
     StrokeSpacer m_spacer;
     std::vector<StrokeSample> m_smoothed;
     std::deque<StrokeSample> m_held; // end taper: samples within taperEnd of the newest one

@@ -21,6 +21,8 @@ public:
     explicit StrokeSmoother(qreal radius);
 
     qreal radius() const { return m_radius; }
+    // Changes the string length from the next sample on (speed-adaptive smoothing, milestone 11).
+    void setRadius(qreal radius) { m_radius = radius > 0 ? radius : 0.0; }
     // Each call appends the brush positions it produced to out.
     void begin(const StrokeSample &sample, std::vector<StrokeSample> &out);
     void moveTo(const StrokeSample &sample, std::vector<StrokeSample> &out);

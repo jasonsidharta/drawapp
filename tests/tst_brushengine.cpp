@@ -250,7 +250,22 @@ struct Scenario
 {
     std::function<void(BrushSettings &)> setup; // preconditions, applied to both renders
     QVariant changed;
+    // The effect shows while the stroke is drawn, not in the finished stroke (live end taper: the
+    // finished tail equals the held-back one, the difference is that nothing lags while drawing).
+    bool whileDrawing = false;
 };
+
+// The stroke drawn up to its middle, without lifting the pen.
+QImage renderUnfinished(const BrushSettings &settings, const std::vector<StrokeSample> &samples, const QImage &background)
+{
+    QImage image = background.copy();
+    TileSnapshot before;
+    StrokeEngine engine(settings, Paint, 7, StrokeEngine::smoothingRadius(settings));
+    engine.begin(image, samples.front(), before);
+    for (size_t i = 1; i < samples.size() / 2; ++i)
+        engine.moveTo(image, samples[i], before);
+    return image;
+}
 
 std::map<QString, Scenario> scenarios()
 {
@@ -385,6 +400,11 @@ std::map<QString, Scenario> scenarios()
         {"hatchAngle", {none, -30.0}},
         {"hatchSpacing", {none, 12.0}},
         {"hatchThickness", {none, 4.0}},
+        // Ink and stroke (milestone 11)
+        {"curveInterpolation", {none, true}},
+        {"cornerAngle", {[](BrushSettings &s) { s.curveInterpolation = true; s.smoothing = 80; }, 10.0}},
+        {"taperLive", {[](BrushSettings &s) { s.taperEnd = 120; }, true, true}},
+        {"smoothingSpeedAdapt", {[](BrushSettings &s) { s.smoothing = 80; }, 1.0}},
         // Dry media (milestone 11), on the dry stamp with a strong tooth
         {"dryDepth", {dry, 0.3}},
         {"pressureDepth", {dry, QVariantMap{{"enabled", true}, {"minimum", 0.0}, {"gamma", 2.5}}}},
@@ -1206,8 +1226,9 @@ private slots:
             changed = changed.sanitized();
             QVERIFY2(changed != base, qPrintable(QStringLiteral("%1: the changed value equals the default").arg(p.id)));
             QVERIFY2(BrushProperties::appliesTo(p, base), qPrintable(p.id));
-            const QImage a = render(base, stroke, stripes());
-            const QImage b = render(changed, stroke, stripes());
+            const bool whileDrawing = it->second.whileDrawing;
+            const QImage a = whileDrawing ? renderUnfinished(base, stroke, stripes()) : render(base, stroke, stripes());
+            const QImage b = whileDrawing ? renderUnfinished(changed, stroke, stripes()) : render(changed, stroke, stripes());
             QVERIFY(validPremultiplied(b));
             const int diff = differingPixels(a, b);
             QVERIFY2(diff > 0, qPrintable(QStringLiteral("%1 has no visible effect").arg(p.id)));

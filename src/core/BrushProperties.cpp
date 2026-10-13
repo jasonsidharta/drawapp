@@ -1023,6 +1023,52 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::hatchThickness));
 
+    // ------------------------------------------------------------ Ink and stroke (milestone 11)
+    g = QStringLiteral("Ink and Stroke");
+    const char *const InkTests = "tst_brushmedia::ink*";
+    add("curveInterpolation", "Curve interpolation", PropertyType::Bool)
+        .engines(EngineAll)
+        .since(11)
+        .desc("Draws smooth curves between the pen's input samples instead of straight segments, so fast curves stay "
+              "round. The line trails the pen by one input sample.")
+        .render("Centripetal Catmull–Rom segment through the neighbouring samples, subdivided about every pixel; "
+                "pressure, tilt and time interpolated linearly.")
+        .cost("Per input sample: about one point per pixel of path (the spacer was already walking it).")
+        .tests(InkTests)
+        .access(flag(&BrushSettings::curveInterpolation));
+    add("cornerAngle", "Corner angle", PropertyType::Number)
+        .range(10, 180, 1, "°")
+        .engines(EngineAll)
+        .since(11)
+        .desc("Turns sharper than this stay sharp corners instead of being rounded by the curve.")
+        .render("At a corner the curve's tangent follows the segment itself (a straight start or end).")
+        .cost("Per input sample: one angle.")
+        .needs("Curve interpolation")
+        .tests(InkTests)
+        .access(number(&BrushSettings::cornerAngle));
+    add("taperLive", "Live end taper", PropertyType::Bool)
+        .engines(EngineCoverage)
+        .since(11)
+        .desc("Draws the line right up to the pen while drawing and tapers the end when the pen lifts, instead of "
+              "holding the last taper-length of the line back until then.")
+        .render("At pen-up the last taper-length is spaced again with the taper and the tiles it touched are rebuilt "
+                "from the stroke's recorded dabs.")
+        .cost("Per dab: about 150 bytes recorded for the stroke; at pen-up, the tail's tiles are rebuilt once.")
+        .needs("End taper above 0")
+        .tests(InkTests)
+        .access(flag(&BrushSettings::taperLive));
+    add("smoothingSpeedAdapt", "Speed-adaptive smoothing", PropertyType::Number)
+        .percent()
+        .engines(EngineAll)
+        .since(11)
+        .desc("Shortens the smoothing string when the pen moves fast, so quick strokes follow the hand closely while "
+              "slow, careful ones stay smooth.")
+        .render("String length × (1 − value × min(1, pointer speed / 1.5 px/ms)), speed smoothed over about 30 ms.")
+        .cost("Per input sample: one distance and one exponential.")
+        .needs("Smoothing above 0, a device that reports event times")
+        .tests(InkTests)
+        .access(number(&BrushSettings::smoothingSpeedAdapt));
+
     // ------------------------------------------------------------------- Dry media (milestone 11)
     g = QStringLiteral("Dry Media");
     const char *const DryTests = "tst_brushmedia::dry*";
@@ -1143,7 +1189,7 @@ QStringList BrushProperties::designGroups()
 
 QStringList BrushProperties::engineGroups()
 {
-    return {QStringLiteral("Dry Media")};
+    return {QStringLiteral("Ink and Stroke"), QStringLiteral("Dry Media")};
 }
 
 QStringList BrushProperties::groups()

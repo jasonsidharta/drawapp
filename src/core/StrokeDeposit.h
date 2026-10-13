@@ -16,6 +16,7 @@
 #include "StrokeContext.h"
 
 #include <memory>
+#include <vector>
 
 class TileSnapshot;
 
@@ -32,6 +33,21 @@ public:
     // After the dabs of one engine call (begin, moveTo, advanceTime, finish): bring the layer up to
     // date with what the dabs recorded, once per pixel.
     virtual void flush(StrokeSurface &image, const TileSnapshot &before) { Q_UNUSED(image) Q_UNUSED(before) }
+
+    // Live end taper (milestone 11): engines that keep the whole stroke in rebuildable buffers can
+    // forget part of it and draw it again. clearTiles() empties the given 64 × 64 tiles of the
+    // stroke's buffers; replay() draws one earlier dab again, only inside those tiles (identical
+    // pixels, the dab's own parameters); touchTiles() recomposites the tiles whole at the next flush.
+    virtual bool supportsRebuild() const { return false; }
+    virtual void clearTiles(const std::vector<qint64> &keys) { Q_UNUSED(keys) }
+    virtual void replay(const DabParams &dab, const QRect &rect, const std::vector<qint64> &keys)
+    {
+        Q_UNUSED(dab) Q_UNUSED(rect) Q_UNUSED(keys)
+    }
+    virtual void touchTiles(const std::vector<qint64> &keys, const QRect &imageRect)
+    {
+        Q_UNUSED(keys) Q_UNUSED(imageRect)
+    }
 
     // Memory held by the stroke's own buffers (not the undo snapshot).
     virtual qsizetype bufferBytes() const = 0;

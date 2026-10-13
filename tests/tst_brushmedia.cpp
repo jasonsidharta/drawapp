@@ -450,6 +450,318 @@ private slots:
         }
     }
 
+    // --- ink and stroke geometry (A4) ---
+
+    void inkCurvesStayRoundWithSparseInput()
+    {
+        // A fast pen reports a circle of radius 150 with 16 samples. Straight segments sag inwards
+        // by R(1 − cos(π/16)) ≈ 2.9 px between samples; the curve stays on the circle.
+        BrushSettings s;
+        s.size = 3;
+        s.pressureSize = {false, 0, 1};
+        s.spacing = 0.05;
+        std::vector<StrokeSample> circle;
+        for (int i = 0; i <= 16; ++i)
+            circle.push_back(sample(200 + 150 * std::cos(2 * Pi * i / 16), 200 + 150 * std::sin(2 * Pi * i / 16), 1.0, i * 8.0));
+        // Measured on the segments with neighbours on both sides: the first and last segments have
+        // none on one side and are drawn as straight chords there (StrokeCurve, by design).
+        auto innerRadius = [](const QImage &img) {
+            double inner = 1e9;
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = 0; x < img.width(); ++x)
+                    if (qAlpha(img.pixel(x, y)) > 128) {
+                        double a = std::atan2(y + 0.5 - 200, x + 0.5 - 200);
+                        if (a < 0)
+                            a += 2 * Pi;
+                        if (a < 2 * Pi / 16 || a > 15 * 2 * Pi / 16)
+                            continue;
+                        inner = std::min(inner, std::hypot(x + 0.5 - 200, y + 0.5 - 200));
+                    }
+            return inner;
+        };
+        const double polygon = innerRadius(render(s, circle, canvas(QSize(400, 400))));
+        s.curveInterpolation = true;
+        const double curve = innerRadius(render(s, circle, canvas(QSize(400, 400))));
+        qInfo("inner radius: straight segments %.2f, curve %.2f (circle 150, line width 3)", polygon, curve);
+        QVERIFY2(curve > polygon + 2.0, qPrintable(QStringLiteral("%1 vs %2").arg(curve).arg(polygon)));
+        QVERIFY2(curve > 150 - 1.5 - 0.6, qPrintable(QString::number(curve)));
+    }
+
+    void inkCornersStaySharp()
+    {
+        // A V drawn with a few samples per leg: with corner preservation the curve and the smoothing
+        // keep the vertex (no overshoot beyond the legs and the tip reaches the corner); without it
+        // the curve swings past the vertex.
+        BrushSettings s;
+        s.size = 4;
+        s.pressureSize = {false, 0, 1};
+        s.spacing = 0.05;
+        s.curveInterpolation = true;
+        s.smoothing = 40; // a pull string that would otherwise cut the corner
+        std::vector<StrokeSample> v;
+        for (int i = 0; i <= 4; ++i)
+            v.push_back(sample(60 + i * 35.0, 60 + i * 60.0, 1.0, i * 8.0));
+        for (int i = 1; i <= 4; ++i)
+            v.push_back(sample(200 + i * 35.0, 300 - i * 60.0, 1.0, 32 + i * 8.0));
+        const QPointF vertex(200, 300);
+        auto reachAndOvershoot = [&](const QImage &img) {
+            double nearest = 1e9;
+            int below = 0; // painted pixels lower than the vertex (beyond the legs)
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = 0; x < img.width(); ++x)
+                    if (qAlpha(img.pixel(x, y)) > 128) {
+                        nearest = std::min(nearest, std::hypot(x + 0.5 - vertex.x(), y + 0.5 - vertex.y()));
+                        below += y + 0.5 > vertex.y() + 3;
+                    }
+            return std::make_pair(nearest, below);
+        };
+        const double z = StrokeEngine::smoothingRadius(s); // document px at zoom 1
+        QImage sharpImg = canvas(QSize(400, 400));
+        {
+            TileSnapshot before;
+            StrokeEngine engine(s, Ink, 7, z);
+            engine.begin(sharpImg, v.front(), before);
+            for (size_t i = 1; i < v.size(); ++i)
+                engine.moveTo(sharpImg, v[i], before);
+            engine.finish(sharpImg, before);
+        }
+        const auto [reach, overshoot] = reachAndOvershoot(sharpImg);
+        QVERIFY2(reach < 3.0, qPrintable(QStringLiteral("tip %1 px from the corner").arg(reach)));
+        QVERIFY2(overshoot == 0, qPrintable(QString::number(overshoot)));
+        // Never a corner: the smoothing cuts it and the curve rounds it.
+        s.cornerAngle = 180;
+        QImage roundImg = canvas(QSize(400, 400));
+        {
+            TileSnapshot before;
+            StrokeEngine engine(s, Ink, 7, z);
+            engine.begin(roundImg, v.front(), before);
+            for (size_t i = 1; i < v.size(); ++i)
+                engine.moveTo(roundImg, v[i], before);
+            engine.finish(roundImg, before);
+        }
+        QVERIFY2(reachAndOvershoot(roundImg).first > reach + 5,
+                 qPrintable(QStringLiteral("rounded corner reaches %1").arg(reachAndOvershoot(roundImg).first)));
+    }
+
+    void inkSlowAndFastStrokesAreContinuous()
+    {
+        // 1000 events (slow, 1 ms apart) and 6 events (fast) along the same line: no gaps either way.
+        for (const int events : {1000, 6}) {
+            BrushSettings s = BrushPresets::builtIn(QStringLiteral("builtin.fine-liner"))->settings;
+            const QImage img = render(s, line({30, 100}, {370, 100}, events), canvas());
+            for (int x = 50; x <= 350; ++x)
+                QVERIFY2(qAlpha(img.pixel(x, 100)) > 200, qPrintable(QStringLiteral("%1 events: gap at x=%2").arg(events).arg(x)));
+        }
+    }
+
+    void inkLongStrokeEndsAtThePen()
+    {
+        // 20 000 events in a spiral: the line ends where the pen lifted, every pixel valid.
+        BrushSettings s = BrushPresets::builtIn(QStringLiteral("builtin.g-pen"))->settings;
+        std::vector<StrokeSample> spiral;
+        for (int i = 0; i <= 20000; ++i) {
+            const double t = i / 20000.0, r = 20 + 170 * t, a = t * 40 * Pi;
+            spiral.push_back(sample(200 + r * std::cos(a), 200 + r * std::sin(a), 0.6 + 0.4 * std::sin(t * 50), i * 1.0));
+        }
+        QElapsedTimer timer;
+        timer.start();
+        const QImage img = render(s, spiral, canvas(QSize(400, 400)));
+        qInfo("20 000-event G-Pen spiral: %lld ms", timer.elapsed());
+        QVERIFY(validPremultiplied(img));
+        // The last sample is at radius 190: the tapered end still reaches within a few pixels of it.
+        const QPointF end = spiral.back().pos;
+        double nearest = 1e9;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x)
+                if (qAlpha(img.pixel(x, y)) > 20)
+                    nearest = std::min(nearest, std::hypot(x + 0.5 - end.x(), y + 0.5 - end.y()));
+        QVERIFY2(nearest < 4.0, qPrintable(QString::number(nearest)));
+    }
+
+    void liveTaperHasNoLagAndMatchesTheHeldBackTaper()
+    {
+        // While drawing, the live taper's line reaches the pen; the milestone 9 hold-back keeps the
+        // last taper-length back. After pen-up both look the same (dab positions in the tail differ
+        // slightly because the tail is spaced again).
+        BrushSettings held;
+        held.size = 12;
+        held.hardness = 1.0;
+        held.spacing = 0.05;
+        held.pressureSize = {false, 0, 1};
+        held.taperEnd = 80;
+        held.taperEndSize = 0.05;
+        BrushSettings live = held;
+        live.taperLive = true;
+        const auto stroke = line({20, 100}, {380, 100}, 60);
+        auto rightmostWhileDrawing = [&](const BrushSettings &s) {
+            QImage img = canvas();
+            TileSnapshot before;
+            StrokeEngine engine(s, Ink, 7, 0);
+            engine.begin(img, stroke.front(), before);
+            for (int i = 1; i <= 40; ++i) // the pen is at x = 260
+                engine.moveTo(img, stroke[size_t(i)], before);
+            int right = 0;
+            for (int x = 0; x < img.width(); ++x)
+                if (qAlpha(img.pixel(x, 100)) > 128)
+                    right = x;
+            return right;
+        };
+        const int heldRight = rightmostWhileDrawing(held), liveRight = rightmostWhileDrawing(live);
+        qInfo("while drawing (pen at x = 260): hold-back reaches %d, live %d", heldRight, liveRight);
+        QVERIFY2(liveRight >= 260, qPrintable(QString::number(liveRight)));
+        QVERIFY2(heldRight <= 260 - 70, qPrintable(QString::number(heldRight)));
+        const QImage a = render(held, stroke, canvas()), b = render(live, stroke, canvas());
+        int bigDiffs = 0;
+        for (int y = 0; y < a.height(); ++y)
+            for (int x = 0; x < a.width(); ++x)
+                bigDiffs += std::abs(qAlpha(a.pixel(x, y)) - qAlpha(b.pixel(x, y))) > 60;
+        QVERIFY2(bigDiffs < 40, qPrintable(QString::number(bigDiffs)));
+        // The tail really is tapered: thin near the end, full width before the tail.
+        auto width = [&](const QImage &img, int x) {
+            int n = 0;
+            for (int y = 0; y < img.height(); ++y)
+                n += qAlpha(img.pixel(x, y)) > 128;
+            return n;
+        };
+        QVERIFY2(width(b, 200) >= 11 && width(b, 372) <= 4, qPrintable(QStringLiteral("%1, %2").arg(width(b, 200)).arg(width(b, 372))));
+    }
+
+    void liveTaperIsExactOnTilesAndUndoes()
+    {
+        // The rebuilt tail on a tiled layer equals the dense result; undo restores the layer, on
+        // paint and on transparency, also through a selection and with per-dab colour.
+        BrushSettings s = BrushPresets::builtIn(QStringLiteral("builtin.brush-pen"))->settings;
+        s.hueJitter = 30;
+        QImage clip(400, 200, QImage::Format_Grayscale8);
+        clip.fill(0);
+        {
+            QPainter p(&clip);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(Qt::white);
+            p.drawEllipse(QRectF(30, 20, 320, 160));
+        }
+        QImage stripes = canvas();
+        {
+            QPainter p(&stripes);
+            for (int i = 0; i < 10; ++i)
+                p.fillRect(QRect(i * 40, 0, 20, 200), QColor::fromHsv(i * 36, 200, 220));
+        }
+        std::vector<StrokeSample> wave;
+        for (int i = 0; i <= 80; ++i)
+            wave.push_back(sample(20 + i * 4.5, 100 + 50 * std::sin(i * 0.12), 0.3 + 0.7 * std::sin(Pi * i / 80), i * 6.0));
+        for (const QImage &background : {canvas(), stripes}) {
+            for (const QImage &mask : {QImage(), clip}) {
+                QImage dense = background.copy();
+                TiledImage tiled = TiledImage::fromImage(background);
+                TileSnapshot denseBefore, before;
+                StrokeEngine a(s, Ink, 7, 0), b(s, Ink, 7, 0);
+                if (!mask.isNull()) {
+                    a.setClipMask(mask);
+                    b.setClipMask(mask);
+                }
+                a.begin(dense, wave.front(), denseBefore);
+                b.begin(tiled, wave.front(), before);
+                for (size_t i = 1; i < wave.size(); ++i) {
+                    a.moveTo(dense, wave[i], denseBefore);
+                    b.moveTo(tiled, wave[i], before);
+                }
+                a.finish(dense, denseBefore);
+                b.finish(tiled, before);
+                QVERIFY(validPremultiplied(dense));
+                QVERIFY(tiled == dense);
+                before.swapWith(tiled);
+                QVERIFY(tiled == background);
+                denseBefore.swapWith(dense);
+                QCOMPARE(dense, background);
+            }
+        }
+    }
+
+    void inkHighFrequencyInputDrawsTheSameLine()
+    {
+        // The same pen path reported at 1000 Hz and at 125 Hz draws nearly the same line with curve
+        // interpolation (the curve through the sparse samples follows the dense ones).
+        BrushSettings s = BrushPresets::builtIn(QStringLiteral("builtin.fine-liner"))->settings;
+        auto path = [](int events) {
+            std::vector<StrokeSample> v;
+            for (int i = 0; i <= events; ++i) {
+                const double t = double(i) / events;
+                v.push_back(sample(40 + 320 * t, 100 + 60 * std::sin(t * 3 * Pi), 1.0, t * 400.0));
+            }
+            return v;
+        };
+        const QImage dense = render(s, path(400), canvas()), sparse = render(s, path(50), canvas());
+        int differ = 0, painted = 0;
+        for (int y = 0; y < dense.height(); ++y)
+            for (int x = 0; x < dense.width(); ++x) {
+                painted += qAlpha(dense.pixel(x, y)) > 128;
+                differ += std::abs(qAlpha(dense.pixel(x, y)) - qAlpha(sparse.pixel(x, y))) > 128;
+            }
+        QVERIFY2(differ < painted / 20, qPrintable(QStringLiteral("%1 of %2").arg(differ).arg(painted)));
+    }
+
+    void speedAdaptiveSmoothingFollowsFastStrokes()
+    {
+        // A fast zig-zag of amplitude 20 px under a long smoothing string: without adaptation the
+        // string flattens it; with adaptation the line keeps most of its amplitude. A slow stroke
+        // stays as smooth as before.
+        BrushSettings s;
+        s.size = 3;
+        s.pressureSize = {false, 0, 1};
+        s.smoothing = 100;
+        auto zigzag = [](double msPerEvent) {
+            std::vector<StrokeSample> v;
+            for (int i = 0; i <= 40; ++i)
+                v.push_back(sample(40 + i * 8.0, 100 + (i % 2 ? 20 : -20), 1.0, i * msPerEvent));
+            return v;
+        };
+        auto amplitude = [](const QImage &img) {
+            int top = 1000, bottom = -1;
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = 150; x < 250; ++x)
+                    if (qAlpha(img.pixel(x, y)) > 128) {
+                        top = std::min(top, y);
+                        bottom = std::max(bottom, y);
+                    }
+            return bottom - top;
+        };
+        auto draw = [&](const BrushSettings &b, double msPerEvent) {
+            QImage img = canvas();
+            TileSnapshot before;
+            StrokeEngine engine(b, Ink, 7, StrokeEngine::smoothingRadius(b));
+            const auto v = zigzag(msPerEvent);
+            engine.begin(img, v.front(), before);
+            for (size_t i = 1; i < v.size(); ++i)
+                engine.moveTo(img, v[i], before);
+            engine.finish(img, before);
+            return img;
+        };
+        BrushSettings adaptive = s;
+        adaptive.smoothingSpeedAdapt = 1.0;
+        const int fixedFast = amplitude(draw(s, 2.0)), adaptiveFast = amplitude(draw(adaptive, 2.0));
+        const int fixedSlow = amplitude(draw(s, 200.0)), adaptiveSlow = amplitude(draw(adaptive, 200.0));
+        qInfo("zig-zag amplitude: fast %d → %d with adaptation; slow %d → %d", fixedFast, adaptiveFast, fixedSlow, adaptiveSlow);
+        QVERIFY2(adaptiveFast > fixedFast + 15, qPrintable(QStringLiteral("%1 vs %2").arg(adaptiveFast).arg(fixedFast)));
+        QVERIFY2(std::abs(adaptiveSlow - fixedSlow) <= 2, qPrintable(QStringLiteral("%1 vs %2").arg(adaptiveSlow).arg(fixedSlow)));
+        // Smoothing distances are view pixels: at 2× zoom the string in document pixels halves, so
+        // the line feels the same at every zoom.
+        QCOMPARE(StrokeEngine::smoothingRadius(s, 2.0), StrokeEngine::smoothingRadius(s, 1.0) / 2.0);
+    }
+
+    void inkPresetGoldenImages()
+    {
+        for (const QString &id : {QStringLiteral("g-pen"), QStringLiteral("fine-liner"), QStringLiteral("brush-pen"),
+                                  QStringLiteral("dry-ink")}) {
+            const BrushPreset *p = BrushPresets::builtIn(QStringLiteral("builtin.") + id);
+            QVERIFY2(p, qPrintable(id));
+            QImage img = canvas(QSize(400, 200), Qt::white);
+            paint(img, p->settings, wobble());
+            paint(img, p->settings, line({50, 160}, {350, 150}, 8, 0.7), 11); // sparse, fast
+            checkGolden(id, img);
+        }
+    }
+
     void dryPresetGoldenImages()
     {
         for (const QString &id : {QStringLiteral("graphite-2h"), QStringLiteral("graphite-hb"), QStringLiteral("graphite-6b"),

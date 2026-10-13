@@ -32,6 +32,40 @@ void CoverageDeposit::touch(const QRect &rect)
             m_touched[tileKey(column, row)] |= rect & QRect(column * Tile, row * Tile, Tile, Tile);
 }
 
+void CoverageDeposit::clearTiles(const std::vector<qint64> &keys)
+{
+    for (const qint64 key : keys) {
+        if (auto it = m_coverage.find(key); it != m_coverage.end())
+            std::fill(it->second.begin(), it->second.end(), quint16(0));
+        if (auto it = m_colors.find(key); it != m_colors.end())
+            std::fill(it->second.begin(), it->second.end(), 0u);
+    }
+}
+
+void CoverageDeposit::replay(const DabParams &dab, const QRect &rect, const std::vector<qint64> &keys)
+{
+    if (dab.ceiling <= 0 || dab.flow <= 0)
+        return;
+    // Rasterising per pixel depends only on the pixel, the dab and its index, so drawing the dab
+    // again inside a tile gives exactly the pixels it gave the first time.
+    for (const qint64 key : keys) {
+        const int column = int(quint32(key & 0xFFFFFFFF)), row = int(key >> 32);
+        const QRect part = rect & QRect(column * Tile, row * Tile, Tile, Tile);
+        if (!part.isEmpty())
+            rasterize(dab, part);
+    }
+}
+
+void CoverageDeposit::touchTiles(const std::vector<qint64> &keys, const QRect &imageRect)
+{
+    for (const qint64 key : keys) {
+        const int column = int(quint32(key & 0xFFFFFFFF)), row = int(key >> 32);
+        const QRect tile = QRect(column * Tile, row * Tile, Tile, Tile) & imageRect;
+        if (!tile.isEmpty())
+            m_touched[key] |= tile;
+    }
+}
+
 qsizetype CoverageDeposit::bufferBytes() const
 {
     return qsizetype(m_coverage.size()) * Tile * Tile * qsizetype(sizeof(quint16))

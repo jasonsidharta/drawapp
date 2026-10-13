@@ -220,6 +220,88 @@ std::vector<BrushPreset> makeBuiltIns()
         s.dryGrit = 0.06;
         list.push_back(preset("soft-pastel", "Soft Pastel", s));
     }
+
+    // --- Milestone 11: ink (curve interpolation, corners, live taper, speed-adaptive smoothing) ---
+    // Speed thins the line (as a dip pen does when it moves fast); the curve keeps fast curves round.
+    auto speedThins = [](double minimum) {
+        ParameterDynamics d;
+        d.enabled = true;
+        d.minimum = minimum;
+        d.mappings.push_back({Sensor::Speed, SensorCurve::inverted(), 3.0});
+        return d;
+    };
+    {
+        BrushSettings s;
+        s.size = 10;
+        s.hardness = 1.0;
+        s.spacing = 0.05;
+        s.pressureSize = {true, 0.04, 1.5};
+        s.curveInterpolation = true;
+        s.taperStart = 25;
+        s.taperEnd = 45;
+        s.taperStartSize = 0.05;
+        s.taperEndSize = 0.05;
+        s.taperLive = true;
+        s.smoothing = 30;
+        s.smoothingSpeedAdapt = 0.6;
+        s.dynamicsFor(DynamicTarget::Size) = speedThins(0.65);
+        list.push_back(preset("g-pen", "G-Pen", s));
+    }
+    {
+        BrushSettings s;
+        s.size = 4;
+        s.hardness = 1.0;
+        s.spacing = 0.05;
+        s.pressureSize = {false, 0.0, 1.0};
+        s.curveInterpolation = true;
+        s.taperStart = 4;
+        s.taperEnd = 6;
+        s.taperStartSize = 0.4;
+        s.taperEndSize = 0.4;
+        s.taperLive = true;
+        s.smoothing = 25;
+        s.smoothingSpeedAdapt = 0.5;
+        list.push_back(preset("fine-liner", "Fine Liner", s));
+    }
+    {
+        BrushSettings s;
+        s.size = 18;
+        s.hardness = 0.9;
+        s.roundness = 0.8;
+        s.followDirection = true;
+        s.spacing = 0.04;
+        s.pressureSize = {true, 0.03, 1.2};
+        s.curveInterpolation = true;
+        s.taperStart = 60;
+        s.taperEnd = 90;
+        s.taperStartSize = 0.03;
+        s.taperEndSize = 0.03;
+        s.taperLive = true;
+        s.smoothing = 35;
+        s.smoothingSpeedAdapt = 0.5;
+        s.dynamicsFor(DynamicTarget::Size) = speedThins(0.5);
+        list.push_back(preset("brush-pen", "Brush Pen", s));
+    }
+    // Dry ink: the pen skips at the rim on rough paper (dry-media stamp, deep penetration).
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Dry;
+        s.size = 9;
+        s.hardness = 1.0;
+        s.spacing = 0.05;
+        s.pressureSize = {true, 0.1, 1.3};
+        s.texture = QStringLiteral("rough");
+        s.textureStrength = 0.85;
+        s.dryDepth = 0.82;
+        s.pressureDepth = {true, 0.45, 1.0};
+        s.drySoftness = 0.05;
+        s.dryEdgeBreakup = 1.0;
+        s.curveInterpolation = true;
+        s.taperEnd = 20;
+        s.taperLive = true;
+        s.smoothing = 20;
+        list.push_back(preset("dry-ink", "Dry Ink", s));
+    }
     return list;
 }
 

@@ -42,6 +42,7 @@ StrokeContext makeContext(const BrushSettings &settings, const QColor &color, qu
 StrokeEngine::StrokeEngine(const BrushSettings &settings, const QColor &color, quint64 seed, qreal smoothingRadius)
     : m_ctx(makeContext(settings, color, seed))
     , m_smoother(smoothingRadius)
+    , m_curve(m_ctx.settings.curveInterpolation, m_ctx.settings.cornerAngle)
     , m_spacer([this](const StrokeSample &s) { return diameterAt(s); }, m_ctx.settings.spacing)
 {
     BrushSettings &s = m_ctx.settings;
@@ -100,6 +101,10 @@ StrokeEngine::StrokeEngine(const BrushSettings &settings, const QColor &color, q
     }
     m_ctx.colorPerDab = (s.blend == BrushBlend::Paint || s.blend == BrushBlend::WetPaint) && s.hasColorDynamics();
     m_deposit = StrokeDeposit::create(m_ctx);
+    m_baseRadius = std::max<qreal>(0.0, smoothingRadius);
+    // The live end taper redraws the tail from the stroke's own buffers; engines that cannot
+    // rebuild (smudge, wet paint) keep the milestone 9 hold-back.
+    m_liveTaper = s.taperLive && s.taperEnd > 0 && m_deposit->supportsRebuild();
 }
 
 StrokeEngine::~StrokeEngine() = default;
@@ -153,12 +158,57 @@ void StrokeEngine::acceptInput(StrokeSample s)
         s.pressure = m_pressure;
     }
     m_lastAccepted = s;
+    adaptSmoothing(s);
+    m_unbent.clear();
+    // With curve interpolation, a sharp turn of the raw input is a corner: the smoothing string is
+    // pulled straight to the corner point first, so smoothing does not cut it.
+    if (m_ctx.settings.curveInterpolation && m_started && m_smoother.radius() > 0) {
+        if (m_cornerCount >= 2) {
+            const QPointF a = m_cornerLast - m_cornerPrev, b = s.pos - m_cornerLast;
+            const double la = std::hypot(a.x(), a.y()), lb = std::hypot(b.x(), b.y());
+            if (la > 1e-3 && lb > 1e-3
+                && (a.x() * b.x() + a.y() * b.y()) / (la * lb) < std::cos(m_ctx.settings.cornerAngle * Pi / 180.0))
+                m_smoother.finish(m_unbent);
+        }
+    }
+    if (m_cornerCount == 0 || std::hypot(s.pos.x() - m_cornerLast.x(), s.pos.y() - m_cornerLast.y()) > 1e-3) {
+        m_cornerPrev = m_cornerLast;
+        m_cornerLast = s.pos;
+        m_cornerCount = std::min(2, m_cornerCount + 1);
+    }
     if (!m_started) {
         m_started = true;
-        m_smoother.begin(s, m_smoothed);
+        m_smoother.begin(s, m_unbent);
     } else {
-        m_smoother.moveTo(s, m_smoothed);
+        m_smoother.moveTo(s, m_unbent);
     }
+    for (const StrokeSample &u : m_unbent)
+        m_curve.add(u, m_smoothed); // passes them through unless curve interpolation is on
+}
+
+void StrokeEngine::adaptSmoothing(const StrokeSample &s)
+{
+    const double adapt = m_ctx.settings.smoothingSpeedAdapt;
+    if (adapt <= 0 || m_baseRadius <= 0 || s.timeMs < 0)
+        return;
+    // Raw pointer speed (before smoothing), smoothed over about 30 ms; at AdaptiveSpeed and above the
+    // string is shortened by the full `adapt` share, so fast strokes follow the pen more closely.
+    constexpr double AdaptiveSpeed = 1.5;   // px/ms
+    constexpr double TimeConstantMs = 30.0;
+    if (m_rawTimeMs >= 0) {
+        const double dt = s.timeMs - m_rawTimeMs;
+        if (dt > 0) {
+            const double instant = std::min(MaxSpeed, std::hypot(s.pos.x() - m_rawPos.x(), s.pos.y() - m_rawPos.y()) / dt);
+            const double a = 1.0 - std::exp(-dt / TimeConstantMs);
+            m_rawSpeed = m_rawSpeedKnown ? m_rawSpeed + (instant - m_rawSpeed) * a : instant;
+            m_rawSpeedKnown = true;
+        }
+    }
+    if (s.timeMs > m_rawTimeMs) {
+        m_rawPos = s.pos;
+        m_rawTimeMs = s.timeMs;
+    }
+    m_smoother.setRadius(m_baseRadius * (1.0 - adapt * std::min(1.0, m_rawSpeed / AdaptiveSpeed)));
 }
 
 void StrokeEngine::annotate(StrokeSample &s)
@@ -257,15 +307,20 @@ QRect StrokeEngine::finish(StrokeSurface &image, TileSnapshot &before)
         m_hasPending = false;
         acceptInput(m_pending);
     }
+    m_unbent.clear();
     if (m_ctx.settings.smoothingFinish)
-        m_smoother.finish(m_smoothed);
+        m_smoother.finish(m_unbent);
+    for (const StrokeSample &u : m_unbent)
+        m_curve.add(u, m_smoothed);
+    m_curve.finish(m_smoothed);
     m_finishing = true;
     process(image, before, -1, dirty);
     if (m_firstDabPending) {
         // Never moved far enough to have a direction: a dot at the brush's own angle.
         m_firstDabPending = false;
-        renderDab(image, paramsFor(m_firstDab), before, dirty);
+        renderPlaced(image, m_firstDab, false, before, dirty);
     }
+    applyLiveTaper(image, before, dirty);
     // A dot gets one full pass of paint, like any point of a moving stroke, instead of the single
     // spacing-normalised dab (which for a low flow would be nearly invisible).
     if (m_ctx.buildUp && m_ctx.coverageBlend && m_distanceDabCount == 1 && m_timeDabCount == 0 && m_firstParams.flow < 1.0) {
@@ -303,6 +358,8 @@ void StrokeEngine::process(StrokeSurface &image, TileSnapshot &before, double no
     for (StrokeSample &s : m_smoothed) {
         annotate(s);
         m_held.push_back(s);
+        if (m_liveTaper)
+            m_path.push_back(s);
     }
     m_smoothed.clear();
     if (m_finishing)
@@ -310,7 +367,8 @@ void StrokeEngine::process(StrokeSurface &image, TileSnapshot &before, double no
     // End taper: the last taperEnd px wait until the end of the stroke is known.
     const double newest = m_held.empty() ? 0.0 : m_held.back().distance;
     while (!m_held.empty()) {
-        if (!m_finishing && m_ctx.settings.taperEnd > 0 && newest - m_held.front().distance <= m_ctx.settings.taperEnd)
+        if (!m_finishing && !m_liveTaper && m_ctx.settings.taperEnd > 0
+            && newest - m_held.front().distance <= m_ctx.settings.taperEnd)
             break;
         const StrokeSample s = m_held.front();
         m_held.pop_front();
@@ -351,10 +409,10 @@ void StrokeEngine::process(StrokeSurface &image, TileSnapshot &before, double no
         }
         if (m_firstDabPending) {
             m_firstDabPending = false;
-            renderDab(image, paramsFor(m_firstDab), before, dirty);
+            renderPlaced(image, m_firstDab, false, before, dirty);
         }
         for (int c = 0; c < copies; ++c)
-            renderDab(image, paramsFor(dab), before, dirty);
+            renderPlaced(image, dab, m_timed[i], before, dirty);
     }
 }
 
@@ -603,6 +661,82 @@ void StrokeEngine::renderDab(StrokeSurface &image, const DabParams &dab, TileSna
     if (rect.isEmpty())
         return;
     m_deposit->dab(image, dab, rect, before, dirty);
+}
+
+void StrokeEngine::renderPlaced(StrokeSurface &image, const Dab &dab, bool timed, TileSnapshot &before, QRect &dirty)
+{
+    const DabParams params = paramsFor(dab);
+    if (m_liveTaper)
+        m_records.push_back({dab, params, m_ctx.dabRect(params, image), m_heading, m_headingKnown, timed});
+    renderDab(image, params, before, dirty);
+}
+
+void StrokeEngine::applyLiveTaper(StrokeSurface &image, TileSnapshot &before, QRect &dirty)
+{
+    // The live end taper (research/m11-brush-architecture.md, A4): the line was drawn at full width
+    // up to the pen; now that the stroke's length is known, the last taperEnd px are spaced again
+    // with the taper (diameterAt() includes the end taper once m_totalLength is set), and the tiles
+    // the old and new tail touch are rebuilt from the recorded dabs, in their original order.
+    if (!m_liveTaper || m_totalLength <= 0 || m_records.empty() || m_ctx.allocationFailed)
+        return;
+    const double tailStart = m_totalLength - m_ctx.settings.taperEnd;
+    size_t k = 0;
+    while (k < m_records.size() && (m_records[k].timed || m_records[k].params.distance < tailStart))
+        ++k;
+    if (k == m_records.size())
+        return;
+    const Record start = m_records[k];
+    auto addTiles = [&](const QRect &r, std::vector<qint64> &keys) {
+        if (r.isEmpty())
+            return;
+        for (int row = r.top() / Tile; row <= r.bottom() / Tile; ++row)
+            for (int column = r.left() / Tile; column <= r.right() / Tile; ++column) {
+                const qint64 key = tileKey(column, row);
+                if (std::find(keys.begin(), keys.end(), key) == keys.end())
+                    keys.push_back(key);
+            }
+    };
+    std::vector<qint64> keys;
+    for (size_t i = k; i < m_records.size(); ++i)
+        if (!m_records[i].timed)
+            addTiles(m_records[i].rect, keys);
+
+    // The new tail: spaced from the first tail dab's sample along the recorded path.
+    StrokeSpacer tail([this](const StrokeSample &s) { return diameterAt(s); }, m_ctx.settings.spacing);
+    if (m_dyn[int(DynamicTarget::Spacing)].isActive() || m_ctx.settings.spacingJitter > 0)
+        tail.setSpacingFunction([this](const StrokeSample &sample, qreal) { return spacingFactorAt(sample); });
+    std::vector<Dab> fresh;
+    tail.begin(start.dab.sample, fresh);
+    for (const StrokeSample &s : m_path)
+        if (s.distance > start.dab.sample.distance)
+            tail.moveTo(s, fresh);
+    // Parameters with the heading as it was at the tail's start, advanced as process() does; each
+    // dab's random index is the one renderDab() will give it.
+    m_heading = start.heading;
+    m_headingKnown = start.headingKnown;
+    const qint64 firstIndex = m_dabCount;
+    std::vector<DabParams> params;
+    params.reserve(fresh.size());
+    for (size_t i = 0; i < fresh.size(); ++i) {
+        if (i > 0)
+            updateHeading(fresh[i].direction, tail.stepFraction(fresh[i].diameter));
+        m_dabCount = firstIndex + qint64(i);
+        params.push_back(paramsFor(fresh[i]));
+        addTiles(m_ctx.dabRect(params.back(), image), keys);
+    }
+    m_dabCount = firstIndex;
+
+    m_deposit->clearTiles(keys);
+    for (size_t i = 0; i < m_records.size(); ++i)
+        if (i < k || m_records[i].timed)
+            m_deposit->replay(m_records[i].params, m_records[i].rect, keys);
+    for (const DabParams &p : params)
+        renderDab(image, p, before, dirty);
+    m_deposit->touchTiles(keys, image.rect());
+    for (const qint64 key : keys)
+        dirty |= QRect(int(quint32(key & 0xFFFFFFFF)) * Tile, int(key >> 32) * Tile, Tile, Tile) & image.rect();
+    m_records.clear();
+    m_path.clear();
 }
 
 void StrokeEngine::flushDeposit(StrokeSurface &image, const TileSnapshot &before)

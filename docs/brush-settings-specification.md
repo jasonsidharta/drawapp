@@ -20,8 +20,9 @@ A property counts as **implemented** only if it changes rendering: `tst_brusheng
 | Stabilization | 4 | 4 | 8 |
 | Taper | 6 | 2 | 8 |
 | Special Effects | 6 | 0 | 6 |
+| Ink and Stroke | 4 | 0 | 4 |
 | Dry Media | 9 | 0 | 9 |
-| **Total** | **103** | **26** | **129** |
+| **Total** | **107** | **26** | **133** |
 
 The two engine selectors (`blend`, `stamp`) are listed under Engine and not counted.
 
@@ -1682,6 +1683,71 @@ Width of each hatching line.
 - Rendering: Anti-aliased line coverage.
 - Cost: None.
 - Tests: tst_brushengine::everyImplementedPropertyChangesRendering
+
+## Ink and Stroke
+
+### Curve interpolation — `curveInterpolation`
+
+Draws smooth curves between the pen's input samples instead of straight segments, so fast curves stay round. The line trails the pen by one input sample.
+
+- Status: implemented (Brush Studio)
+- Type: boolean
+- Range: on / off
+- Default: off
+- Engines: all
+- Sensors: —
+- Serialisation: `curveInterpolation`: true/false
+- Rendering: Centripetal Catmull–Rom segment through the neighbouring samples, subdivided about every pixel; pressure, tilt and time interpolated linearly.
+- Cost: Per input sample: about one point per pixel of path (the spacer was already walking it).
+- Tests: tst_brushmedia::ink*
+
+### Corner angle — `cornerAngle`
+
+Turns sharper than this stay sharp corners instead of being rounded by the curve.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 10 … 180 °
+- Default: 70 °
+- Engines: all
+- Sensors: —
+- Has an effect with: Curve interpolation
+- Serialisation: `cornerAngle`: JSON number
+- Rendering: At a corner the curve's tangent follows the segment itself (a straight start or end).
+- Cost: Per input sample: one angle.
+- Tests: tst_brushmedia::ink*
+
+### Live end taper — `taperLive`
+
+Draws the line right up to the pen while drawing and tapers the end when the pen lifts, instead of holding the last taper-length of the line back until then.
+
+- Status: implemented (Brush Studio)
+- Type: boolean
+- Range: on / off
+- Default: off
+- Engines: paint, erase, spray, hatching
+- Sensors: —
+- Has an effect with: End taper above 0
+- Serialisation: `taperLive`: true/false
+- Rendering: At pen-up the last taper-length is spaced again with the taper and the tiles it touched are rebuilt from the stroke's recorded dabs.
+- Cost: Per dab: about 150 bytes recorded for the stroke; at pen-up, the tail's tiles are rebuilt once.
+- Tests: tst_brushmedia::ink*
+
+### Speed-adaptive smoothing — `smoothingSpeedAdapt`
+
+Shortens the smoothing string when the pen moves fast, so quick strokes follow the hand closely while slow, careful ones stay smooth.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 0 %
+- Engines: all
+- Sensors: —
+- Has an effect with: Smoothing above 0, a device that reports event times
+- Serialisation: `smoothingSpeedAdapt`: JSON number
+- Rendering: String length × (1 − value × min(1, pointer speed / 1.5 px/ms)), speed smoothed over about 30 ms.
+- Cost: Per input sample: one distance and one exponential.
+- Tests: tst_brushmedia::ink*
 
 ## Dry Media
 
