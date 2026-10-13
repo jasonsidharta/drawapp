@@ -657,20 +657,31 @@ private slots:
     {
         // Paint on a transparent layer keeps its own colour at every coverage: no dark or light
         // fringes when the layer is composited over anything.
+        // Milestone 11 procedural presets vary their colour on purpose: per-element variation is
+        // turned off here, and grass blades must lie on their own shade line (root 0.55 × colour to
+        // tip 1 × colour), so a fringe still fails.
         for (const BrushPreset &p : BrushPresets::builtIns()) {
             if (p.settings.blend != BrushBlend::Paint)
                 continue;
+            BrushSettings settings = p.settings;
+            settings.procColorJitter = 0;
+            const bool grass = settings.stamp == BrushStamp::Grass;
             for (const QColor &c : {QColor(255, 255, 255), QColor(200, 30, 30), QColor(0, 0, 0)}) {
                 QImage image = transparent(260, 120);
-                StrokeEngine::render(image, p.settings, c, line({{30, 60}, {130, 40}, {230, 70}}, 10, 0.7));
+                StrokeEngine::render(image, settings, c, line({{30, 60}, {130, 40}, {230, 70}}, 10, 0.7));
                 for (int y = 0; y < image.height(); ++y)
                     for (int x = 0; x < image.width(); ++x) {
                         const QRgb px = image.pixel(x, y);
                         if (qAlpha(px) < 16)
                             continue;
                         const QRgb straight = qUnpremultiply(px);
-                        const int d = std::max({std::abs(qRed(straight) - c.red()), std::abs(qGreen(straight) - c.green()),
-                                                std::abs(qBlue(straight) - c.blue())});
+                        double k = 1.0;
+                        const double cc = c.red() * c.red() + c.green() * c.green() + c.blue() * c.blue();
+                        if (grass && cc > 0)
+                            k = std::clamp((qRed(straight) * c.red() + qGreen(straight) * c.green() + qBlue(straight) * c.blue()) / cc,
+                                           0.55, 1.0);
+                        const int d = int(std::lround(std::max({std::abs(qRed(straight) - k * c.red()), std::abs(qGreen(straight) - k * c.green()),
+                                                                std::abs(qBlue(straight) - k * c.blue())})));
                         QVERIFY2(d <= 8, qPrintable(QString("%1 at %2,%3: %4").arg(p.id).arg(x).arg(y).arg(d)));
                     }
             }

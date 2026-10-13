@@ -97,6 +97,21 @@ void CoverageDeposit::rasterizeTip(const DabParams &dab, const QRect &rect)
     const bool hatch = st.stamp == BrushStamp::Hatching;
     const double hatchNx = -std::sin(st.hatchAngle * Pi / 180.0), hatchNy = std::cos(st.hatchAngle * Pi / 180.0);
     const double hatchHalf = st.hatchThickness / 2.0, hatchPeriod = st.hatchSpacing;
+    // Cross-hatching (milestone 11): pass k joins at pressure k / (n + 1), at +90°, +45°, −45°.
+    double crossNx[3], crossNy[3];
+    int crossPasses = 0;
+    if (hatch && st.hatchCrossPasses > 0) {
+        const int n = std::clamp(st.hatchCrossPasses, 0, 3);
+        static const double offsets[3] = {90.0, 45.0, -45.0};
+        for (int k = 0; k < n; ++k) {
+            if (dab.pressure < double(k + 1) / (n + 1))
+                break;
+            const double a = (st.hatchAngle + offsets[k]) * Pi / 180.0;
+            crossNx[crossPasses] = -std::sin(a);
+            crossNy[crossPasses] = std::cos(a);
+            ++crossPasses;
+        }
+    }
     const double density = st.tipDensity;
     const bool texture = m_ctx.textureEachDab;
     const bool moving = texture && st.textureMoving;
@@ -155,6 +170,11 @@ void CoverageDeposit::rasterizeTip(const DabParams &dab, const QRect &rect)
                         const double p = (x + 0.5) * hatchNx + (y + 0.5) * hatchNy;
                         const double m = std::abs(p - hatchPeriod * std::floor(p / hatchPeriod + 0.5));
                         double stripe = std::clamp(hatchHalf + 0.5 - m, 0.0, 1.0);
+                        for (int k = 0; k < crossPasses; ++k) {
+                            const double q = (x + 0.5) * crossNx[k] + (y + 0.5) * crossNy[k];
+                            const double mq = std::abs(q - hatchPeriod * std::floor(q / hatchPeriod + 0.5));
+                            stripe = std::max(stripe, std::clamp(hatchHalf + 0.5 - mq, 0.0, 1.0));
+                        }
                         if (hatchHalf < 0.5)
                             stripe = std::min(stripe, 2.0 * hatchHalf);
                         v *= stripe;
@@ -193,7 +213,14 @@ void CoverageDeposit::rasterizeSpray(const DabParams &dab, const QRect &rect)
     for (int i = 0; i < particles; ++i) {
         const qint64 key = dab.index * 4096 + i;
         const double a = m_ctx.random(key, StrokeSalt::SprayAngle) * 2.0 * Pi;
-        const double r = radius * std::sqrt(m_ctx.random(key, StrokeSalt::SprayRadius));
+        double r = radius * std::sqrt(m_ctx.random(key, StrokeSalt::SprayRadius));
+        if (st.sprayDistribution == SprayDistribution::Gaussian) {
+            // Truncated Rayleigh radius (a 2D Gaussian, σ = radius / 2.5), never outside the dab.
+            const double sigma = radius / 2.5;
+            const double u = m_ctx.random(key, StrokeSalt::SprayRadius);
+            const double cut = 1.0 - std::exp(-radius * radius / (2.0 * sigma * sigma));
+            r = sigma > 0 ? std::min(radius, sigma * std::sqrt(-2.0 * std::log(1.0 - u * cut))) : 0.0;
+        }
         const double pr = st.sprayParticleSize * (1.0 - st.sprayParticleJitter * m_ctx.random(key, StrokeSalt::SpraySize)) / 2.0;
         const double cx = dab.center.x() + r * std::cos(a), cy = dab.center.y() + r * std::sin(a);
         const QRect area = QRectF(cx - pr - 1, cy - pr - 1, 2 * pr + 2, 2 * pr + 2).toAlignedRect() & rect;

@@ -24,7 +24,22 @@ enum class BrushBlend { Paint, Erase, Smudge, WetPaint, Watercolor };
 //             penetration reaches into the paper's tooth (graphite, charcoal, chalk, pastel)
 //   Bristle:  bristles (milestone 11): each bristle of the footprint draws its own path with its
 //             own paint load, contact and picked-up colour
-enum class BrushStamp { Tip, Spray, Hatching, Dry, Bristle };
+//   Strands, Grass, Foliage, Splatter, Pattern: procedural geometry generated per dab from the
+//             stroke seed (milestone 11, ProceduralDeposit.h): hair and fur strands, grass blades,
+//             leaves, paint drops, and a motif repeated along the path
+enum class BrushStamp { Tip, Spray, Hatching, Dry, Bristle, Strands, Grass, Foliage, Splatter, Pattern };
+
+// Procedural stamps: which way the elements point. Path: along the stroke (plus the angle);
+// Up: towards the top of the document (grass grows up whichever way the stroke goes); Angle: the
+// dab angle alone (rotation, follow direction, angle dynamics).
+enum class ProcDirection { Path, Up, Angle };
+
+// The Pattern stamp's motif.
+enum class PatternShape { Dots, Dashes, Chevrons, Zigzag, Scallops, Stitches };
+
+// How spray particles spread over the dab: evenly, or denser at the centre (a truncated Gaussian,
+// σ = radius / 2.5, like an airbrush).
+enum class SprayDistribution { Uniform, Gaussian };
 
 // How the dabs of one stroke combine (see StrokeEngine):
 //   Uniform: a pixel's stroke coverage is the largest any dab gives it, so overlaps and
@@ -202,6 +217,8 @@ struct BrushSettings
     double hatchAngle = 45.0;      // degrees
     double hatchSpacing = 6.0;     // px between line centres
     double hatchThickness = 1.5;   // px
+    int hatchCrossPasses = 0;      // extra passes at other angles, added as pressure rises (milestone 11)
+    SprayDistribution sprayDistribution = SprayDistribution::Uniform; // (milestone 11)
 
     // --- Dry media --- (stamp Dry; research/m11-brush-architecture.md, A3)
     // The paper is the texture (document space; "paper" when none is chosen) and its strength is
@@ -239,6 +256,22 @@ struct BrushSettings
     double bristleDepletion = 0.2;    // paint each bristle loses per 100 px it paints
     double bristlePickup = 0.0;       // how fast bristles take on the colour of the paint they cross
     double bristleWobble = 0.1;       // sideways jitter of each bristle, as a share of its spacing
+
+    // --- Procedural --- (stamps Strands, Grass, Foliage, Splatter, Pattern; A8)
+    // Elements are generated per dab from the stroke seed and the dab index, oriented by
+    // procDirection, and rasterised into the stroke's coverage (anti-aliased, once per pixel).
+    int procCount = 6;              // strands, blades, leaves or drops per dab
+    double procLength = 1.2;        // element length × dab diameter (pattern: motif length)
+    double procWidth = 2.0;         // element width in px at the brush size (scales with the dab)
+    double procLengthJitter = 0.4;  // elements shorter by up to this share (splatter: drop sizes)
+    double procAngleJitter = 15.0;  // degrees of random turn per element
+    double procCurl = 0.2;          // bend: strands curl, blades droop (−1..1, sign = side)
+    double procTaper = 0.8;         // strands and blades narrow towards the tip
+    double procColorJitter = 0.0;   // per-element brightness and hue variation
+    double procSpread = 1.0;        // where elements start, × dab radius
+    ProcDirection procDirection = ProcDirection::Path;
+    double procStretch = 0.0;       // splatter: drops stretched along their direction
+    PatternShape patternShape = PatternShape::Chevrons;
 
     // --- Dynamics: parameters following sensors (BrushDynamics.h) ---
     DynamicsSet dynamics;

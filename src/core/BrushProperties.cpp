@@ -236,10 +236,13 @@ std::vector<BrushProperty> build()
         .tests("tst_brush, tst_brushengine (engine suites), tst_brushengine::everyImplementedPropertyChangesRendering")
         .access(choice(&BrushSettings::blend, {"paint", "erase", "smudge", "wet", "watercolor"}));
     add("stamp", "Dab type", PropertyType::Choice)
-        .options({"tip", "spray", "hatching", "dry", "bristle"}, {"Tip", "Spray", "Hatching", "Dry media", "Bristles"})
+        .options({"tip", "spray", "hatching", "dry", "bristle", "strands", "grass", "foliage", "splatter", "pattern"},
+                 {"Tip", "Spray", "Hatching", "Dry media", "Bristles", "Strands (hair, fur)", "Grass", "Foliage",
+                  "Splatter", "Pattern"})
         .engines(EngineCoverage)
-        .desc("What one dab of a paint or erase brush is: the tip, a spray of particles, hatching lines, or dry media "
-              "(graphite, charcoal, chalk, pastel) that catches in the paper's tooth.")
+        .desc("What one dab of a paint or erase brush is: the tip, a spray of particles, hatching lines, dry media "
+              "(graphite, charcoal, chalk, pastel) that catches in the paper's tooth, bristles, or procedural geometry: "
+              "hair and fur strands, grass blades, leaves, splatter drops or a repeated pattern.")
         .render("Spray scatters round particles over the dab's disc; hatching draws parallel document-space lines inside "
                 "the tip; dry media deposits the tip only where the pressure-dependent penetration reaches into the "
                 "paper (the texture, in document space).")
@@ -247,13 +250,14 @@ std::vector<BrushProperty> build()
               "the tip plus one or two texture samples per pixel.")
         .tests("tst_brushengine::sprayAndHatching, tst_brushmedia (dry media)")
         .needs("Paint or erase engine")
-        .access(choice(&BrushSettings::stamp, {"tip", "spray", "hatching", "dry", "bristle"}));
+        .access(choice(&BrushSettings::stamp,
+                       {"tip", "spray", "hatching", "dry", "bristle", "strands", "grass", "foliage", "splatter", "pattern"}));
 
     // -------------------------------------------------------------------------------- Brush tip
     g = QStringLiteral("Brush Tip");
     add("tip", "Tip shape", PropertyType::Choice)
         .options(tipNames, tipLabels)
-        .engines(TipEngines & ~EngineBristle)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
         .basic()
         .desc("The computed round tip or a generated tip image. An unknown id (from a newer version) draws round and is "
               "kept.")
@@ -262,7 +266,7 @@ std::vector<BrushProperty> build()
         .tests("tst_brush::generatedTipsAndTextures, tst_brushengine::everyImplementedPropertyChangesRendering")
         .access(text(&BrushSettings::tip));
     add("tipImage", "Imported tip", PropertyType::Image)
-        .engines(TipEngines & ~EngineBristle)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
         .desc("A tip made from an imported image (alpha, or darkness for opaque images), stored inside the preset so it "
               "can never go missing. Overrides the tip shape.")
         .render("Like the generated image tips; mip levels and the flow pass length are built once per stroke.")
@@ -279,7 +283,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::size));
     add("hardness", "Hardness", PropertyType::Number)
         .percent()
-        .engines(TipEngines & ~EngineBristle)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
         .basic()
         .desc("Round tip only: 100 % is a crisp anti-aliased edge; lower values fade smoothly from the core to the rim.")
         .render("Falloff (1 − t²)² from the hard core to the rim; the flow pass length follows so flow stays calibrated.")
@@ -304,7 +308,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::angle));
     add("flipX", "Flip horizontally", PropertyType::Bool)
-        .engines(TipEngines & ~EngineBristle)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
         .desc("Mirrors the tip along its travel axis.")
         .render("Negates the tip's u coordinate. No visible effect on a symmetric (round) tip.")
         .cost("None.")
@@ -312,7 +316,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::flipX));
     add("flipY", "Flip vertically", PropertyType::Bool)
-        .engines(TipEngines & ~EngineBristle)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
         .desc("Mirrors the tip across its travel axis.")
         .render("Negates the tip's w coordinate. No visible effect on a symmetric (round) tip.")
         .cost("None.")
@@ -329,7 +333,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::minimumSize));
     add("tipDensity", "Density", PropertyType::Number)
         .percent(0.01, 1)
-        .engines(TipEngines & ~EngineBristle)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
         .desc("Share of the tip's pixels each dab paints; the rest are left out at random, differently for every dab.")
         .render("Per pixel and dab, a hash of position and dab index decides whether the pixel is painted.")
         .cost("Per pixel: one hash when below 100 %.")
@@ -698,7 +702,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::roundnessJitter));
     add("randomFlipX", "Random flip horizontally", PropertyType::Bool)
-        .engines(TipEngines & ~EngineBristle)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
         .desc("Mirrors about half the dabs along the travel axis, at random.")
         .render("Per dab, toggles flip horizontally.")
         .cost("None.")
@@ -706,7 +710,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::randomFlipX));
     add("randomFlipY", "Random flip vertically", PropertyType::Bool)
-        .engines(TipEngines & ~EngineBristle)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
         .desc("Mirrors about half the dabs across the travel axis, at random.")
         .render("Per dab, toggles flip vertically.")
         .cost("None.")
@@ -723,7 +727,8 @@ std::vector<BrushProperty> build()
 
     // ---------------------------------------------------------------------------- Colour dynamics
     g = QStringLiteral("Color Dynamics");
-    const unsigned ColorEngines = EnginePaint | EngineSpray | EngineHatching | EngineDry | EngineWet | EngineWatercolor;
+    const unsigned ColorEngines =
+        EnginePaint | EngineSpray | EngineHatching | EngineDry | EngineWet | EngineWatercolor | EngineProcedural;
     auto colorJitter = [&](const char *id, const char *name, double max, double scale, const char *unit,
                            double BrushSettings::*m, const char *what, bool perStroke) {
         add(id, name, PropertyType::Number)
@@ -760,7 +765,7 @@ std::vector<BrushProperty> build()
     add("paintMode", "Blend mode", PropertyType::Choice)
         .options({"normal", "multiply", "screen", "behind", "preserveAlpha"},
                  {"Normal", "Multiply", "Screen", "Behind", "Inside (preserve alpha)"})
-        .engines(EnginePaint | EngineSpray | EngineHatching | EngineDry)
+        .engines(EnginePaint | EngineSpray | EngineHatching | EngineDry | EngineProcedural)
         .desc("How the stroke's colour combines with the layer: over it, multiplied (darkens), screened (lightens), "
               "behind existing paint, or only on existing paint without changing its alpha.")
         .render("W3C compositing formulas on premultiplied pixels with the stroke coverage as source alpha.")
@@ -1169,6 +1174,154 @@ std::vector<BrushProperty> build()
        "exchange takes part of it up.",
        "Per pixel of each dab: one mix.");
 
+    // ------------------------------------------------------------------ Procedural (milestone 11)
+    g = QStringLiteral("Procedural");
+    const char *const ProcTests = "tst_brushmedia::procedural*";
+    const unsigned Elements = EngineStrands | EngineGrass | EngineFoliage | EngineSplatter;
+    const unsigned Lines = EngineStrands | EngineGrass;
+    add("procCount", "Elements per dab", PropertyType::Integer)
+        .range(1, 64, 1, "")
+        .engines(Elements)
+        .basic()
+        .since(11)
+        .desc("How many strands, grass blades, leaves or drops each dab adds.")
+        .render("Elements generated per dab from the stroke seed and the dab index.")
+        .cost("Linear in the count (each element: its own anti-aliased geometry).")
+        .tests(ProcTests)
+        .access(integer(&BrushSettings::procCount));
+    add("procLength", "Element length", PropertyType::Number)
+        .range(0.1, 4, 100, "% of size")
+        .engines(Lines | EngineFoliage | EnginePattern)
+        .basic()
+        .since(11)
+        .desc("Length of each strand, blade or leaf, and of the pattern's motif, relative to the brush size.")
+        .render("Length = value × dab diameter (so size and its dynamics scale it).")
+        .cost("Grows with the length (longer elements cover more pixels).")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procLength));
+    add("procWidth", "Element width", PropertyType::Number)
+        .range(0.3, 60, 1, "px")
+        .engines(Elements | EnginePattern)
+        .since(11)
+        .desc("Width of strands and blades at the root, of leaves, of the largest splatter drops and of the pattern's "
+              "lines, at the brush size (it scales with size dynamics).")
+        .render("Width × dab diameter / brush size; below 1 px the coverage is scaled down instead.")
+        .cost("Grows with the width.")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procWidth));
+    add("procLengthJitter", "Length variation", PropertyType::Number)
+        .percent()
+        .engines(Elements)
+        .since(11)
+        .desc("Elements are shorter by up to this share, at random; for splatter, how strongly small drops outnumber "
+              "large ones.")
+        .render("Length × (1 − value × random); splatter: drop radius = largest × random^(1 + 3 × value).")
+        .cost("None.")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procLengthJitter));
+    add("procAngleJitter", "Angle variation", PropertyType::Number)
+        .range(0, 180, 1, "°")
+        .engines(Elements)
+        .since(11)
+        .desc("Turns each element by up to ± this angle from the direction, at random.")
+        .render("Element heading = direction + (2 × random − 1) × value.")
+        .cost("None.")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procAngleJitter));
+    add("procCurl", "Curl", PropertyType::Number)
+        .range(-1, 1, 100, "%")
+        .engines(Lines)
+        .since(11)
+        .desc("Strands curl (a constant bend along their length) and grass blades droop (bending more towards the "
+              "tip). The sign chooses the side.")
+        .render("Strands: heading turns by value × π × (0.5 + random) over the length; grass: by value × π/2 × (0.5 + "
+                "random) × t².")
+        .cost("None (each element is a polyline of up to 16 capsules).")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procCurl));
+    add("procTaper", "Element taper", PropertyType::Number)
+        .percent()
+        .engines(Lines)
+        .since(11)
+        .desc("How much strands and blades narrow towards their tips.")
+        .render("Width at t = root width × (1 − value × t).")
+        .cost("None.")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procTaper));
+    add("procColorJitter", "Colour variation", PropertyType::Number)
+        .percent()
+        .engines(Elements)
+        .since(11)
+        .desc("Each element gets its own shade: brightness by up to ± half this amount and hue by up to ± 20° × this "
+              "amount (paint only).")
+        .render("Per element HSV shift of the dab colour; the stroke keeps a colour per pixel, mixed by coverage.")
+        .cost("Per touched tile: 16 KiB of colour; per element: one colour conversion.")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procColorJitter));
+    add("procSpread", "Spread", PropertyType::Number)
+        .range(0, 2, 100, "% of radius")
+        .engines(Elements)
+        .since(11)
+        .desc("How far from the stroke's centre line elements start: strands, leaves and drops over a disc, grass "
+              "blades across the stroke.")
+        .render("Root offset ≤ value × dab radius (disc: √random for an even spread; grass: across the path).")
+        .cost("None.")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procSpread));
+    add("procDirection", "Element direction", PropertyType::Choice)
+        .options({"path", "up", "angle"}, {"Along the stroke", "Up", "Brush angle"})
+        .engines(Elements | EnginePattern)
+        .since(11)
+        .desc("Which way elements point: along the stroke (plus the brush angle), towards the top of the canvas "
+              "(grass grows up whichever way the stroke goes), or the brush angle alone.")
+        .render("Base heading: stroke direction + angle, −90° + angle, or angle.")
+        .cost("None.")
+        .tests(ProcTests)
+        .access(choice(&BrushSettings::procDirection, {"path", "up", "angle"}));
+    add("procStretch", "Drop stretch", PropertyType::Number)
+        .range(0, 4, 100, "%")
+        .engines(EngineSplatter)
+        .since(11)
+        .desc("Splatter drops are drawn out along their direction, and large drops throw small satellite drops ahead "
+              "of them.")
+        .render("Drop ellipse length = radius × (1 + value × random); satellites at 1.6 to 3 × the drop length.")
+        .cost("Per drop: an ellipse and up to three satellites.")
+        .tests(ProcTests)
+        .access(number(&BrushSettings::procStretch));
+    add("patternShape", "Pattern", PropertyType::Choice)
+        .options({"dots", "dashes", "chevrons", "zigzag", "scallops", "stitches"},
+                 {"Dots", "Dashes", "Chevrons", "Zigzag", "Scallops", "Stitches"})
+        .engines(EnginePattern)
+        .basic()
+        .since(11)
+        .desc("The motif the Pattern dab type repeats along the stroke, turned to follow it. Zigzag and scallops join "
+              "from dab to dab (their length is the spacing).")
+        .render("Anti-aliased lines, arcs and dots in the dab's frame (along, across the stroke).")
+        .cost("Per dab: one to three capsules or an arc of up to 12.")
+        .tests(ProcTests)
+        .access(choice(&BrushSettings::patternShape, {"dots", "dashes", "chevrons", "zigzag", "scallops", "stitches"}));
+    add("hatchCrossPasses", "Cross-hatching passes", PropertyType::Integer)
+        .range(0, 3, 1, "")
+        .engines(EngineHatching)
+        .since(11)
+        .desc("Extra hatching directions that join in as pressure rises: across (90°), then the two diagonals. "
+              "Without pressure data all passes draw.")
+        .render("Pass k (1..n) at the hatching angle + 90°, + 45°, − 45° draws where pressure ≥ k / (n + 1); a pixel "
+                "takes the strongest line.")
+        .cost("Per pixel: one more distance per active pass.")
+        .tests("tst_brushmedia::proceduralCrossHatching*")
+        .access(integer(&BrushSettings::hatchCrossPasses));
+    add("sprayDistribution", "Spray distribution", PropertyType::Choice)
+        .options({"uniform", "gaussian"}, {"Even", "Centre-weighted"})
+        .engines(EngineSpray)
+        .since(11)
+        .desc("Particles spread evenly over the dab, or more densely at its centre like an airbrush.")
+        .render("Gaussian: radius from a truncated Rayleigh distribution, σ = radius / 2.5 (no particle outside the "
+                "dab).")
+        .cost("None.")
+        .tests("tst_brushmedia::proceduralSprayDistribution*")
+        .access(choice(&BrushSettings::sprayDistribution, {"uniform", "gaussian"}));
+
     // -------------------------------------------------------------------- Bristles (milestone 11)
     g = QStringLiteral("Bristles");
     const char *const BristleTests = "tst_brushmedia::bristle*";
@@ -1375,7 +1528,7 @@ QStringList BrushProperties::designGroups()
 QStringList BrushProperties::engineGroups()
 {
     return {QStringLiteral("Ink and Stroke"), QStringLiteral("Dry Media"), QStringLiteral("Mixing"), QStringLiteral("Bristles"),
-            QStringLiteral("Watercolour")};
+            QStringLiteral("Watercolour"), QStringLiteral("Procedural")};
 }
 
 QStringList BrushProperties::groups()
@@ -1431,6 +1584,14 @@ unsigned BrushProperties::engineOf(const BrushSettings &s)
         return EngineDry;
     if (s.stamp == BrushStamp::Bristle)
         return EngineBristle;
+    switch (s.stamp) {
+    case BrushStamp::Strands: return EngineStrands;
+    case BrushStamp::Grass: return EngineGrass;
+    case BrushStamp::Foliage: return EngineFoliage;
+    case BrushStamp::Splatter: return EngineSplatter;
+    case BrushStamp::Pattern: return EnginePattern;
+    default: break;
+    }
     return s.blend == BrushBlend::Erase ? EngineErase : EnginePaint;
 }
 
@@ -1543,8 +1704,9 @@ QString BrushProperties::specificationMarkdown()
         if (e == EngineAll)
             return QStringLiteral("all");
         QStringList n;
-        const char *names[] = {"paint", "erase", "smudge", "wet paint", "spray", "hatching"};
-        for (int i = 0; i < 6; ++i)
+        const char *names[] = {"paint", "erase", "smudge", "wet paint", "spray", "hatching", "dry media",
+                               "bristles", "watercolour", "strands", "grass", "foliage", "splatter", "pattern"};
+        for (int i = 0; i < 14; ++i)
             if (e & (1u << i))
                 n << QLatin1String(names[i]);
         return n.join(QStringLiteral(", "));

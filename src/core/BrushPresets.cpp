@@ -475,6 +475,141 @@ std::vector<BrushPreset> makeBuiltIns()
         s.taperEnd = 25;
         list.push_back(preset("watercolor-round", "Watercolour Round", s));
     }
+
+    // --- Milestone 11: procedural brushes (ProceduralDeposit) ---
+    // Hair: long, fine strands that follow the stroke with a slight curl.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Strands;
+        s.size = 30;
+        s.spacing = 0.15;
+        s.pressureSize = {true, 0.5, 1.0};
+        s.procCount = 4;
+        s.procLength = 2.5;
+        s.procWidth = 1.2;
+        s.procLengthJitter = 0.3;
+        s.procAngleJitter = 4;
+        s.procCurl = 0.15;
+        s.procTaper = 0.9;
+        s.procColorJitter = 0.25;
+        s.procSpread = 0.9;
+        list.push_back(preset("hair", "Hair", s));
+    }
+    // Fur: short tufts at varied angles.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Strands;
+        s.size = 24;
+        s.spacing = 0.2;
+        s.pressureSize = {true, 0.5, 1.0};
+        s.procCount = 8;
+        s.procLength = 0.9;
+        s.procWidth = 1.5;
+        s.procLengthJitter = 0.5;
+        s.procAngleJitter = 25;
+        s.procCurl = 0.3;
+        s.procTaper = 1.0;
+        s.procColorJitter = 0.35;
+        s.procSpread = 1.0;
+        list.push_back(preset("fur", "Fur", s));
+    }
+    // Grass: blades rooted along the stroke, growing up, drooping and shaded from the root.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Grass;
+        s.size = 40;
+        s.spacing = 0.25;
+        s.pressureSize = {true, 0.4, 1.0};
+        s.procCount = 5;
+        s.procLength = 1.4;
+        s.procWidth = 3.5;
+        s.procLengthJitter = 0.5;
+        s.procAngleJitter = 12;
+        s.procCurl = 0.35;
+        s.procTaper = 1.0;
+        s.procColorJitter = 0.3;
+        s.procSpread = 1.0;
+        s.procDirection = ProcDirection::Up;
+        list.push_back(preset("grass", "Grass", s));
+    }
+    // Foliage: scattered leaves turned around the stroke direction.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Foliage;
+        s.size = 50;
+        s.spacing = 0.3;
+        s.pressureSize = {true, 0.4, 1.0};
+        s.procCount = 4;
+        s.procLength = 0.45;
+        s.procWidth = 10;
+        s.procLengthJitter = 0.4;
+        s.procAngleJitter = 70;
+        s.procColorJitter = 0.35;
+        s.procSpread = 1.0;
+        list.push_back(preset("foliage", "Foliage", s));
+    }
+    // Splatter: drops of all sizes thrown along the stroke.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Splatter;
+        s.size = 80;
+        s.spacing = 0.5;
+        s.pressureSize = {true, 0.4, 1.0};
+        s.procCount = 6;
+        s.procWidth = 16;
+        s.procLengthJitter = 0.7;
+        s.procAngleJitter = 25;
+        s.procStretch = 1.5;
+        s.procSpread = 1.0;
+        list.push_back(preset("splatter", "Splatter", s));
+    }
+    // Stitches: a row of cross-stitches along the stroke.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Pattern;
+        s.patternShape = PatternShape::Stitches;
+        s.size = 14;
+        s.spacing = 1.3;
+        s.procLength = 0.8;
+        s.procWidth = 1.6;
+        list.push_back(preset("stitches", "Stitches", s));
+    }
+    // Chevron trim: arrowheads pointing along the stroke.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Pattern;
+        s.patternShape = PatternShape::Chevrons;
+        s.size = 16;
+        s.spacing = 0.9;
+        s.procLength = 0.6;
+        s.procWidth = 2.0;
+        list.push_back(preset("chevron-trim", "Chevron Trim", s));
+    }
+    // Crosshatch pen: hatching that adds a cross and then diagonals as pressure rises.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Hatching;
+        s.size = 60;
+        s.spacing = 0.1;
+        s.hatchSpacing = 7;
+        s.hatchThickness = 1.2;
+        s.hatchCrossPasses = 2;
+        list.push_back(preset("crosshatch-pen", "Crosshatch Pen", s));
+    }
+    // Airbrush spray: centre-weighted particles.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Spray;
+        s.sprayDistribution = SprayDistribution::Gaussian;
+        s.size = 80;
+        s.spacing = 0.1;
+        s.opacity = 0.8;
+        s.sprayDensity = 60;
+        s.sprayParticleSize = 1.5;
+        s.sprayParticleJitter = 0.5;
+        s.pressureOpacity = {true, 0.2, 1.0};
+        list.push_back(preset("airbrush-spray", "Airbrush Spray", s));
+    }
     return list;
 }
 

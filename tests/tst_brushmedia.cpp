@@ -17,6 +17,7 @@
 
 #include <QFile>
 #include <QPainter>
+#include <QSet>
 #include <QtTest>
 #include <array>
 #include <cmath>
@@ -291,6 +292,16 @@ double darknessAt(const QImage &image, int x0, int x1, int yc, int d0, int d1)
                     break;
             }
     return n ? sum / n : 0.0;
+}
+
+// Pixels painted (alpha above `threshold`) in one image but not the other.
+int differingPixelsAbove(const QImage &a, const QImage &b, int threshold)
+{
+    int n = 0;
+    for (int y = 0; y < a.height(); ++y)
+        for (int x = 0; x < a.width(); ++x)
+            n += (qAlpha(a.pixel(x, y)) > threshold) != (qAlpha(b.pixel(x, y)) > threshold);
+    return n;
 }
 
 } // namespace
@@ -1653,6 +1664,313 @@ private slots:
             QImage img = base.copy();
             paint(img, p->settings, wobble(), 7, QColor(40, 70, 160));
             checkGolden(id, img);
+        }
+    }
+
+    // --- procedural engines (A8) ---
+
+    void proceduralPresetsAreSeededAndExactOnTilesAndSelections()
+    {
+        QImage clip(400, 200, QImage::Format_Grayscale8);
+        clip.fill(0);
+        {
+            QPainter p(&clip);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(Qt::white);
+            p.drawEllipse(QRectF(40, 20, 300, 150));
+        }
+        QImage bg = canvas();
+        {
+            QPainter p(&bg);
+            for (int i = 0; i < 12; ++i)
+                p.fillRect(QRect(i * 34, 0, 17, 200), QColor::fromHsv(i * 30, 220, 230));
+        }
+        std::vector<StrokeSample> seam;
+        for (int i = 0; i <= 60; ++i)
+            seam.push_back(sample(20 + i * 6.0, i < 30 ? 64.0 : 128.0 - (i - 30) * 2.1, 0.3 + 0.7 * (i % 10) / 10.0, i * 4.0));
+        for (const char *name : {"hair", "fur", "grass", "foliage", "splatter", "stitches", "chevron-trim", "crosshatch-pen",
+                                 "airbrush-spray"}) {
+            const QString id = QStringLiteral("builtin.") + QLatin1String(name);
+            const BrushPreset *preset = BrushPresets::builtIn(id);
+            QVERIFY2(preset, qPrintable(id));
+            BrushSettings live = preset->settings;
+            live.taperEnd = 60;
+            live.taperLive = true; // procedural dabs can be redrawn: the live taper rebuilds the tail
+            for (const BrushSettings &s : {preset->settings, live}) {
+                for (const QImage &mask : {QImage(), clip}) {
+                    QImage dense = bg.copy();
+                    TiledImage tiled = TiledImage::fromImage(bg);
+                    TileSnapshot db, tb;
+                    StrokeEngine a(s, Ink, 7, 0), b(s, Ink, 7, 0);
+                    if (!mask.isNull()) {
+                        a.setClipMask(mask);
+                        b.setClipMask(mask);
+                    }
+                    a.begin(dense, seam.front(), db);
+                    b.begin(tiled, seam.front(), tb);
+                    for (size_t i = 1; i < seam.size(); ++i) {
+                        a.moveTo(dense, seam[i], db);
+                        b.moveTo(tiled, seam[i], tb);
+                    }
+                    a.finish(dense, db);
+                    b.finish(tiled, tb);
+                    QVERIFY2(validPremultiplied(dense), qPrintable(id));
+                    QVERIFY2(tiled == dense, qPrintable(id));
+                    QVERIFY2(differingPixels(dense, bg) > 300, qPrintable(id));
+                    if (!mask.isNull())
+                        for (int y = 0; y < 200; y += 3)
+                            for (int x = 0; x < 400; x += 3)
+                                if (qGray(clip.pixel(x, y)) == 0)
+                                    QVERIFY(dense.pixel(x, y) == bg.pixel(x, y));
+                    tb.swapWith(tiled);
+                    QVERIFY(tiled == bg);
+                }
+            }
+            QCOMPARE(render(preset->settings, seam, bg, 3), render(preset->settings, seam, bg, 3));
+            const bool random = preset->settings.stamp != BrushStamp::Pattern && preset->settings.stamp != BrushStamp::Hatching;
+            if (random)
+                QVERIFY2(differingPixels(render(preset->settings, seam, bg, 3), render(preset->settings, seam, bg, 4)) > 100,
+                         qPrintable(id));
+        }
+    }
+
+    void proceduralStrandsPointWhereTheStrokeGoes()
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Strands;
+        s.size = 20;
+        s.spacing = 0.2;
+        s.pressureSize = {false, 0, 1};
+        s.procCount = 6;
+        s.procLength = 1.5;
+        s.procWidth = 1.5;
+        s.procLengthJitter = 0;
+        s.procAngleJitter = 0;
+        s.procCurl = 0;
+        s.procSpread = 0.5;
+        s = s.sanitized();
+        // Strands start at the dabs and grow forwards: past the end of the stroke, not before its start.
+        const QImage right = render(s, line({150, 100}, {250, 100}, 20), canvas());
+        const QImage left = render(s, line({250, 100}, {150, 100}, 20), canvas());
+        const int rightAhead = painted(right, QRect(262, 0, 138, 200), 30), rightBehind = painted(right, QRect(0, 0, 138, 200), 30);
+        const int leftAhead = painted(left, QRect(0, 0, 138, 200), 30), leftBehind = painted(left, QRect(262, 0, 138, 200), 30);
+        qInfo("strands ahead of / behind the stroke: right %d / %d, left %d / %d", rightAhead, rightBehind, leftAhead, leftBehind);
+        QVERIFY(rightAhead > 100 && leftAhead > 100);
+        QVERIFY(rightBehind < rightAhead / 5 && leftBehind < leftAhead / 5);
+        // Pointing up instead: above the stroke, whichever way it goes.
+        s.procDirection = ProcDirection::Up;
+        for (const QImage &img : {render(s, line({150, 100}, {250, 100}, 20), canvas()), render(s, line({250, 100}, {150, 100}, 20), canvas())}) {
+            const int above = painted(img, QRect(0, 0, 400, 88), 30), below = painted(img, QRect(0, 112, 400, 88), 30);
+            qInfo("pointing up: %d above, %d below", above, below);
+            QVERIFY(above > 300 && below < above / 10);
+        }
+    }
+
+    void proceduralGrassGrowsUpAndShadesFromTheRoot()
+    {
+        BrushSettings s = BrushPresets::builtIn(QStringLiteral("builtin.grass"))->settings;
+        s.procColorJitter = 0;
+        s.procAngleJitter = 0;
+        s.pressureSize = {false, 0, 1};
+        const QColor green(60, 170, 70);
+        for (const auto &stroke : {line({60, 150}, {340, 150}, 30), line({340, 150}, {60, 150}, 30)}) {
+            const QImage img = render(s, stroke, canvas(), 7, green);
+            const int above = painted(img, QRect(0, 0, 400, 140), 30), below = painted(img, QRect(0, 165, 400, 35), 30);
+            // Only fully covered pixels: their colour is the blade's own (no edge blending).
+            auto meanValue = [&](int y0, int y1) {
+                double sum = 0;
+                int n = 0;
+                for (int y = y0; y <= y1; ++y)
+                    for (int x = 80; x < 320; ++x)
+                        if (qAlpha(img.pixel(x, y)) == 255) {
+                            sum += QColor::fromRgb(img.pixel(x, y)).valueF();
+                            ++n;
+                        }
+                return n ? sum / n : -1.0;
+            };
+            const double root = meanValue(146, 152), tip = meanValue(100, 112);
+            qInfo("grass: %d px above the stroke, %d below; value at the roots %.2f, near the tips %.2f", above, below, root, tip);
+            QVERIFY(above > 2000 && below < above / 10);
+            QVERIFY(root > 0 && tip > root + 0.08);
+        }
+    }
+
+    void proceduralDensityPressureAndColourVariation()
+    {
+        BrushSettings fur = BrushPresets::builtIn(QStringLiteral("builtin.fur"))->settings;
+        const auto stroke = line({60, 100}, {340, 100}, 30);
+        BrushSettings few = fur, many = fur;
+        few.procCount = 3;
+        many.procCount = 12;
+        const int nFew = painted(render(few, stroke, canvas()), QRect(0, 0, 400, 200), 30);
+        const int nMany = painted(render(many, stroke, canvas()), QRect(0, 0, 400, 200), 30);
+        qInfo("fur: %d px with 3 strands per dab, %d with 12", nFew, nMany);
+        QVERIFY(nMany > 2 * nFew);
+        // Pressure → size scales the strands (simulated pressure).
+        const BrushSettings hair = BrushPresets::builtIn(QStringLiteral("builtin.hair"))->settings;
+        const int light = painted(render(hair, line({60, 100}, {340, 100}, 30, 0.3), canvas()), QRect(0, 0, 400, 200), 30);
+        const int firm = painted(render(hair, line({60, 100}, {340, 100}, 30, 1.0), canvas()), QRect(0, 0, 400, 200), 30);
+        qInfo("hair: %d px at pressure 0.3, %d at 1", light, firm);
+        QVERIFY(light < 0.85 * firm);
+        // Colour variation: every leaf its own shade.
+        BrushSettings leaves = BrushPresets::builtIn(QStringLiteral("builtin.foliage"))->settings;
+        auto shades = [&](double jitter) {
+            leaves.procColorJitter = jitter;
+            const QImage img = render(leaves, stroke, canvas(), 7, QColor(60, 140, 60));
+            QSet<QRgb> set;
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = 0; x < img.width(); ++x)
+                    if (qAlpha(img.pixel(x, y)) == 255)
+                        set.insert(img.pixel(x, y));
+            return int(set.size());
+        };
+        const int plain = shades(0.0), varied = shades(0.6);
+        qInfo("foliage: %d opaque colours without variation, %d with", plain, varied);
+        QCOMPARE(plain, 1);
+        QVERIFY(varied > 20);
+    }
+
+    void proceduralSplatterSizesAndStretch()
+    {
+        BrushSettings s = BrushPresets::builtIn(QStringLiteral("builtin.splatter"))->settings;
+        s.procDirection = ProcDirection::Angle; // dab angle 0: along x
+        s.procAngleJitter = 0;
+        s.procCount = 40;
+        s.size = 120;
+        s.pressureSize = {false, 0, 1};
+        const std::vector<StrokeSample> dab{sample(200, 100)};
+        // Power-law sizes: more small drops (less paint) as the variation rises.
+        BrushSettings even = s, skewed = s;
+        even.procLengthJitter = 0;
+        skewed.procLengthJitter = 1;
+        const int nEven = painted(render(even, dab, canvas()), QRect(0, 0, 400, 200), 30);
+        const int nSkewed = painted(render(skewed, dab, canvas()), QRect(0, 0, 400, 200), 30);
+        qInfo("splatter: %d px with equal drops, %d with power-law sizes", nEven, nSkewed);
+        QVERIFY(nSkewed < nEven / 2);
+        // Stretch: drop edges run along x (gradients across them point along y).
+        auto anisotropy = [&](double stretch) {
+            BrushSettings t = s;
+            t.procStretch = stretch;
+            t.procLengthJitter = 0.3;
+            const QImage img = render(t, dab, canvas());
+            double gx = 0, gy = 0;
+            for (int y = 1; y < img.height() - 1; ++y)
+                for (int x = 1; x < img.width() - 1; ++x) {
+                    const double dx = qAlpha(img.pixel(x + 1, y)) - qAlpha(img.pixel(x - 1, y));
+                    const double dy = qAlpha(img.pixel(x, y + 1)) - qAlpha(img.pixel(x, y - 1));
+                    gx += dx * dx;
+                    gy += dy * dy;
+                }
+            return gy / std::max(1.0, gx);
+        };
+        const double round = anisotropy(0), stretched = anisotropy(3);
+        qInfo("splatter edge anisotropy (across / along): %.2f round, %.2f stretched", round, stretched);
+        QVERIFY(round > 0.7 && round < 1.4);
+        QVERIFY(stretched > 1.8);
+    }
+
+    void proceduralPatternsJoinAndFollowTheStroke()
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Pattern;
+        s.size = 20;
+        s.spacing = 1.0;
+        s.procWidth = 2.0;
+        s.pressureSize = {false, 0, 1};
+        auto columnsPainted = [](const QImage &img) {
+            int n = 0;
+            for (int x = 80; x <= 320; ++x) {
+                bool any = false;
+                for (int y = 80; y <= 120 && !any; ++y)
+                    any = qAlpha(img.pixel(x, y)) > 100;
+                n += any;
+            }
+            return n;
+        };
+        const auto stroke = line({40, 100}, {360, 100}, 40);
+        // Zigzag: as long as the spacing, so it joins into one continuous line.
+        s.patternShape = PatternShape::Zigzag;
+        const QImage zig = render(s, stroke, canvas());
+        // Dashes shorter than the spacing leave gaps.
+        s.patternShape = PatternShape::Dashes;
+        s.procLength = 0.5;
+        const QImage dash = render(s, stroke, canvas());
+        qInfo("columns with paint (of 241): zigzag %d, dashes %d", columnsPainted(zig), columnsPainted(dash));
+        QCOMPARE(columnsPainted(zig), 241);
+        QVERIFY(columnsPainted(dash) < 180);
+        // Chevrons point the way the stroke goes: a stroke to the left is the mirror image of one to
+        // the right, and not the same as it.
+        s.patternShape = PatternShape::Chevrons;
+        s.procLength = 0.6;
+        const QImage right = render(s, line({40, 100}, {360, 100}, 40), canvas());
+        const QImage left = render(s, line({360, 100}, {40, 100}, 40), canvas()).mirrored(true, false);
+        const int total = painted(right, QRect(0, 0, 400, 200), 100);
+        const int mirrorDiff = differingPixelsAbove(right, left, 100), selfDiff = differingPixelsAbove(right, right.mirrored(true, false), 100);
+        qInfo("chevrons: %d px; left stroke mirrored differs in %d, the right stroke mirrored in %d", total, mirrorDiff, selfDiff);
+        QVERIFY(mirrorDiff * 5 < selfDiff); // what differs is the dabs' phase, not the shape's direction
+        QVERIFY(selfDiff > total);
+    }
+
+    void proceduralCrossHatchingAddsPassesWithPressure()
+    {
+        BrushSettings s = BrushPresets::builtIn(QStringLiteral("builtin.crosshatch-pen"))->settings;
+        BrushSettings plain = s;
+        plain.hatchCrossPasses = 0;
+        const auto at = [&](const BrushSettings &b, double pressure) {
+            return render(b, line({60, 100}, {340, 100}, 30, pressure), canvas());
+        };
+        // Pass 1 joins at pressure 1/3, pass 2 at 2/3.
+        QCOMPARE(at(s, 0.2), at(plain, 0.2));
+        const int one = painted(at(s, 0.2), QRect(0, 0, 400, 200), 100);
+        const int two = painted(at(s, 0.5), QRect(0, 0, 400, 200), 100);
+        const int three = painted(at(s, 1.0), QRect(0, 0, 400, 200), 100);
+        qInfo("crosshatch pen: %d px at pressure 0.2 (one direction), %d at 0.5, %d at 1", one, two, three);
+        QVERIFY(two > one * 1.4 && three > two * 1.2);
+    }
+
+    void proceduralSprayDistributionWeightsTheCentre()
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Spray;
+        s.size = 100;
+        s.sprayDensity = 400;
+        s.sprayParticleSize = 1.0;
+        s.pressureSize = {false, 0, 1};
+        const std::vector<StrokeSample> dab{sample(200, 100)};
+        int outside = 0; // paint beyond the dab's radius (+ a particle)
+        auto innerShare = [&](SprayDistribution d) {
+            s.sprayDistribution = d;
+            const QImage img = render(s, dab, canvas());
+            double inner = 0, all = 0;
+            for (int y = 0; y < 200; ++y)
+                for (int x = 0; x < 400; ++x) {
+                    const double a = qAlpha(img.pixel(x, y));
+                    const double r = std::hypot(x + 0.5 - 200, y + 0.5 - 100);
+                    outside += a > 0 && r > 52;
+                    all += a;
+                    if (r < 25)
+                        inner += a;
+                }
+            return inner / all;
+        };
+        const double uniform = innerShare(SprayDistribution::Uniform), gaussian = innerShare(SprayDistribution::Gaussian);
+        qInfo("spray paint within half the radius: %.2f even (area share 0.25), %.2f centre-weighted (expected ~0.57)", uniform,
+              gaussian);
+        QCOMPARE(outside, 0);
+        QVERIFY(uniform > 0.18 && uniform < 0.33);
+        QVERIFY(gaussian > 0.45);
+    }
+
+    void proceduralPresetGoldenImages()
+    {
+        for (const char *name : {"hair", "fur", "grass", "foliage", "splatter", "stitches", "chevron-trim", "crosshatch-pen",
+                                 "airbrush-spray"}) {
+            const BrushPreset *p = BrushPresets::builtIn(QStringLiteral("builtin.") + QLatin1String(name));
+            QVERIFY2(p, name);
+            QImage img = canvas(QSize(400, 200), Qt::white);
+            paint(img, p->settings, wobble(), 7, QColor(50, 90, 60));
+            checkGolden(QLatin1String(name), img);
         }
     }
 };

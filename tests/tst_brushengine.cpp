@@ -228,7 +228,8 @@ unsigned testEngine(unsigned engines)
 {
     for (unsigned e : {unsigned(EnginePaint), unsigned(EngineSmudge), unsigned(EngineWet), unsigned(EngineSpray),
                        unsigned(EngineHatching), unsigned(EngineErase), unsigned(EngineDry), unsigned(EngineBristle),
-                       unsigned(EngineWatercolor)})
+                       unsigned(EngineWatercolor), unsigned(EngineStrands), unsigned(EngineGrass), unsigned(EngineFoliage),
+                       unsigned(EngineSplatter), unsigned(EnginePattern)})
         if (engines & e)
             return e;
     return EnginePaint;
@@ -245,6 +246,11 @@ void applyEngine(BrushSettings &s, unsigned engine)
     case EngineDry: s.stamp = BrushStamp::Dry; break;
     case EngineBristle: s.stamp = BrushStamp::Bristle; break;
     case EngineWatercolor: s.blend = BrushBlend::Watercolor; break;
+    case EngineStrands: s.stamp = BrushStamp::Strands; break;
+    case EngineGrass: s.stamp = BrushStamp::Grass; break;
+    case EngineFoliage: s.stamp = BrushStamp::Foliage; break;
+    case EngineSplatter: s.stamp = BrushStamp::Splatter; break;
+    case EnginePattern: s.stamp = BrushStamp::Pattern; break;
     default: break;
     }
 }
@@ -423,6 +429,21 @@ std::map<QString, Scenario> scenarios()
         {"wcGranulation", {[=](BrushSettings &s) { watercolor(s); s.texture = QStringLiteral("rough"); s.textureStrength = 0.9; }, 1.0}},
         {"wcDryingTime", {watercolor, 1.0}},
         {"wcLifting", {watercolor, 1.0}},
+        // Procedural (milestone 11), each on the first engine it applies to (strands unless noted)
+        {"procCount", {none, 20}},
+        {"procLength", {none, 3.0}},
+        {"procWidth", {none, 6.0}},
+        {"procLengthJitter", {none, 1.0}},
+        {"procAngleJitter", {none, 90.0}},
+        {"procCurl", {none, -1.0}},
+        {"procTaper", {none, 0.0}},
+        {"procColorJitter", {none, 1.0}},
+        {"procSpread", {none, 0.2}},
+        {"procDirection", {none, QStringLiteral("up")}},
+        {"procStretch", {none, 3.0}},                          // splatter
+        {"patternShape", {none, QStringLiteral("zigzag")}},     // pattern
+        {"hatchCrossPasses", {none, 3}},                       // hatching
+        {"sprayDistribution", {none, QStringLiteral("gaussian")}}, // spray
         // Mixing (milestone 11), on the smudge engine in mix mode
         {"smudgeLength", {mixMode, 0.95}},
         {"smudgeRadius", {mixMode, 0.25}},

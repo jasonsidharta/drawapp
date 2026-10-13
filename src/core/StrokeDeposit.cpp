@@ -5,6 +5,7 @@
 #include "CarriedDeposit.h"
 #include "CoverageDeposit.h"
 #include "DryDeposit.h"
+#include "ProceduralDeposit.h"
 #include "WatercolorDeposit.h"
 
 #include <cmath>
@@ -42,6 +43,8 @@ QRect StrokeContext::dabRect(const DabParams &dab, const StrokeSurface &image) c
     double r = dab.diameter / 2.0 * (tip ? 1.4143 : 1.0) + 1.0;
     if (settings.stamp == BrushStamp::Spray)
         r = dab.diameter / 2.0 + settings.sprayParticleSize / 2.0 + 2.0;
+    else if (coverageBlend && settings.stamp >= BrushStamp::Strands)
+        r = ProceduralDeposit::reach(settings, dab) + 2.0;
     return QRectF(dab.center.x() - r, dab.center.y() - r, 2 * r, 2 * r).toAlignedRect() & image.rect();
 }
 
@@ -100,6 +103,8 @@ std::unique_ptr<StrokeDeposit> StrokeDeposit::create(StrokeContext &context)
         return std::make_unique<DryDeposit>(context);
     if (context.coverageBlend && context.settings.stamp == BrushStamp::Bristle)
         return std::make_unique<BristleDeposit>(context);
+    if (context.coverageBlend && context.settings.stamp >= BrushStamp::Strands)
+        return std::make_unique<ProceduralDeposit>(context);
     if (context.coverageBlend)
         return std::make_unique<CoverageDeposit>(context);
     if (context.settings.blend == BrushBlend::Watercolor)
