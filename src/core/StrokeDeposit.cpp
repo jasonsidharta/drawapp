@@ -1,5 +1,6 @@
 #include "StrokeDeposit.h"
 
+#include "BristleDeposit.h"
 #include "BrushTips.h"
 #include "CarriedDeposit.h"
 #include "CoverageDeposit.h"
@@ -96,6 +97,8 @@ std::unique_ptr<StrokeDeposit> StrokeDeposit::create(StrokeContext &context)
 {
     if (context.coverageBlend && context.settings.stamp == BrushStamp::Dry)
         return std::make_unique<DryDeposit>(context);
+    if (context.coverageBlend && context.settings.stamp == BrushStamp::Bristle)
+        return std::make_unique<BristleDeposit>(context);
     if (context.coverageBlend)
         return std::make_unique<CoverageDeposit>(context);
     return std::make_unique<CarriedDeposit>(context);

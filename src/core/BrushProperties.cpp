@@ -236,7 +236,7 @@ std::vector<BrushProperty> build()
         .tests("tst_brush, tst_brushengine (engine suites), tst_brushengine::everyImplementedPropertyChangesRendering")
         .access(choice(&BrushSettings::blend, {"paint", "erase", "smudge", "wet"}));
     add("stamp", "Dab type", PropertyType::Choice)
-        .options({"tip", "spray", "hatching", "dry"}, {"Tip", "Spray", "Hatching", "Dry media"})
+        .options({"tip", "spray", "hatching", "dry", "bristle"}, {"Tip", "Spray", "Hatching", "Dry media", "Bristles"})
         .engines(EngineCoverage)
         .desc("What one dab of a paint or erase brush is: the tip, a spray of particles, hatching lines, or dry media "
               "(graphite, charcoal, chalk, pastel) that catches in the paper's tooth.")
@@ -247,13 +247,13 @@ std::vector<BrushProperty> build()
               "the tip plus one or two texture samples per pixel.")
         .tests("tst_brushengine::sprayAndHatching, tst_brushmedia (dry media)")
         .needs("Paint or erase engine")
-        .access(choice(&BrushSettings::stamp, {"tip", "spray", "hatching", "dry"}));
+        .access(choice(&BrushSettings::stamp, {"tip", "spray", "hatching", "dry", "bristle"}));
 
     // -------------------------------------------------------------------------------- Brush tip
     g = QStringLiteral("Brush Tip");
     add("tip", "Tip shape", PropertyType::Choice)
         .options(tipNames, tipLabels)
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineBristle)
         .basic()
         .desc("The computed round tip or a generated tip image. An unknown id (from a newer version) draws round and is "
               "kept.")
@@ -262,7 +262,7 @@ std::vector<BrushProperty> build()
         .tests("tst_brush::generatedTipsAndTextures, tst_brushengine::everyImplementedPropertyChangesRendering")
         .access(text(&BrushSettings::tip));
     add("tipImage", "Imported tip", PropertyType::Image)
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineBristle)
         .desc("A tip made from an imported image (alpha, or darkness for opaque images), stored inside the preset so it "
               "can never go missing. Overrides the tip shape.")
         .render("Like the generated image tips; mip levels and the flow pass length are built once per stroke.")
@@ -279,7 +279,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::size));
     add("hardness", "Hardness", PropertyType::Number)
         .percent()
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineBristle)
         .basic()
         .desc("Round tip only: 100 % is a crisp anti-aliased edge; lower values fade smoothly from the core to the rim.")
         .render("Falloff (1 − t²)² from the hard core to the rim; the flow pass length follows so flow stays calibrated.")
@@ -304,7 +304,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::angle));
     add("flipX", "Flip horizontally", PropertyType::Bool)
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineBristle)
         .desc("Mirrors the tip along its travel axis.")
         .render("Negates the tip's u coordinate. No visible effect on a symmetric (round) tip.")
         .cost("None.")
@@ -312,7 +312,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::flipX));
     add("flipY", "Flip vertically", PropertyType::Bool)
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineBristle)
         .desc("Mirrors the tip across its travel axis.")
         .render("Negates the tip's w coordinate. No visible effect on a symmetric (round) tip.")
         .cost("None.")
@@ -329,7 +329,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::minimumSize));
     add("tipDensity", "Density", PropertyType::Number)
         .percent(0.01, 1)
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineBristle)
         .desc("Share of the tip's pixels each dab paints; the rest are left out at random, differently for every dab.")
         .render("Per pixel and dab, a hash of position and dab index decides whether the pixel is painted.")
         .cost("Per pixel: one hash when below 100 %.")
@@ -698,7 +698,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::roundnessJitter));
     add("randomFlipX", "Random flip horizontally", PropertyType::Bool)
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineBristle)
         .desc("Mirrors about half the dabs along the travel axis, at random.")
         .render("Per dab, toggles flip horizontally.")
         .cost("None.")
@@ -706,7 +706,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::randomFlipX));
     add("randomFlipY", "Random flip vertically", PropertyType::Bool)
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineBristle)
         .desc("Mirrors about half the dabs across the travel axis, at random.")
         .render("Per dab, toggles flip vertically.")
         .cost("None.")
@@ -830,7 +830,7 @@ std::vector<BrushProperty> build()
     add("moreBlendModes", "Overlay and colour modes", PropertyType::Choice)
         .desc("Planned: overlay, soft light, hue, saturation, colour and luminosity blend modes. Not implemented.");
     add("pigmentMixing", "Pigment mixing", PropertyType::Bool)
-        .engines(EngineSmudge | EngineWet)
+        .engines(EngineSmudge | EngineWet | EngineBristle)
         .since(11)
         .desc("Mixes colours like paint instead of light (milestone 11): blue and yellow give green rather than grey. "
               "Per-channel Kubelka–Munk in linear light; pure screen primaries mix towards black (three channels cannot "
@@ -1117,6 +1117,91 @@ std::vector<BrushProperty> build()
         .tests(InkTests)
         .access(number(&BrushSettings::smoothingSpeedAdapt));
 
+    // -------------------------------------------------------------------- Bristles (milestone 11)
+    g = QStringLiteral("Bristles");
+    const char *const BristleTests = "tst_brushmedia::bristle*";
+    add("bristleCount", "Bristles", PropertyType::Integer)
+        .range(1, 512, 1, "")
+        .engines(EngineBristle)
+        .basic()
+        .since(11)
+        .desc("How many bristles the brush has. Few bristles leave separate streaks; many fill the stroke.")
+        .render("Bristles at seeded places in the footprint (the dab's size, roundness and angle).")
+        .cost("Per dab: one anti-aliased segment per bristle (cost grows with bristles × segment area).")
+        .tests(BristleTests)
+        .access(integer(&BrushSettings::bristleCount));
+    add("bristleThickness", "Bristle thickness", PropertyType::Number)
+        .percent(0.005, 0.5)
+        .engines(EngineBristle)
+        .since(11)
+        .desc("Width of each bristle as a share of the brush size (at least 0.8 px).")
+        .render("Capsule width of each bristle's segment.")
+        .cost("Grows with the width.")
+        .tests(BristleTests)
+        .access(number(&BrushSettings::bristleThickness));
+    add("bristleSpread", "Spread with pressure", PropertyType::Number)
+        .percent()
+        .engines(EngineBristle)
+        .since(11)
+        .desc("How much pressure splays the bristles: light pressure gathers them into a narrow tip, full pressure "
+              "spreads them over the whole footprint.")
+        .render("Footprint × (1 − spread × (1 − pressure)).")
+        .cost("None.")
+        .needs("A pen that reports pressure")
+        .tests(BristleTests)
+        .access(number(&BrushSettings::bristleSpread));
+    add("bristleLengthJitter", "Bristle lengths", PropertyType::Number)
+        .percent()
+        .engines(EngineBristle)
+        .since(11)
+        .desc("How different the bristles' lengths are: with light pressure only the longest touch the canvas.")
+        .render("Each bristle touches once pressure passes its threshold (0 .. this value), rising over a 15 % range.")
+        .cost("None.")
+        .needs("A pen that reports pressure")
+        .tests(BristleTests)
+        .access(number(&BrushSettings::bristleLengthJitter));
+    add("bristleLoad", "Paint load", PropertyType::Number)
+        .percent()
+        .engines(EngineBristle)
+        .basic()
+        .since(11)
+        .desc("How much paint the bristles carry at the start of the stroke: low values give a dry brush that breaks "
+              "up at once.")
+        .render("Each bristle's reservoir starts at load × (0.75 .. 1).")
+        .cost("None.")
+        .tests(BristleTests)
+        .access(number(&BrushSettings::bristleLoad));
+    add("bristleDepletion", "Paint depletion", PropertyType::Number)
+        .percent()
+        .engines(EngineBristle)
+        .since(11)
+        .desc("How fast bristles run out of paint as they paint (each at its own rate), so a long stroke dries out "
+              "into separate streaks.")
+        .render("Reservoir × (1 − depletion × (0.5 .. 1.5))^(distance painted / 100 px); a drying bristle skips the "
+                "paper's valleys first, then fades.")
+        .cost("Per bristle and dab: one power.")
+        .tests(BristleTests)
+        .access(number(&BrushSettings::bristleDepletion));
+    add("bristlePickup", "Colour pickup", PropertyType::Number)
+        .percent()
+        .engines(EngineBristle)
+        .since(11)
+        .desc("How fast each bristle takes on the colour of the paint it crosses (as it was before the stroke), so the "
+              "stroke drags multicoloured streaks through existing paint.")
+        .render("Per 10 px painted, the bristle colour moves this share towards the colour under it (× its alpha).")
+        .cost("Per bristle and dab: one pixel read and one mix.")
+        .tests(BristleTests)
+        .access(number(&BrushSettings::bristlePickup));
+    add("bristleWobble", "Bristle wobble", PropertyType::Number)
+        .percent()
+        .engines(EngineBristle)
+        .since(11)
+        .desc("Sideways jitter of each bristle from dab to dab, as a share of the space between bristles.")
+        .render("Adds a seeded offset across the footprint per bristle and dab.")
+        .cost("None.")
+        .tests(BristleTests)
+        .access(number(&BrushSettings::bristleWobble));
+
     // ------------------------------------------------------------------- Dry media (milestone 11)
     g = QStringLiteral("Dry Media");
     const char *const DryTests = "tst_brushmedia::dry*";
@@ -1237,7 +1322,7 @@ QStringList BrushProperties::designGroups()
 
 QStringList BrushProperties::engineGroups()
 {
-    return {QStringLiteral("Ink and Stroke"), QStringLiteral("Dry Media"), QStringLiteral("Mixing")};
+    return {QStringLiteral("Ink and Stroke"), QStringLiteral("Dry Media"), QStringLiteral("Mixing"), QStringLiteral("Bristles")};
 }
 
 QStringList BrushProperties::groups()
@@ -1290,6 +1375,8 @@ unsigned BrushProperties::engineOf(const BrushSettings &s)
         return EngineHatching;
     if (s.stamp == BrushStamp::Dry)
         return EngineDry;
+    if (s.stamp == BrushStamp::Bristle)
+        return EngineBristle;
     return s.blend == BrushBlend::Erase ? EngineErase : EnginePaint;
 }
 

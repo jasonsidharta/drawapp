@@ -34,9 +34,10 @@ enum EngineFlag : unsigned {
     EngineSpray = 16,   // Paint or Erase with the spray stamp
     EngineHatching = 32, // Paint or Erase with the hatching stamp
     EngineDry = 64,      // Paint or Erase with the dry-media stamp (milestone 11)
-    EngineCoverage = EnginePaint | EngineErase | EngineSpray | EngineHatching | EngineDry,
+    EngineBristle = 128, // Paint or Erase with the bristle stamp (milestone 11)
+    EngineCoverage = EnginePaint | EngineErase | EngineSpray | EngineHatching | EngineDry | EngineBristle,
     EngineCarried = EngineSmudge | EngineWet,
-    EngineAll = 127,
+    EngineAll = 255,
 };
 
 struct BrushProperty

@@ -227,7 +227,7 @@ BrushSettings baseSettings()
 unsigned testEngine(unsigned engines)
 {
     for (unsigned e : {unsigned(EnginePaint), unsigned(EngineSmudge), unsigned(EngineWet), unsigned(EngineSpray),
-                       unsigned(EngineHatching), unsigned(EngineErase), unsigned(EngineDry)})
+                       unsigned(EngineHatching), unsigned(EngineErase), unsigned(EngineDry), unsigned(EngineBristle)})
         if (engines & e)
             return e;
     return EnginePaint;
@@ -242,6 +242,7 @@ void applyEngine(BrushSettings &s, unsigned engine)
     case EngineSpray: s.stamp = BrushStamp::Spray; break;
     case EngineHatching: s.stamp = BrushStamp::Hatching; break;
     case EngineDry: s.stamp = BrushStamp::Dry; break;
+    case EngineBristle: s.stamp = BrushStamp::Bristle; break;
     default: break;
     }
 }
@@ -284,6 +285,7 @@ std::map<QString, Scenario> scenarios()
     auto asym = [](BrushSettings &s) { s.tipImage = BrushProperties::tipFromImage(asymmetricImage()); };
     auto none = [](BrushSettings &) {};
     auto mixMode = [](BrushSettings &s) { s.smudgeMode = SmudgeMode::Mix; };
+    auto bristle = [](BrushSettings &s) { s.stamp = BrushStamp::Bristle; s.size = 40; };
     auto dry = [](BrushSettings &s) {
         s.stamp = BrushStamp::Dry;
         s.texture = QStringLiteral("rough");
@@ -401,6 +403,15 @@ std::map<QString, Scenario> scenarios()
         {"hatchAngle", {none, -30.0}},
         {"hatchSpacing", {none, 12.0}},
         {"hatchThickness", {none, 4.0}},
+        // Bristles (milestone 11)
+        {"bristleCount", {bristle, 8}},
+        {"bristleThickness", {bristle, 0.2}},
+        {"bristleSpread", {bristle, 1.0}},
+        {"bristleLengthJitter", {bristle, 1.0}},
+        {"bristleLoad", {bristle, 0.2}},
+        {"bristleDepletion", {bristle, 0.9}},
+        {"bristlePickup", {bristle, 0.9}},
+        {"bristleWobble", {bristle, 1.0}},
         // Mixing (milestone 11), on the smudge engine in mix mode
         {"smudgeLength", {mixMode, 0.95}},
         {"smudgeRadius", {mixMode, 0.25}},

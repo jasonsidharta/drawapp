@@ -200,6 +200,30 @@ std::vector<StrokeSample> wobble()
     return v;
 }
 
+BrushSettings bristleBrush()
+{
+    BrushSettings s;
+    s.stamp = BrushStamp::Bristle;
+    s.size = 40;
+    s.spacing = 0.05;
+    s.pressureSize = {false, 0, 1};
+    s.bristleCount = 60;
+    s.bristleThickness = 0.04;
+    s.bristleSpread = 0.5;
+    s.bristleLengthJitter = 0.5;
+    s.bristleDepletion = 0.0;
+    return s.sanitized();
+}
+
+int painted(const QImage &img, const QRect &r, int threshold = 128)
+{
+    int n = 0;
+    for (int y = r.top(); y <= r.bottom(); ++y)
+        for (int x = r.left(); x <= r.right(); ++x)
+            n += qAlpha(img.pixel(x, y)) > threshold;
+    return n;
+}
+
 } // namespace
 
 class TestBrushMedia : public QObject
@@ -1041,6 +1065,219 @@ private slots:
             QVERIFY2(p, qPrintable(id));
             QImage img = base.copy();
             paint(img, p->settings, wobble(), 7, QColor(200, 60, 40));
+            checkGolden(id, img);
+        }
+    }
+
+    // --- bristles (A5) ---
+
+    void bristleLoadedAndDryBrushesDiffer()
+    {
+        // A loaded brush covers the stroke densely along its whole length; a dry one (little paint,
+        // fast depletion) covers less from the start and breaks up further along.
+        BrushSettings loaded = bristleBrush();
+        BrushSettings dry = loaded;
+        dry.bristleLoad = 0.35;
+        dry.bristleDepletion = 0.6;
+        const auto stroke = line({20, 100}, {380, 100}, 90);
+        const QImage a = render(loaded, stroke, canvas()), b = render(dry, stroke, canvas());
+        QVERIFY(validPremultiplied(a) && validPremultiplied(b));
+        const QRect first(40, 80, 100, 41), last(260, 80, 100, 41);
+        qInfo("painted pixels, first / last third: loaded %d / %d, dry %d / %d", painted(a, first), painted(a, last),
+              painted(b, first), painted(b, last));
+        QVERIFY(painted(a, first) > 1.5 * painted(b, first));
+        QVERIFY(std::abs(painted(a, last) - painted(a, first)) < painted(a, first) / 10); // no depletion: even
+        QVERIFY(painted(b, last) < 0.6 * painted(b, first));                             // depletion: runs out
+    }
+
+    void bristleFlatAndRoundBrushesDiffer()
+    {
+        // A flat brush (thin footprint) is broad when dragged across its width and narrow along it;
+        // a round brush is the same both ways.
+        auto width = [](const QImage &img) {
+            int top = 1000, bottom = -1;
+            for (int y = 0; y < img.height(); ++y)
+                if (qAlpha(img.pixel(200, y)) > 64) {
+                    top = std::min(top, y);
+                    bottom = std::max(bottom, y);
+                }
+            return bottom - top + 1;
+        };
+        BrushSettings flat = bristleBrush();
+        flat.roundness = 0.15;
+        const auto stroke = line({20, 100}, {380, 100}, 90);
+        flat.angle = 90; // broad edge across the horizontal stroke
+        const int across = width(render(flat, stroke, canvas()));
+        flat.angle = 0; // broad edge along the stroke
+        const int along = width(render(flat, stroke, canvas()));
+        BrushSettings round = bristleBrush();
+        const int roundA = width(render(round, stroke, canvas()));
+        round.angle = 90;
+        const int roundB = width(render(round, stroke, canvas()));
+        qInfo("stroke width: flat across %d, flat along %d, round %d / %d", across, along, roundA, roundB);
+        QVERIFY(across > 3 * along);
+        QVERIFY(std::abs(roundA - roundB) <= 2);
+    }
+
+    void bristlePicksUpThePaintItCrosses()
+    {
+        // From red paint onto bare paper (transparency) with a blue brush: with pickup the bristles
+        // carry red onto the paper (multicoloured streaks); without, the paper gets only blue.
+        // (Over opaque white paint the bristles would pick up the white, as they should.)
+        QImage half = canvas(QSize(400, 200));
+        {
+            QPainter p(&half);
+            p.fillRect(QRect(0, 0, 200, 200), QColor(220, 30, 30));
+        }
+        BrushSettings s = bristleBrush();
+        auto reddish = [](const QImage &img) {
+            int n = 0;
+            for (int y = 80; y <= 120; ++y)
+                for (int x = 220; x <= 330; ++x) {
+                    const QColor c = img.pixelColor(x, y);
+                    n += c.red() > c.blue() + 40 && c.alpha() > 128 && c.green() < 200;
+                }
+            return n;
+        };
+        const auto stroke = line({20, 100}, {380, 100}, 90);
+        const int without = reddish(render(s, stroke, half, 7, QColor(30, 50, 200)));
+        s.bristlePickup = 0.6;
+        const QImage with = render(s, stroke, half, 7, QColor(30, 50, 200));
+        const int withPickup = reddish(with);
+        qInfo("red-dominated pixels in the white half: %d without pickup, %d with", without, withPickup);
+        QVERIFY(without == 0);
+        QVERIFY(withPickup > 200);
+        // Multicoloured: crossing horizontal bands of different paint, each bristle picks up the band
+        // it passes through, so across the stroke on the paper the colour changes from streak to
+        // streak.
+        QImage bands = canvas(QSize(400, 200));
+        {
+            QPainter p(&bands);
+            const QColor colors[] = {QColor(220, 30, 30), QColor(30, 170, 60), QColor(240, 200, 20)};
+            for (int i = 0; i < 12; ++i)
+                p.fillRect(QRect(0, 76 + i * 4, 200, 4), colors[i % 3]);
+        }
+        const QImage streaks = render(s, stroke, bands, 7, QColor(30, 50, 200));
+        QSet<int> hues;
+        for (int y = 82; y <= 118; ++y) {
+            const QColor c = streaks.pixelColor(260, y);
+            if (c.alpha() > 128 && c.saturation() > 60)
+                hues.insert(c.hue() / 30);
+        }
+        qInfo("hue groups across the stroke after the bands: %d", int(hues.size()));
+        QVERIFY2(hues.size() >= 3, qPrintable(QString::number(hues.size())));
+    }
+
+    void bristleContactFollowsPressure()
+    {
+        // Light pressure: few, gathered bristles (narrow, sparse); full pressure: all, spread.
+        BrushSettings s = bristleBrush();
+        s.bristleLengthJitter = 0.8;
+        const QImage light = render(s, line({20, 100}, {380, 100}, 90, 0.25), canvas());
+        const QImage firm = render(s, line({20, 100}, {380, 100}, 90, 1.0), canvas());
+        const QRect core(60, 70, 280, 61);
+        auto width = [](const QImage &img) {
+            int top = 1000, bottom = -1;
+            for (int y = 0; y < img.height(); ++y)
+                if (qAlpha(img.pixel(200, y)) > 64) {
+                    top = std::min(top, y);
+                    bottom = std::max(bottom, y);
+                }
+            return bottom - top + 1;
+        };
+        qInfo("painted pixels: light %d, firm %d; width light %d, firm %d", painted(light, core, 64), painted(firm, core, 64),
+              width(light), width(firm));
+        QVERIFY(painted(firm, core, 64) > 1.5 * painted(light, core, 64));
+        QVERIFY(width(light) < 0.75 * width(firm));
+        // Without pressure data (mouse) every bristle touches, fully spread.
+        auto mouse = line({20, 100}, {380, 100}, 90, 0.25);
+        for (StrokeSample &t : mouse)
+            t.hasPressure = false;
+        QCOMPARE(render(s, mouse, canvas()), firm);
+    }
+
+    void bristleStreaksRunAlongTheStroke()
+    {
+        BrushSettings s = bristleBrush();
+        s.bristleCount = 30;
+        const QImage img = render(s, line({20, 100}, {380, 100}, 90), canvas());
+        double along = 0, across = 0;
+        for (int y = 85; y < 115; ++y)
+            for (int x = 60; x < 340; ++x) {
+                along += std::abs(qAlpha(img.pixel(x + 1, y)) - qAlpha(img.pixel(x, y)));
+                across += std::abs(qAlpha(img.pixel(x, y + 1)) - qAlpha(img.pixel(x, y)));
+            }
+        qInfo("bristle streaks: change along %.0f, across %.0f", along, across);
+        QVERIFY(along * 2.5 < across);
+    }
+
+    void bristleOnTilesSelectionsAndSeeds()
+    {
+        QImage clip(400, 200, QImage::Format_Grayscale8);
+        clip.fill(0);
+        {
+            QPainter p(&clip);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(Qt::white);
+            p.drawEllipse(QRectF(40, 20, 300, 150));
+        }
+        QImage bg = canvas();
+        {
+            QPainter p(&bg);
+            for (int i = 0; i < 12; ++i)
+                p.fillRect(QRect(i * 34, 0, 17, 200), QColor::fromHsv(i * 30, 220, 230));
+        }
+        std::vector<StrokeSample> seam;
+        for (int i = 0; i <= 60; ++i)
+            seam.push_back(sample(20 + i * 6.0, i < 30 ? 64.0 : 128.0 - (i - 30) * 2.1, 0.3 + 0.7 * (i % 10) / 10.0, i * 4.0));
+        for (const QString &id : {QStringLiteral("builtin.round-bristle"), QStringLiteral("builtin.flat-bristle"),
+                                  QStringLiteral("builtin.dry-brush")}) {
+            const BrushSettings s = BrushPresets::builtIn(id)->settings;
+            for (const QImage &mask : {QImage(), clip}) {
+                QImage dense = bg.copy();
+                TiledImage tiled = TiledImage::fromImage(bg);
+                TileSnapshot db, tb;
+                StrokeEngine a(s, Ink, 7, 0), b(s, Ink, 7, 0);
+                if (!mask.isNull()) {
+                    a.setClipMask(mask);
+                    b.setClipMask(mask);
+                }
+                a.begin(dense, seam.front(), db);
+                b.begin(tiled, seam.front(), tb);
+                for (size_t i = 1; i < seam.size(); ++i) {
+                    a.moveTo(dense, seam[i], db);
+                    b.moveTo(tiled, seam[i], tb);
+                }
+                a.finish(dense, db);
+                b.finish(tiled, tb);
+                QVERIFY2(validPremultiplied(dense), qPrintable(id));
+                QVERIFY2(tiled == dense, qPrintable(id));
+                if (!mask.isNull())
+                    for (int y = 0; y < 200; y += 3)
+                        for (int x = 0; x < 400; x += 3)
+                            if (qGray(clip.pixel(x, y)) == 0)
+                                QVERIFY(dense.pixel(x, y) == bg.pixel(x, y));
+                tb.swapWith(tiled);
+                QVERIFY(tiled == bg);
+            }
+            QCOMPARE(render(s, seam, bg, 3), render(s, seam, bg, 3));
+            QVERIFY(differingPixels(render(s, seam, bg, 3), render(s, seam, bg, 4)) > 100);
+        }
+    }
+
+    void bristlePresetGoldenImages()
+    {
+        QImage base = canvas(QSize(400, 200), QColor(244, 240, 232));
+        {
+            QPainter p(&base);
+            p.fillRect(QRect(150, 0, 100, 200), QColor(200, 60, 40));
+        }
+        for (const QString &id : {QStringLiteral("round-bristle"), QStringLiteral("flat-bristle"), QStringLiteral("dry-brush")}) {
+            const BrushPreset *p = BrushPresets::builtIn(QStringLiteral("builtin.") + id);
+            QVERIFY2(p, qPrintable(id));
+            QImage img = base.copy();
+            paint(img, p->settings, wobble(), 7, QColor(40, 70, 160));
             checkGolden(id, img);
         }
     }

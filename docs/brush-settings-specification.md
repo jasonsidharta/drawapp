@@ -23,7 +23,8 @@ A property counts as **implemented** only if it changes rendering: `tst_brusheng
 | Ink and Stroke | 4 | 0 | 4 |
 | Dry Media | 9 | 0 | 9 |
 | Mixing | 3 | 0 | 3 |
-| **Total** | **112** | **24** | **136** |
+| Bristles | 8 | 0 | 8 |
+| **Total** | **120** | **24** | **144** |
 
 The two engine selectors (`blend`, `stamp`) are listed under Engine and not counted.
 
@@ -1958,6 +1959,130 @@ Makes the parameter follow sensors (pressure, tilt, direction, speed, distance, 
 - Cost: Per dab: one table look-up per sensor (256-entry curve tables built once per stroke).
 - Tests: tst_brushengine::dynamics*, tst_brushengine::everyImplementedPropertyChangesRendering
 
+## Bristles
+
+### Bristles — `bristleCount`
+
+How many bristles the brush has. Few bristles leave separate streaks; many fill the stroke.
+
+- Status: implemented (Brush Studio and quick panel)
+- Type: integer
+- Range: 1 … 512
+- Default: 48
+- Engines: 
+- Sensors: —
+- Serialisation: `bristleCount`: JSON integer
+- Rendering: Bristles at seeded places in the footprint (the dab's size, roundness and angle).
+- Cost: Per dab: one anti-aliased segment per bristle (cost grows with bristles × segment area).
+- Tests: tst_brushmedia::bristle*
+
+### Bristle thickness — `bristleThickness`
+
+Width of each bristle as a share of the brush size (at least 0.8 px).
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0.5 … 50 %
+- Default: 5 %
+- Engines: 
+- Sensors: —
+- Serialisation: `bristleThickness`: JSON number
+- Rendering: Capsule width of each bristle's segment.
+- Cost: Grows with the width.
+- Tests: tst_brushmedia::bristle*
+
+### Spread with pressure — `bristleSpread`
+
+How much pressure splays the bristles: light pressure gathers them into a narrow tip, full pressure spreads them over the whole footprint.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 40 %
+- Engines: 
+- Sensors: —
+- Has an effect with: A pen that reports pressure
+- Serialisation: `bristleSpread`: JSON number
+- Rendering: Footprint × (1 − spread × (1 − pressure)).
+- Cost: None.
+- Tests: tst_brushmedia::bristle*
+
+### Bristle lengths — `bristleLengthJitter`
+
+How different the bristles' lengths are: with light pressure only the longest touch the canvas.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 50 %
+- Engines: 
+- Sensors: —
+- Has an effect with: A pen that reports pressure
+- Serialisation: `bristleLengthJitter`: JSON number
+- Rendering: Each bristle touches once pressure passes its threshold (0 .. this value), rising over a 15 % range.
+- Cost: None.
+- Tests: tst_brushmedia::bristle*
+
+### Paint load — `bristleLoad`
+
+How much paint the bristles carry at the start of the stroke: low values give a dry brush that breaks up at once.
+
+- Status: implemented (Brush Studio and quick panel)
+- Type: number
+- Range: 0 … 100 %
+- Default: 100 %
+- Engines: 
+- Sensors: —
+- Serialisation: `bristleLoad`: JSON number
+- Rendering: Each bristle's reservoir starts at load × (0.75 .. 1).
+- Cost: None.
+- Tests: tst_brushmedia::bristle*
+
+### Paint depletion — `bristleDepletion`
+
+How fast bristles run out of paint as they paint (each at its own rate), so a long stroke dries out into separate streaks.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 20 %
+- Engines: 
+- Sensors: —
+- Serialisation: `bristleDepletion`: JSON number
+- Rendering: Reservoir × (1 − depletion × (0.5 .. 1.5))^(distance painted / 100 px); a drying bristle skips the paper's valleys first, then fades.
+- Cost: Per bristle and dab: one power.
+- Tests: tst_brushmedia::bristle*
+
+### Colour pickup — `bristlePickup`
+
+How fast each bristle takes on the colour of the paint it crosses (as it was before the stroke), so the stroke drags multicoloured streaks through existing paint.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 0 %
+- Engines: 
+- Sensors: —
+- Serialisation: `bristlePickup`: JSON number
+- Rendering: Per 10 px painted, the bristle colour moves this share towards the colour under it (× its alpha).
+- Cost: Per bristle and dab: one pixel read and one mix.
+- Tests: tst_brushmedia::bristle*
+
+### Bristle wobble — `bristleWobble`
+
+Sideways jitter of each bristle from dab to dab, as a share of the space between bristles.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 10 %
+- Engines: 
+- Sensors: —
+- Serialisation: `bristleWobble`: JSON number
+- Rendering: Adds a seeded offset across the footprint per bristle and dab.
+- Cost: None.
+- Tests: tst_brushmedia::bristle*
+
 ## Engine
 
 ### Engine — `blend`
@@ -1981,12 +2106,12 @@ What one dab of a paint or erase brush is: the tip, a spray of particles, hatchi
 
 - Status: implemented (Brush Studio)
 - Type: option
-- Range: Tip / Spray / Hatching / Dry media
+- Range: Tip / Spray / Hatching / Dry media / Bristles
 - Default: Tip
 - Engines: paint, erase, spray, hatching
 - Sensors: —
 - Has an effect with: Paint or erase engine
-- Serialisation: `stamp`: one of "tip", "spray", "hatching", "dry"
+- Serialisation: `stamp`: one of "tip", "spray", "hatching", "dry", "bristle"
 - Rendering: Spray scatters round particles over the dab's disc; hatching draws parallel document-space lines inside the tip; dry media deposits the tip only where the pressure-dependent penetration reaches into the paper (the texture, in document space).
 - Cost: Spray: per particle O(particle area). Hatching: as the tip plus one distance per pixel. Dry media: as the tip plus one or two texture samples per pixel.
 - Tests: tst_brushengine::sprayAndHatching, tst_brushmedia (dry media)

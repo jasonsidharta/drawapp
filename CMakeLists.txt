@@ -41,6 +41,7 @@ add_library(drawcore STATIC
     src/core/CoverageDeposit.cpp src/core/CoverageDeposit.h
     src/core/CarriedDeposit.cpp src/core/CarriedDeposit.h
     src/core/DryDeposit.cpp src/core/DryDeposit.h
+    src/core/BristleDeposit.cpp src/core/BristleDeposit.h
     src/core/StrokeSmoother.cpp src/core/StrokeSmoother.h
     src/core/StrokeSpacer.cpp src/core/StrokeSpacer.h
     src/core/TiledImage.cpp src/core/TiledImage.h

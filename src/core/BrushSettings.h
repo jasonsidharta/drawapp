@@ -20,7 +20,9 @@ enum class BrushBlend { Paint, Erase, Smudge, WetPaint };
 //   Hatching: parallel lines fixed in document space, inside the tip
 //   Dry:      dry media (milestone 11): the tip deposits only where the pressure-dependent
 //             penetration reaches into the paper's tooth (graphite, charcoal, chalk, pastel)
-enum class BrushStamp { Tip, Spray, Hatching, Dry };
+//   Bristle:  bristles (milestone 11): each bristle of the footprint draws its own path with its
+//             own paint load, contact and picked-up colour
+enum class BrushStamp { Tip, Spray, Hatching, Dry, Bristle };
 
 // How the dabs of one stroke combine (see StrokeEngine):
 //   Uniform: a pixel's stroke coverage is the largest any dab gives it, so overlaps and
@@ -212,6 +214,19 @@ struct BrushSettings
     double dryEdgeBreakup = 0.0;                  // the mark's rim crumbles
     double dryGrit = 0.0;                         // share of pixels the pigment skips (per stroke)
     double dryTiltDepth = 1.0;                    // penetration × this at full tilt (side shading)
+
+    // --- Bristles --- (stamp Bristle; research/m11-brush-architecture.md, A5)
+    // The footprint is the dab's size, roundness and angle (a flat brush is a thin ellipse turned
+    // across the stroke). Bristles sit at seeded places in it, each drawing its own anti-aliased
+    // path from dab to dab.
+    int bristleCount = 48;
+    double bristleThickness = 0.05;   // each bristle's width as a share of the dab diameter (≥ 0.8 px)
+    double bristleSpread = 0.4;       // how far pressure splays the bristles (0: always fully spread)
+    double bristleLengthJitter = 0.5; // spread of bristle lengths: light pressure touches only the longest
+    double bristleLoad = 1.0;         // paint on the bristles at the start of the stroke
+    double bristleDepletion = 0.2;    // paint each bristle loses per 100 px it paints
+    double bristlePickup = 0.0;       // how fast bristles take on the colour of the paint they cross
+    double bristleWobble = 0.1;       // sideways jitter of each bristle, as a share of its spacing
 
     // --- Dynamics: parameters following sensors (BrushDynamics.h) ---
     DynamicsSet dynamics;

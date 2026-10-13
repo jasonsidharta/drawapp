@@ -362,6 +362,74 @@ std::vector<BrushPreset> makeBuiltIns()
         s.smudgePickup = 0.08;
         list.push_back(preset("smear-knife", "Smear Knife", s));
     }
+
+    // --- Milestone 11: bristle brushes (BristleDeposit) ---
+    // Round oil brush: loaded, splays with pressure, picks up some of the paint it crosses.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Bristle;
+        s.size = 34;
+        s.roundness = 0.9;
+        s.spacing = 0.05;
+        s.flow = 0.85;
+        s.accumulation = Accumulation::BuildUp;
+        s.pressureSize = {true, 0.55, 1.0};
+        s.bristleCount = 60;
+        s.bristleThickness = 0.045;
+        s.bristleSpread = 0.5;
+        s.bristleLengthJitter = 0.5;
+        s.bristleLoad = 1.0;
+        s.bristleDepletion = 0.15;
+        s.bristlePickup = 0.25;
+        s.pigmentMixing = true;
+        s.smoothing = 15;
+        list.push_back(preset("round-bristle", "Round Bristle", s));
+    }
+    // Flat brush: a thin footprint turned across the stroke, streaky, runs dry on long strokes.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Bristle;
+        s.size = 44;
+        s.roundness = 0.18;
+        s.angle = 90;
+        s.followDirection = true;
+        s.spacing = 0.04;
+        s.flow = 0.9;
+        s.accumulation = Accumulation::BuildUp;
+        s.pressureSize = {true, 0.7, 1.0};
+        s.bristleCount = 40;
+        s.bristleThickness = 0.035;
+        s.bristleSpread = 0.2;
+        s.bristleLengthJitter = 0.6;
+        s.bristleLoad = 0.9;
+        s.bristleDepletion = 0.3;
+        s.bristlePickup = 0.3;
+        s.pigmentMixing = true;
+        s.smoothing = 15;
+        list.push_back(preset("flat-bristle", "Flat Bristle", s));
+    }
+    // Dry brush: little paint, skips over canvas grain from the start.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Bristle;
+        s.size = 48;
+        s.roundness = 0.35;
+        s.angle = 90;
+        s.followDirection = true;
+        s.spacing = 0.04;
+        s.flow = 0.8;
+        s.accumulation = Accumulation::BuildUp;
+        s.pressureSize = {true, 0.7, 1.0};
+        s.texture = QStringLiteral("rough");
+        s.textureStrength = 0.6;
+        s.bristleCount = 90;
+        s.bristleThickness = 0.025;
+        s.bristleSpread = 0.15;
+        s.bristleLengthJitter = 0.7;
+        s.bristleLoad = 0.55;
+        s.bristleDepletion = 0.35;
+        list.push_back(preset("dry-brush", "Dry Brush", s));
+    }
     return list;
 }
 
