@@ -13,6 +13,7 @@
 #include "TiledImage.h"
 #include "TileSnapshot.h"
 
+#include <QCryptographicHash>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -1403,6 +1404,113 @@ private slots:
                 QVERIFY2(closeImages(img, ref, 3, 0.01, &why), qPrintable(name + ": " + why));
             }
         }
+    }
+
+    void milestone10EngineReference()
+    {
+        // Milestone 11 rebuilds the engine around deposit strategies (research/m11-brush-architecture.md,
+        // A1, A9). Every existing brush must keep its exact pixels, not merely stay within the golden
+        // images' tolerance. This corpus was rendered by the milestone 10 engine (commit dcde383) and
+        // stored as SHA-256 hashes; any change of any pixel fails. The corpus is fixed: the eight
+        // milestone 10 built-in presets by id, both values of every milestone 9 property scenario
+        // (ids recorded in the file), selections, airbrush timing, transparency and tile seams.
+        // DRAWAPP_WRITE_ENGINE_REFERENCE=1 rewrote it once, from the unmodified engine.
+        const QString path = goldenPath(QStringLiteral("m10-engine-reference.json"));
+        const bool write = qEnvironmentVariableIntValue("DRAWAPP_WRITE_ENGINE_REFERENCE") == 1;
+        QJsonObject stored;
+        if (!write) {
+            QFile in(path);
+            QVERIFY2(in.open(QIODevice::ReadOnly), "m10-engine-reference.json is missing");
+            stored = QJsonDocument::fromJson(in.readAll()).object();
+            QVERIFY(!stored.isEmpty());
+        }
+        auto hash = [](const QImage &img) {
+            QCryptographicHash h(QCryptographicHash::Sha256);
+            for (int y = 0; y < img.height(); ++y)
+                h.addData(QByteArrayView(reinterpret_cast<const char *>(img.constScanLine(y)), img.width() * 4));
+            return QString::fromLatin1(h.result().toHex());
+        };
+        QImage clip(400, 200, QImage::Format_Grayscale8);
+        clip.fill(0);
+        {
+            QPainter p(&clip);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(255, 255, 255));
+            p.drawEllipse(QRectF(60, 30, 230, 140));
+        }
+        const QImage transparent = transparentCanvas(QSize(400, 200));
+        QJsonObject computed;
+        auto add = [&](const QString &name, const BrushSettings &settings, const std::vector<StrokeSample> &stroke,
+                       const QImage &background, const QImage &mask = QImage()) {
+            computed.insert(name, hash(render(settings, stroke, background, 7, Paint, mask)));
+        };
+        const QStringList presetIds{"builtin.sketch-pencil", "builtin.clean-ink", "builtin.solid-round",
+                                    "builtin.soft-airbrush", "builtin.textured-paint", "builtin.blend-smudge",
+                                    "builtin.hard-eraser", "builtin.soft-eraser"};
+        for (const QString &id : presetIds) {
+            const BrushPreset *p = BrushPresets::builtIn(id);
+            QVERIFY2(p, qPrintable(id));
+            add(id + "/standard/stripes", p->settings, standardStroke(), stripes());
+            add(id + "/standard/transparent", p->settings, standardStroke(), transparent);
+            add(id + "/seam/stripes", p->settings, seamStroke(), stripes());
+            add(id + "/seam/transparent/selection", p->settings, seamStroke(), transparent, clip);
+            add(id + "/standard/stripes/selection", p->settings, standardStroke(), stripes(), clip);
+        }
+        add("golden-wet-ink/standard", goldenBrush(), standardStroke(), stripes());
+        add("golden-wet-ink/seam/selection", goldenBrush(), seamStroke(), stripes(), clip);
+        // Every property scenario, both values, on the engine it is tested on (as
+        // everyImplementedPropertyChangesRendering), plus each on transparency.
+        const auto table = scenarios();
+        const QJsonArray recordedIds = stored.value("scenarioIds").toArray();
+        QStringList ids;
+        if (write) {
+            for (const BrushProperty &p : BrushProperties::all())
+                if (p.implemented && table.count(p.id))
+                    ids.append(p.id);
+            ids.append({"blend", "stamp"});
+        } else {
+            for (const QJsonValue &v : recordedIds)
+                ids.append(v.toString());
+        }
+        for (const QString &id : ids) {
+            const BrushProperty *p = BrushProperties::find(id);
+            QVERIFY2(p, qPrintable(id));
+            const auto it = table.find(id);
+            QVERIFY2(it != table.end(), qPrintable(id));
+            BrushSettings base = baseSettings();
+            applyEngine(base, testEngine(p->engines));
+            it->second.setup(base);
+            base = base.sanitized();
+            BrushSettings changed = base;
+            p->set(changed, it->second.changed);
+            changed = changed.sanitized();
+            add("property/" + id + "/default", base, standardStroke(), stripes());
+            add("property/" + id + "/changed", changed, standardStroke(), stripes());
+            add("property/" + id + "/changed/transparent", changed, seamStroke(), transparent);
+        }
+        if (write) {
+            QJsonObject out = computed;
+            out.insert("scenarioIds", QJsonArray::fromStringList(ids));
+            out.insert("engine", QStringLiteral("milestone 10, commit dcde383"));
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            f.write(QJsonDocument(out).toJson(QJsonDocument::Indented));
+            qInfo("Wrote %d reference hashes", int(computed.size()));
+            return;
+        }
+        int compared = 0;
+        QStringList differ;
+        for (auto it = stored.begin(); it != stored.end(); ++it) {
+            if (it.key() == "scenarioIds" || it.key() == "engine")
+                continue;
+            QVERIFY2(computed.contains(it.key()), qPrintable("not rendered: " + it.key()));
+            if (computed.value(it.key()) != it.value())
+                differ.append(it.key());
+            ++compared;
+        }
+        QVERIFY2(differ.isEmpty(), qPrintable(QString::number(differ.size()) + " differ: " + differ.mid(0, 12).join(", ")));
+        qInfo("Milestone 10 engine reference: %d renders identical", compared);
     }
 
     void builtInPresetsStillRender()
