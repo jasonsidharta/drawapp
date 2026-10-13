@@ -152,6 +152,7 @@ QVariantList BrushLibrary::presets() const
             {QStringLiteral("modified"), !sameIgnoringSize(working, savedSettings(id))},
             {QStringLiteral("savedChanges"), builtIn && m_data.overrides.count(id) > 0},
             {QStringLiteral("blend"), QLatin1String(blendName(working.blend))},
+            {QStringLiteral("category"), BrushPresets::category(working)},
             {QStringLiteral("thumbnail"), thumbnailUrl(id)},
             {QStringLiteral("current"), id == currentId()},
             {QStringLiteral("inUse"), id == m_paintId || id == m_eraserId},

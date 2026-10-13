@@ -255,6 +255,14 @@ void applyEngine(BrushSettings &s, unsigned engine)
     }
 }
 
+// Exactly this engine: blend and stamp both set (the registry audit).
+void forceEngine(BrushSettings &s, unsigned engine)
+{
+    s.blend = BrushBlend::Paint;
+    s.stamp = BrushStamp::Tip;
+    applyEngine(s, engine);
+}
+
 struct Scenario
 {
     std::function<void(BrushSettings &)> setup; // preconditions, applied to both renders
@@ -1288,6 +1296,57 @@ private slots:
         QCOMPARE(checked, BrushProperties::implementedCount() + 2); // + the two engine selectors
     }
 
+    void everyPropertyChangesRenderingOnEveryEngineItClaims()
+    {
+        // The registry audit (milestone 11): a property listed for an engine must change that
+        // engine's pixels, not only the first engine's. Each property's scenario runs on every
+        // engine it claims; the engine is applied again after the scenario's setup so the setup
+        // cannot switch it.
+        const auto table = scenarios();
+        const auto stroke = standardStroke();
+        // Pairs whose effect needs a precondition on that engine (the shared scenarios are fixed by
+        // the milestone 10 reference): bristles mix only colour they pick up; dry media always use a
+        // paper, so a texture change must name a different one.
+        const std::map<QString, Scenario> engineScenarios = {
+            {"pigmentMixing@bristles", {[](BrushSettings &s) { s.bristlePickup = 0.8; }, true}},
+            {"texture@dry media", {[](BrushSettings &s) { s.textureStrength = 0.6; }, QStringLiteral("rough")}},
+        };
+        int checked = 0;
+        QStringList noEffect;
+        for (const BrushProperty &p : BrushProperties::all()) {
+            if (!p.implemented || p.group == QLatin1String("Engine"))
+                continue;
+            const auto it = table.find(p.id);
+            QVERIFY2(it != table.end(), qPrintable(p.id));
+            for (unsigned bit = 1; bit <= unsigned(EngineAll); bit <<= 1) {
+                if (!(p.engines & bit))
+                    continue;
+                const auto special = engineScenarios.find(p.id + "@" + BrushProperties::engineName(bit));
+                const Scenario &scenario = special != engineScenarios.end() ? special->second : it->second;
+                BrushSettings base = baseSettings();
+                forceEngine(base, bit);
+                scenario.setup(base);
+                forceEngine(base, bit);
+                base = base.sanitized();
+                if (!BrushProperties::appliesTo(p, base))
+                    continue; // the scenario's setup needs another engine (it would not show here)
+                BrushSettings changed = base;
+                p.set(changed, scenario.changed);
+                changed = changed.sanitized();
+                if (changed == base)
+                    continue;
+                const bool whileDrawing = scenario.whileDrawing;
+                const QImage a = whileDrawing ? renderUnfinished(base, stroke, stripes()) : render(base, stroke, stripes());
+                const QImage b = whileDrawing ? renderUnfinished(changed, stroke, stripes()) : render(changed, stroke, stripes());
+                ++checked;
+                if (differingPixels(a, b) == 0)
+                    noEffect << QStringLiteral("%1 on %2").arg(p.id, BrushProperties::engineName(bit));
+            }
+        }
+        qInfo("Property-engine pairs with a demonstrated rendering effect: %d", checked - int(noEffect.size()));
+        QVERIFY2(noEffect.isEmpty(), qPrintable(QString::number(noEffect.size()) + " without effect: " + noEffect.join(", ")));
+    }
+
     void specificationIsCurrent()
     {
         const QString path = QStringLiteral(DRAWAPP_SOURCE_DIR "/docs/brush-settings-specification.md");
@@ -1363,6 +1422,64 @@ private slots:
         QCOMPARE(back.texture, QStringLiteral("marble"));
         QVERIFY(!warnings.isEmpty());
         QVERIFY(validPremultiplied(render(back, standardStroke(), stripes())));
+    }
+
+    void milestone11LibrarySampleIsStable()
+    {
+        // A library and a single preset written by milestone 11, kept as committed samples
+        // (tests/golden/m11-library-sample.json, m11-grass.drawbrush). The file versions stay at 2
+        // (research/m11-brush-architecture.md, A2): presets that use only older engines remain
+        // readable by milestone 9 and 10, new keys go to their `extra`, and a preset of a new
+        // engine is skipped individually by those builds ("unknown option"). That cross-version
+        // check runs these same files through the milestone 10 decoder (docs: final report).
+        BrushPresetStore::Data data;
+        auto custom = [&](const char *builtIn, const char *id, const char *name) {
+            BrushPreset p = *BrushPresets::builtIn(QStringLiteral("builtin.") + QLatin1String(builtIn));
+            p.id = QLatin1String(id);
+            p.builtIn = false;
+            p.settings.name = QLatin1String(name);
+            data.custom.push_back(p);
+        };
+        custom("solid-round", "custom.1", "Old engine, no new keys");
+        custom("fine-liner", "custom.2", "Old engine with milestone 11 keys");
+        custom("grass", "custom.3", "New stamp (grass)");
+        custom("watercolor-wash", "custom.4", "New blend (watercolour)");
+        custom("graphite-hb", "custom.5", "New stamp (dry media)");
+        data.favorites = {QStringLiteral("custom.1"), QStringLiteral("custom.3")};
+        data.paintId = QStringLiteral("custom.3");
+        data.eraserId = QStringLiteral("builtin.hard-eraser");
+        const QByteArray library = BrushPresetStore::encode(data);
+        const QByteArray single = BrushPresetFile::encode(data.custom[2].settings);
+        for (const auto &[name, bytes] : {std::pair{QStringLiteral("m11-library-sample.json"), library},
+                                          std::pair{QStringLiteral("m11-grass.drawbrush"), single}}) {
+            const QString path = goldenPath(name);
+            if (writeMissingGolden(path)) {
+                QFile out(path);
+                QVERIFY(out.open(QIODevice::WriteOnly | QIODevice::Truncate));
+                out.write(bytes);
+            }
+            QFile in(path);
+            QVERIFY2(in.open(QIODevice::ReadOnly), qPrintable("missing " + path + " (run with DRAWAPP_WRITE_NEW_GOLDEN=1)"));
+            QCOMPARE(QJsonDocument::fromJson(in.readAll()), QJsonDocument::fromJson(bytes));
+        }
+        QCOMPARE(QJsonDocument::fromJson(library).object().value("version").toInt(), 2);
+        // Milestone 11 reads everything back.
+        BrushPresetStore::Data back;
+        QString error;
+        QStringList warnings;
+        QVERIFY2(BrushPresetStore::decode(library, &back, &error, &warnings), qPrintable(error));
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join("; ")));
+        QCOMPARE(int(back.custom.size()), 5);
+        for (size_t i = 0; i < back.custom.size(); ++i)
+            QVERIFY2(back.custom[i].settings == data.custom[i].settings, qPrintable(back.custom[i].id));
+        BrushSettings one;
+        QVERIFY2(BrushPresetFile::decode(single, &one, &error, &warnings), qPrintable(error));
+        QVERIFY(one == data.custom[2].settings);
+        // Presets that use only old features write no milestone 11 keys (defaults are omitted).
+        const QJsonArray presets = QJsonDocument::fromJson(library).object().value("custom").toArray();
+        QVERIFY(!presets.at(0).toObject().value("settings").toObject().contains("procCount"));
+        QVERIFY(!presets.at(0).toObject().value("settings").toObject().contains("curveInterpolation"));
+        QVERIFY(presets.at(1).toObject().value("settings").toObject().contains("curveInterpolation"));
     }
 
     void libraryVersion1Migrates()

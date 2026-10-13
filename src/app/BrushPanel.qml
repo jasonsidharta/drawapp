@@ -14,6 +14,11 @@ Item {
     readonly property var cur: lib.current
     readonly property bool wide: width >= 620
     property bool favoritesOnly: false
+    // Search: presets whose name or category contains the text (any case).
+    property string searchText: ""
+    readonly property var shownPresets: lib.presets.filter(p => (!favoritesOnly || p.favorite)
+        && (searchText.length === 0 || p.name.toLowerCase().indexOf(searchText.toLowerCase()) >= 0
+            || p.category.toLowerCase().indexOf(searchText.toLowerCase()) >= 0))
     property bool advanced: false
     // The full editor (Brush Studio) was asked for.
     signal studioRequested()
@@ -184,13 +189,44 @@ Item {
                     onClicked: panel.favoritesOnly = true
                 }
             }
+            TextField {
+                objectName: "brushSearch"
+                Layout.fillWidth: true
+                placeholderText: "Search brushes"
+                text: panel.searchText
+                onTextChanged: panel.searchText = text
+            }
+            // Grouped by category, in the library's order.
             Repeater {
-                model: panel.lib.presets.filter(p => !panel.favoritesOnly || p.favorite)
-                delegate: PresetEntry {}
+                model: panel.lib.categories
+                delegate: ColumnLayout {
+                    id: group
+                    required property string modelData
+                    readonly property var entries: panel.shownPresets.filter(p => p.category === group.modelData)
+                    Layout.fillWidth: true
+                    spacing: 4
+                    visible: entries.length > 0
+                    Label {
+                        objectName: "category_" + group.modelData
+                        text: group.modelData
+                        opacity: 0.7
+                        font.pixelSize: 12
+                        topPadding: 4
+                    }
+                    Repeater {
+                        model: group.entries
+                        delegate: PresetEntry {}
+                    }
+                }
             }
             Hint {
                 visible: panel.favoritesOnly && !panel.lib.presets.some(p => p.favorite)
                 text: "No favourites yet: tap ☆ next to a brush."
+            }
+            Hint {
+                objectName: "noSearchResults"
+                visible: panel.searchText.length > 0 && panel.shownPresets.length === 0
+                text: "No brush matches “" + panel.searchText + "”."
             }
         }
 
@@ -440,8 +476,8 @@ Item {
                     ComboBox {
                         id: textureBox
                         Layout.fillWidth: true
-                        readonly property var ids: ["", "paper", "canvas"]
-                        model: ["None", "Paper", "Canvas"]
+                        readonly property var ids: ["", "paper", "canvas", "laid", "rough", "smooth"]
+                        model: ["None", "Paper", "Canvas", "Laid paper", "Rough paper", "Smooth paper"]
                         currentIndex: Math.max(0, ids.indexOf(panel.cur.texture))
                         onActivated: index => {
                             panel.lib.setValue("texture", ids[index])

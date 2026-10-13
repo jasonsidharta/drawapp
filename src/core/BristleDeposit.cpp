@@ -138,7 +138,7 @@ void BristleDeposit::dab(StrokeSurface &image, const DabParams &dab, const QRect
     image.capture(before, bounds);
 
     const bool paper = m_ctx.texture != nullptr;
-    const double tooth = st.textureStrength;
+    const double tooth = dab.textureStrength; // the setting × its dynamics
     for (size_t i = 0; i < m_bristles.size(); ++i) {
         Bristle &b = m_bristles[i];
         const QPointF from = b.placed ? b.previous : now[i];

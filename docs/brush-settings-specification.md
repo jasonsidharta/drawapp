@@ -103,7 +103,7 @@ Squashes the tip across its angle; 100 % keeps it round.
 - Type: number
 - Range: 5 … 100 %
 - Default: 100 %
-- Engines: paint, erase, smudge, wet paint, hatching, dry media, bristles, watercolour, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, smudge, wet paint, hatching, dry media, bristles, watercolour
 - Sensors: —
 - Serialisation: `roundness`: JSON number
 - Rendering: The tip is sampled at (u, w / roundness) in its own rotated frame.
@@ -180,7 +180,7 @@ Share of the tip's pixels each dab paints; the rest are left out at random, diff
 - Type: number
 - Range: 1 … 100 %
 - Default: 100 %
-- Engines: paint, erase, smudge, wet paint, hatching, dry media, watercolour
+- Engines: paint, erase, hatching, dry media
 - Sensors: —
 - Serialisation: `tipDensity`: JSON number
 - Rendering: Per pixel and dab, a hash of position and dab index decides whether the pixel is painted.
@@ -444,7 +444,7 @@ A tip that follows direction uses the pen's azimuth only above this tilt; nearer
 - Type: number
 - Range: 0 … 60 °
 - Default: 15 °
-- Engines: all
+- Engines: paint, erase, smudge, wet paint, hatching, dry media, bristles, watercolour, strands, grass, foliage, splatter, pattern
 - Sensors: tilt
 - Has an effect with: Follow direction, a pen that reports tilt
 - Serialisation: `tiltAzimuthThreshold`: JSON number
@@ -522,7 +522,7 @@ The most paint a stroke can lay down. Overlaps within one stroke never exceed it
 - Type: number
 - Range: 1 … 100 %
 - Default: 100 %
-- Engines: all
+- Engines: paint, erase, spray, hatching, dry media, bristles, watercolour, strands, grass, foliage, splatter, pattern
 - Sensors: —
 - Serialisation: `opacity`: JSON number
 - Rendering: Ceiling C of the coverage model, rounded to a whole 8-bit level.
@@ -553,7 +553,7 @@ Uniform: overlaps within a stroke never darken. Build up: slow or repeated passe
 - Type: option
 - Range: Uniform / Build up
 - Default: Uniform
-- Engines: paint, erase, spray, hatching, dry media, bristles, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, spray, hatching, dry media, strands, grass, foliage, splatter, pattern
 - Sensors: —
 - Serialisation: `accumulation`: one of "uniform", "buildUp"
 - Rendering: Uniform S = max(S, v·C); build-up S += v·f·(C − S) with stochastic rounding.
@@ -669,7 +669,7 @@ Multiply scales the paint by the grain; tooth removes paint in the valleys first
 - Type: option
 - Range: Multiply / Tooth (pressure fills it)
 - Default: Multiply
-- Engines: paint, erase, smudge, wet paint, spray, hatching, bristles, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, spray, hatching, strands, grass, foliage, splatter, pattern
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureMode`: one of "multiply", "subtract"
@@ -749,7 +749,7 @@ Applies the grain to every dab instead of the finished stroke, so overlapping da
 - Type: boolean
 - Range: on / off
 - Default: off
-- Engines: paint, erase, spray, hatching, bristles, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, spray, hatching, strands, grass, foliage, splatter, pattern
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureEachDab`: true/false
@@ -765,7 +765,7 @@ The grain moves and turns with each dab (stamped), instead of staying fixed on t
 - Type: boolean
 - Range: on / off
 - Default: off
-- Engines: paint, erase, spray, hatching, bristles, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, hatching, strands, grass, foliage, splatter, pattern
 - Sensors: —
 - Has an effect with: A texture, texture each dab
 - Serialisation: `textureMoving`: true/false
@@ -875,7 +875,7 @@ Squashes each dab by up to this share, at random.
 - Type: number
 - Range: 0 … 100 %
 - Default: 0 %
-- Engines: paint, erase, smudge, wet paint, hatching, dry media, bristles, watercolour, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, smudge, wet paint, hatching, dry media, bristles, watercolour
 - Sensors: —
 - Serialisation: `roundnessJitter`: JSON number
 - Rendering: Roundness × (1 − jitter × random), at least 5 %.
@@ -937,7 +937,7 @@ Makes the parameter follow sensors (pressure, tilt, direction, speed, distance, 
 - Type: dynamics
 - Range: minimum 0 … 100 %, up to 4 sensors, curves of 2 … 16 points in 0 … 1
 - Default: {"combine":"multiply","enabled":false,"minimum":0,"sensors":[]}
-- Engines: paint, erase, smudge, wet paint, hatching, dry media, bristles, watercolour, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, smudge, wet paint, hatching, dry media, bristles, watercolour
 - Sensors: all sensors
 - Serialisation: `dynamics` → `roundness`: {enabled, minimum, combine, sensors: [{sensor, curve, range}]}
 - Rendering: Roundness × value (at least 5 %).
@@ -1746,7 +1746,7 @@ Draws the line right up to the pen while drawing and tapers the end when the pen
 - Type: boolean
 - Range: on / off
 - Default: off
-- Engines: paint, erase, spray, hatching, dry media, bristles, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, spray, hatching, dry media, strands, grass, foliage, splatter, pattern
 - Sensors: —
 - Has an effect with: End taper above 0
 - Serialisation: `taperLive`: true/false
@@ -2351,7 +2351,7 @@ Splatter drops are drawn out along their direction, and large drops throw small 
 - Status: implemented (Brush Studio)
 - Type: number
 - Range: 0 … 400 %
-- Default: 0 %
+- Default: 50 %
 - Engines: splatter
 - Sensors: —
 - Serialisation: `procStretch`: JSON number

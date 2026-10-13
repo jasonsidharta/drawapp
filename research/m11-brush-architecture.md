@@ -133,6 +133,22 @@ Presets:
   - an older build refuses a single `.drawbrush` of a new engine with the same error.
 - This is tested by decoding milestone 11 output with milestone 10's rules: the decoder in a
   milestone 10 build, run from the baseline worktree.
+- **Verified 2026-10-13 (stage 9)** with the milestone 10 decoder: a scratch program built from
+  the baseline worktree (`dcde383`) read the committed samples `tests/golden/m11-library-sample.json`
+  and `m11-grass.drawbrush` (written by milestone 11; `tst_brushengine::milestone11LibrarySampleIsStable`
+  keeps them stable):
+  - library accepted;
+  - the old-engine preset was kept;
+  - the old-engine preset with milestone 11 keys was kept, with `curveInterpolation`,
+    `smoothingSpeedAdapt` and `taperLive` in `extra`;
+  - the grass, watercolour and dry-media presets were each skipped with "Brush setting "stamp" /
+    "blend" must be a known option", and a favourite and the paint selection pointing at them were
+    dropped;
+  - the single grass `.drawbrush` was refused with "The brush file has an invalid setting: …".
+- **Limitation (downgrade):** milestone 9 and 10 write the library back without the presets they
+  skipped. Opening a milestone 11 library in an older build and changing anything there loses that
+  library's new-engine presets. The released readers cannot be changed. The final report lists
+  this.
 - Unknown keys continue to be preserved (`extra`). `BrushSettings::FormatVersion` (written as
   `settingsVersion`, informational) becomes 3.
 

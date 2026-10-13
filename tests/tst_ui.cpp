@@ -347,6 +347,54 @@ private slots:
 
     // --- brush settings and overwrite confirmation (milestone 5) ---
 
+    void brushPanelSearchAndCategories()
+    {
+        // Presets are grouped by category, and the search field narrows the list by name or
+        // category (milestone 11).
+        m_canvas->newDocument();
+        m_canvas->setTool(CanvasItem::Brush);
+        BrushLibrary *lib = m_canvas->brushes();
+        QVERIFY(lib->select(BrushPresets::defaultPaintId()));
+        const auto restore = qScopeGuard([&] {
+            if (QObject *popup = m_window->findChild<QObject *>("brushPopup"))
+                QMetaObject::invokeMethod(popup, "close");
+            QTRY_VERIFY(!find("brushPanel"));
+            lib->select(BrushPresets::defaultPaintId());
+        });
+        click("brushSettingsButton");
+        QVERIFY(waitFor("brushPanel"));
+        QVERIFY(waitFor("category_Basic"));
+        QQuickItem *search = waitFor("brushSearch");
+        QVERIFY(search);
+        QTest::mouseClick(m_window, Qt::LeftButton, Qt::NoModifier, centerOf(search));
+        QTRY_VERIFY(search->hasActiveFocus());
+        for (const char ch : QByteArray("grass"))
+            QTest::keyClick(m_window, ch);
+        QTRY_VERIFY(find("preset_builtin.grass"));
+        QVERIFY(find("category_Nature & Patterns"));
+        QVERIFY(!find("category_Basic"));
+        QVERIFY(!find("preset_builtin.solid-round"));
+        // By category: every watercolour brush, nothing else.
+        QTest::keyClick(m_window, Qt::Key_A, Qt::ControlModifier);
+        for (const char ch : QByteArray("watercolour"))
+            QTest::keyClick(m_window, ch);
+        QTRY_VERIFY(find("preset_builtin.watercolor-wash"));
+        QVERIFY(find("preset_builtin.watercolor-round"));
+        QVERIFY(!find("preset_builtin.grass"));
+        // Nothing matches: the panel says so.
+        QTest::keyClick(m_window, Qt::Key_A, Qt::ControlModifier);
+        for (const char ch : QByteArray("zzz"))
+            QTest::keyClick(m_window, ch);
+        QTRY_VERIFY(find("noSearchResults"));
+        snap("brush_panel_search");
+        // Picking from the narrowed list works like the full one.
+        QTest::keyClick(m_window, Qt::Key_A, Qt::ControlModifier);
+        for (const char ch : QByteArray("hair"))
+            QTest::keyClick(m_window, ch);
+        click("preset_builtin.hair");
+        QTRY_COMPARE(lib->currentId(), QStringLiteral("builtin.hair"));
+    }
+
     void brushPanel()
     {
         m_canvas->newDocument();

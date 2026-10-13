@@ -270,7 +270,7 @@ struct BrushSettings
     double procColorJitter = 0.0;   // per-element brightness and hue variation
     double procSpread = 1.0;        // where elements start, × dab radius
     ProcDirection procDirection = ProcDirection::Path;
-    double procStretch = 0.0;       // splatter: drops stretched along their direction
+    double procStretch = 0.5;       // splatter: drops stretched along their direction
     PatternShape patternShape = PatternShape::Chevrons;
 
     // --- Dynamics: parameters following sensors (BrushDynamics.h) ---

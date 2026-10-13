@@ -94,6 +94,8 @@ int engineGroupCount();     // properties in the milestone 11 engine groups
 
 // The engine flag of these settings (one bit).
 unsigned engineOf(const BrushSettings &settings);
+// The name of one engine flag ("paint", "dry media", ...).
+QString engineName(unsigned engine);
 bool appliesTo(const BrushProperty &property, const BrushSettings &settings);
 
 // The settings specification (Markdown), generated from the registry.

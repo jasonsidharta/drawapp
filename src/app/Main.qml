@@ -369,7 +369,10 @@ ApplicationWindow {
                     // Modal (without dimming): a tap outside closes it without painting.
                     modal: true
                     dim: false
-                    onClosed: canvas.forceActiveFocus()
+                    onClosed: {
+                        brushPanel.searchText = "" // a reopened panel shows every brush
+                        canvas.forceActiveFocus()
+                    }
 
                     ScrollView {
                         id: brushScroll

@@ -293,7 +293,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::hardness));
     add("roundness", "Roundness", PropertyType::Number)
         .percent(0.05, 1)
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineProcedural)
         .desc("Squashes the tip across its angle; 100 % keeps it round.")
         .render("The tip is sampled at (u, w / roundness) in its own rotated frame.")
         .cost("None.")
@@ -333,7 +333,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::minimumSize));
     add("tipDensity", "Density", PropertyType::Number)
         .percent(0.01, 1)
-        .engines(TipEngines & ~EngineBristle & ~EngineProcedural)
+        .engines(TipEngines & ~EngineBristle & ~EngineProcedural & ~EngineCarried & ~EngineWatercolor)
         .desc("Share of the tip's pixels each dab paints; the rest are left out at random, differently for every dab.")
         .render("Per pixel and dab, a hash of position and dab index decides whether the pixel is painted.")
         .cost("Per pixel: one hash when below 100 %.")
@@ -480,6 +480,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::fullTiltAngle));
     add("tiltAzimuthThreshold", "Tilt needed to steer", PropertyType::Number)
         .range(0, 60, 1, "°")
+        .engines(EngineAll & ~EngineSpray) // spray particles are round: no direction to steer
         .sensors("tilt")
         .desc("A tip that follows direction uses the pen's azimuth only above this tilt; nearer upright it follows the "
               "stroke.")
@@ -504,6 +505,7 @@ std::vector<BrushProperty> build()
     g = QStringLiteral("Opacity and Flow");
     add("opacity", "Opacity", PropertyType::Number)
         .percent(0.01, 1)
+        .engines(EngineAll & ~EngineCarried) // smudge and wet paint: strength and wetness instead
         .basic()
         .desc("The most paint a stroke can lay down. Overlaps within one stroke never exceed it.")
         .render("Ceiling C of the coverage model, rounded to a whole 8-bit level.")
@@ -522,7 +524,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::flow));
     add("accumulation", "Accumulation", PropertyType::Choice)
         .options({"uniform", "buildUp"}, {"Uniform", "Build up"})
-        .engines(EngineCoverage)
+        .engines(EngineCoverage & ~EngineBristle)
         .basic()
         .desc("Uniform: overlaps within a stroke never darken. Build up: slow or repeated passes darken towards the "
               "opacity.")
@@ -588,7 +590,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::textureStrength));
     add("textureMode", "Texture mode", PropertyType::Choice)
         .options({"multiply", "subtract"}, {"Multiply", "Tooth (pressure fills it)"})
-        .engines(TexEngines & ~EngineDry & ~EngineWatercolor)
+        .engines(TexEngines & ~EngineDry & ~EngineWatercolor & ~EngineCarried & ~EngineBristle)
         .basic()
         .desc("Multiply scales the paint by the grain; tooth removes paint in the valleys first, so light marks break "
               "up and heavy ones fill in.")
@@ -633,7 +635,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::textureInvert));
     add("textureEachDab", "Texture each dab", PropertyType::Bool)
-        .engines(EngineCoverage & ~EngineDry)
+        .engines(EngineCoverage & ~EngineDry & ~EngineBristle)
         .desc("Applies the grain to every dab instead of the finished stroke, so overlapping dabs fill the grain in "
               "(build-up). Texture strength dynamics always work this way.")
         .render("The grain multiplies each dab's tip value instead of the stroke coverage at composite time.")
@@ -642,7 +644,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::textureEachDab));
     add("textureMoving", "Moving grain", PropertyType::Bool)
-        .engines(EngineCoverage & ~EngineDry)
+        .engines(EngineCoverage & ~EngineDry & ~EngineBristle & ~EngineSpray)
         .desc("The grain moves and turns with each dab (stamped), instead of staying fixed on the paper.")
         .render("Texture coordinates relative to the dab centre, rotated with the dab.")
         .cost("Bilinear sampling.")
@@ -695,7 +697,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::strokeSizeJitter));
     add("roundnessJitter", "Roundness jitter", PropertyType::Number)
         .percent()
-        .engines(TipEngines)
+        .engines(TipEngines & ~EngineProcedural)
         .desc("Squashes each dab by up to this share, at random.")
         .render("Roundness × (1 − jitter × random), at least 5 %.")
         .cost("None.")
@@ -718,7 +720,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::randomFlipY));
     dyn(DynamicTarget::Rotation, "Rotation dynamics", TipEngines, "Adds value × 360° to the angle.");
-    dyn(DynamicTarget::Roundness, "Roundness dynamics", TipEngines, "Roundness × value (at least 5 %).");
+    dyn(DynamicTarget::Roundness, "Roundness dynamics", TipEngines & ~EngineProcedural, "Roundness × value (at least 5 %).");
     dyn(DynamicTarget::Scatter, "Scatter dynamics", EngineCoverage | EngineWet, "Scatter × value.", "Scatter above 0");
     dyn(DynamicTarget::Spacing, "Spacing dynamics", EngineAll,
         "The step after each dab × value (at least 0.5 px); flow stays normalised to the actual step.");
@@ -1100,7 +1102,7 @@ std::vector<BrushProperty> build()
         .tests(InkTests)
         .access(number(&BrushSettings::cornerAngle));
     add("taperLive", "Live end taper", PropertyType::Bool)
-        .engines(EngineCoverage)
+        .engines(EngineCoverage & ~EngineBristle) // bristle state cannot be redrawn: the hold-back stays
         .since(11)
         .desc("Draws the line right up to the pen while drawing and tapers the end when the pen lifts, instead of "
               "holding the last taper-length of the line back until then.")
@@ -1593,6 +1595,16 @@ unsigned BrushProperties::engineOf(const BrushSettings &s)
     default: break;
     }
     return s.blend == BrushBlend::Erase ? EngineErase : EnginePaint;
+}
+
+QString BrushProperties::engineName(unsigned engine)
+{
+    static const char *names[] = {"paint", "erase", "smudge", "wet paint", "spray", "hatching", "dry media",
+                                  "bristles", "watercolour", "strands", "grass", "foliage", "splatter", "pattern"};
+    for (int i = 0; i < 14; ++i)
+        if (engine == (1u << i))
+            return QLatin1String(names[i]);
+    return QStringLiteral("engines %1").arg(engine);
 }
 
 bool BrushProperties::appliesTo(const BrushProperty &property, const BrushSettings &settings)

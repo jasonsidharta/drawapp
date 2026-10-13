@@ -26,6 +26,8 @@ class BrushLibrary : public QObject
     // Every preset, built-in first: {id, name, builtIn, favorite, modified, savedChanges, blend,
     // thumbnail, current, inUse}.
     Q_PROPERTY(QVariantList presets READ presets NOTIFY presetsChanged)
+    // The preset categories in display order (BrushPresets::categories).
+    Q_PROPERTY(QStringList categories READ categories CONSTANT)
     Q_PROPERTY(QString currentId READ currentId NOTIFY currentChanged)
     Q_PROPERTY(QString currentName READ currentName NOTIFY currentChanged)
     // The current working settings as BrushSettings::toJson() (nested maps for pressure).
@@ -58,6 +60,7 @@ public:
     QString selectedId(bool eraser) const { return eraser ? m_eraserId : m_paintId; }
 
     QVariantList presets() const;
+    QStringList categories() const { return BrushPresets::categories(); }
     QString currentId() const { return selectedId(m_eraserSlot); }
     QString currentName() const;
     QVariantMap current() const;

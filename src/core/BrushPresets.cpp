@@ -629,6 +629,41 @@ const BrushPreset *BrushPresets::builtIn(const QString &id)
     return nullptr;
 }
 
+QString BrushPresets::category(const BrushSettings &s)
+{
+    switch (s.blend) {
+    case BrushBlend::Erase: return QStringLiteral("Erasers");
+    case BrushBlend::Watercolor: return QStringLiteral("Watercolour");
+    case BrushBlend::Smudge:
+    case BrushBlend::WetPaint: return QStringLiteral("Blending");
+    case BrushBlend::Paint: break;
+    }
+    switch (s.stamp) {
+    case BrushStamp::Dry: return QStringLiteral("Dry Media");
+    case BrushStamp::Bristle: return QStringLiteral("Bristles");
+    case BrushStamp::Strands:
+    case BrushStamp::Grass:
+    case BrushStamp::Foliage:
+    case BrushStamp::Splatter:
+    case BrushStamp::Pattern: return QStringLiteral("Nature & Patterns");
+    case BrushStamp::Spray:
+    case BrushStamp::Hatching: return QStringLiteral("Effects");
+    case BrushStamp::Tip: break;
+    }
+    // Ink: the milestone 11 stroke-geometry features (curves, corners, live taper).
+    if (s.curveInterpolation || s.taperLive)
+        return QStringLiteral("Ink");
+    return QStringLiteral("Basic");
+}
+
+QStringList BrushPresets::categories()
+{
+    // Erasers come right after the basic brushes: they are used all the time.
+    return {QStringLiteral("Basic"),    QStringLiteral("Erasers"),     QStringLiteral("Ink"),
+            QStringLiteral("Dry Media"), QStringLiteral("Bristles"),   QStringLiteral("Blending"),
+            QStringLiteral("Watercolour"), QStringLiteral("Nature & Patterns"), QStringLiteral("Effects")};
+}
+
 QString BrushPresets::defaultPaintId()
 {
     return QStringLiteral("builtin.solid-round");

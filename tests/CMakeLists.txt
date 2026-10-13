@@ -86,11 +86,11 @@ endif()
 if(WIN32)
     # Let ctest find the Qt and MinGW DLLs without a deployment step.
     get_filename_component(_cxx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    set_tests_properties(tst_core tst_brush tst_brushengine tst_tiles tst_fileformat tst_selection tst_document tst_recovery tst_canvas tst_ui PROPERTIES
+    set_tests_properties(tst_core tst_brush tst_brushengine tst_brushmedia tst_tiles tst_fileformat tst_selection tst_document tst_recovery tst_canvas tst_ui PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_cxx_bin}")
     # A low floor for the device-memory check, so a busy development machine does not make
     # unrelated tests fail; tests of the floor set it themselves.
-    set_property(TEST tst_core tst_brush tst_brushengine tst_tiles tst_fileformat tst_selection tst_document tst_recovery tst_canvas tst_ui
+    set_property(TEST tst_core tst_brush tst_brushengine tst_brushmedia tst_tiles tst_fileformat tst_selection tst_document tst_recovery tst_canvas tst_ui
                  APPEND PROPERTY ENVIRONMENT_MODIFICATION "DRAWAPP_MEMORY_FLOOR_MB=set:64")
     # Window tests render offscreen under ctest so they do not take over the desktop.
     set_property(TEST tst_canvas tst_ui APPEND PROPERTY ENVIRONMENT_MODIFICATION
