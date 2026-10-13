@@ -145,8 +145,9 @@ public:
     bool wetStepOpen() const { return !m_wetBefore.isEmpty(); }
     const WetLayer *wetLayer() const { return m_wetLayer.get(); }
     // Advances the drying by `ms` of simulation time, as the drying timer does with the time that
-    // passed. For tests.
-    void advanceWetPaint(double ms);
+    // passed; with a budget (the timer) at most that much time is spent stepping. Tests call it
+    // without one (deterministic).
+    void advanceWetPaint(double ms, double budgetMs = 0);
     // Combines a shape (document coordinates) with the selection, as one undo step, like the
     // selection tools. For tests and automation.
     void selectPath(const QPainterPath &docPath, SelectionMode mode);

@@ -31,6 +31,10 @@ class ProceduralDeposit : public CoverageDeposit
 public:
     explicit ProceduralDeposit(StrokeContext &context);
 
+    // Captures and recomposites only the parts' own boxes, not the dab's whole reach (a 200 px
+    // hair dab reaches ~1000 px but paints a few thin lines).
+    void dab(StrokeSurface &image, const DabParams &dab, const QRect &rect, TileSnapshot &before, QRect &dirty) override;
+
     // How far an element can reach from the dab centre (StrokeContext::dabRect).
     static double reach(const BrushSettings &settings, const DabParams &dab);
 
@@ -55,7 +59,18 @@ private:
     // `shade`: grass, darker towards the root (the parts' t).
     void end(const DabParams &dab, QRgb color, bool shade = false);
 
+    void mark(const QRect &area); // a primitive wrote into `area` of m_box
+
     QRect m_box;              // the element's pixels inside the rectangle being drawn
-    std::vector<float> m_v;   // coverage per pixel of m_box
-    std::vector<float> m_t;   // along-the-element fraction at that coverage (shading)
+    // Coverage per pixel of m_box (stride m_box.width()) and the along-the-element fraction at
+    // that coverage (shading). Kept all zero between elements: only the rows' touched spans are
+    // read and cleared, so a long thin element costs its area, not its bounding box.
+    std::vector<float> m_v;
+    std::vector<float> m_t;
+    std::vector<int> m_spanMin, m_spanMax; // per row of m_box
+    std::vector<QRect> m_parts;            // the primitives' areas (capture and recomposite)
+    // While dab() runs (null when replaying for the live taper, which recomposites whole tiles).
+    StrokeSurface *m_image = nullptr;
+    TileSnapshot *m_before = nullptr;
+    QRect *m_dirty = nullptr;
 };

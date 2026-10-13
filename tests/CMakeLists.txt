@@ -77,6 +77,15 @@ if(WIN32)
     target_link_libraries(bench_m9 PRIVATE psapi)
 endif()
 
+# Milestone 11 A/B benchmarks (not part of ctest); the same source builds in the milestone 10
+# baseline without DRAWAPP_M11.
+qt_add_executable(bench_m11 bench_m11.cpp)
+target_link_libraries(bench_m11 PRIVATE drawcore)
+target_compile_definitions(bench_m11 PRIVATE DRAWAPP_M11=1)
+if(WIN32)
+    target_link_libraries(bench_m11 PRIVATE psapi)
+endif()
+
 qt_add_executable(bench_core bench_core.cpp)
 target_link_libraries(bench_core PRIVATE drawcore)
 if(WIN32)

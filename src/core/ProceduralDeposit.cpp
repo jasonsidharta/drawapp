@@ -1,8 +1,11 @@
 #include "ProceduralDeposit.h"
 
+#include "TileSnapshot.h"
+
 #include <QColor>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 
 using namespace BrushRaster;
@@ -36,6 +39,19 @@ ProceduralDeposit::ProceduralDeposit(StrokeContext &context)
     if (st.blend == BrushBlend::Paint
         && ((st.procColorJitter > 0 && st.stamp != BrushStamp::Pattern) || st.stamp == BrushStamp::Grass))
         m_ctx.colorPerDab = true;
+}
+
+void ProceduralDeposit::dab(StrokeSurface &image, const DabParams &dab, const QRect &rect, TileSnapshot &before, QRect &dirty)
+{
+    if (dab.ceiling <= 0 || dab.flow <= 0)
+        return;
+    m_image = &image;
+    m_before = &before;
+    m_dirty = &dirty;
+    rasterize(dab, rect);
+    m_image = nullptr;
+    m_before = nullptr;
+    m_dirty = nullptr;
 }
 
 double ProceduralDeposit::reach(const BrushSettings &s, const DabParams &dab)
@@ -279,9 +295,26 @@ bool ProceduralDeposit::begin(const QRectF &bounds, const QRect &rect)
     if (m_box.isEmpty())
         return false;
     const size_t n = size_t(m_box.width()) * size_t(m_box.height());
-    m_v.assign(n, 0.0f);
-    m_t.assign(n, 0.0f);
+    if (m_v.size() < n) {
+        m_v.resize(n, 0.0f); // the buffers are all zero between elements
+        m_t.resize(n, 0.0f);
+    }
+    m_spanMin.assign(size_t(m_box.height()), INT_MAX);
+    m_spanMax.assign(size_t(m_box.height()), INT_MIN);
+    m_parts.clear();
     return true;
+}
+
+void ProceduralDeposit::mark(const QRect &area)
+{
+    if (area.isEmpty())
+        return;
+    for (int y = area.top(); y <= area.bottom(); ++y) {
+        const size_t r = size_t(y - m_box.top());
+        m_spanMin[r] = std::min(m_spanMin[r], area.left());
+        m_spanMax[r] = std::max(m_spanMax[r], area.right());
+    }
+    m_parts.push_back(area);
 }
 
 void ProceduralDeposit::capsule(QPointF a, QPointF b, double ra, double rb, double ta, double tb)
@@ -291,6 +324,7 @@ void ProceduralDeposit::capsule(QPointF a, QPointF b, double ra, double rb, doub
                               QPointF(std::max(a.x(), b.x()) + rmax + 1, std::max(a.y(), b.y()) + rmax + 1))
                            .toAlignedRect()
                      & m_box;
+    mark(area);
     for (int y = area.top(); y <= area.bottom(); ++y) {
         float *row = m_v.data() + size_t(y - m_box.top()) * size_t(m_box.width()) - m_box.left();
         float *trow = m_t.data() + size_t(y - m_box.top()) * size_t(m_box.width()) - m_box.left();
@@ -315,6 +349,7 @@ void ProceduralDeposit::ellipse(QPointF c, double along, double across, double a
     const double ca = std::cos(angle), sa = std::sin(angle);
     const double r = std::max(along, across);
     const QRect area = QRectF(c - QPointF(r + 1, r + 1), c + QPointF(r + 1, r + 1)).toAlignedRect() & m_box;
+    mark(area);
     const double small = std::min(along, across);
     const double thin = small < 0.5 ? 2.0 * small : 1.0;
     for (int y = area.top(); y <= area.bottom(); ++y) {
@@ -338,6 +373,7 @@ void ProceduralDeposit::lens(QPointF base, double angle, double length, double w
     const bool vein = width >= 6.0;
     const QPointF tip = base + QPointF(ca, sa) * length;
     const QRect area = QRectF(base, tip).normalized().adjusted(-half - 1, -half - 1, half + 1, half + 1).toAlignedRect() & m_box;
+    mark(area);
     for (int y = area.top(); y <= area.bottom(); ++y) {
         float *row = m_v.data() + size_t(y - m_box.top()) * size_t(m_box.width()) - m_box.left();
         for (int x = area.left(); x <= area.right(); ++x) {
@@ -370,9 +406,20 @@ void ProceduralDeposit::end(const DabParams &dab, QRgb color, bool shade)
     qint64 cachedKey = -1;
     CoverageTile *tile = nullptr;
     ColorTile *colors = nullptr;
+    if (m_image) {
+        // Before the composite changes them (at flush): only the parts' own areas.
+        for (const QRect &part : m_parts) {
+            m_image->capture(*m_before, part);
+            touch(part);
+            *m_dirty |= part;
+        }
+    }
     for (int y = m_box.top(); y <= m_box.bottom(); ++y) {
-        const size_t line = size_t(y - m_box.top()) * size_t(m_box.width());
-        for (int x = m_box.left(); x <= m_box.right(); ++x) {
+        const size_t r = size_t(y - m_box.top());
+        if (m_spanMin[r] > m_spanMax[r])
+            continue;
+        const size_t line = r * size_t(m_box.width());
+        for (int x = m_spanMin[r]; x <= m_spanMax[r]; ++x) {
             double v = m_v[line + size_t(x - m_box.left())];
             if (v <= 0.0)
                 continue;
@@ -405,5 +452,15 @@ void ProceduralDeposit::end(const DabParams &dab, QRgb color, bool shade)
             }
             deposit(s, add, colors ? &(*colors)[idx] : nullptr, c);
         }
+    }
+    // Leave the buffers all zero for the next element.
+    for (int y = m_box.top(); y <= m_box.bottom(); ++y) {
+        const size_t r = size_t(y - m_box.top());
+        if (m_spanMin[r] > m_spanMax[r])
+            continue;
+        const size_t from = r * size_t(m_box.width()) + size_t(m_spanMin[r] - m_box.left());
+        const size_t count = size_t(m_spanMax[r] - m_spanMin[r] + 1);
+        std::fill_n(m_v.begin() + qsizetype(from), count, 0.0f);
+        std::fill_n(m_t.begin() + qsizetype(from), count, 0.0f);
     }
 }

@@ -48,7 +48,9 @@ struct Texture;
 //
 // Bounds: tiles are allocated only where the brush wets the paper, charged to the memory budget
 // (Temporary), at most MaxTiles at once; a tile that has dried completely keeps its settled
-// pigment for lifting until the layer is released.
+// pigment for lifting until the layer is released, and costs nothing per step (dormant).
+// Time: on the canvas each stroke event and each drying tick has a time budget; when it runs
+// out the simulation falls behind (the paint dries more slowly) rather than stalling the UI.
 class WetLayer
 {
 public:
@@ -74,7 +76,11 @@ public:
     WetLayer(const WetLayer &) = delete;
     WetLayer &operator=(const WetLayer &) = delete;
 
-    void setParams(const Params &params) { m_params = params; }
+    void setParams(const Params &params)
+    {
+        m_params = params;
+        ++m_paramsVersion;
+    }
     const Params &params() const { return m_params; }
     QSize size() const { return m_size; }
 
@@ -90,6 +96,16 @@ public:
     // Advances `steps` steps and writes the pixels of every tile that changed (through the
     // selection mask, if any). Returns the changed area.
     QRect step(StrokeSurface &image, TileSnapshot &before, int steps);
+    // Advances the simulation without writing pixels (render() writes them).
+    void advance(int steps);
+    // Ends the simulation at once: all water gone, all pigment settled where it is (bounded
+    // drying of previews; not used on the canvas, where paint dries in time).
+    void settleAll();
+    // On the canvas: the most time a stroke event may spend stepping, in ms (0 = no limit, every
+    // step is taken: deterministic, for tests and previews). When the budget runs out the
+    // simulation falls behind the input time instead of delaying the event.
+    void setStepBudgetMs(double ms) { m_stepBudgetMs = ms; }
+    double stepBudgetMs() const { return m_stepBudgetMs; }
     // Writes the pixels of the tiles changed since the last write (after addPaint without a step).
     QRect render(StrokeSurface &image, TileSnapshot &before);
 
@@ -108,7 +124,9 @@ private:
     struct Tile;
     Tile *tileAt(int column, int row) const;
     Tile *ensureTile(int column, int row, const StrokeSurface &image);
-    void writeTile(StrokeSurface &image, TileSnapshot &before, qint64 key, Tile &tile, QRect &changed);
+    // The displayed pixels of one tile (T × T, row-major, by tile-local position): a function of
+    // the wet state, the base and the selection only, so tiles are computed in parallel.
+    void computeTile(qint64 key, const Tile &tile, QRgb *pixels) const;
     double paperHeight(int x, int y) const;
 
     QSize m_size;
@@ -117,4 +135,6 @@ private:
     QImage m_clip;
     qint64 m_wetCells = 0;
     bool m_allocationFailed = false;
+    double m_stepBudgetMs = 0;
+    quint64 m_paramsVersion = 1;
 };

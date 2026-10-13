@@ -16,8 +16,10 @@
 #include <cmath>
 
 namespace {
-constexpr int DryingTickMs = 33;         // about 30 updates a second while paint dries
+constexpr int DryingTickMs = 50;         // 20 updates a second while paint dries (it changes slowly)
 constexpr double MaxCatchUpMs = 8 * 16.0; // a stalled timer is not caught up all at once
+constexpr double TickBudgetMs = 8.0;      // stepping per drying tick; beyond it the paint dries slower
+constexpr double EventBudgetMs = 4.0;     // stepping per stroke event (WetLayer::setStepBudgetMs)
 }
 
 void CanvasItem::prepareWetStroke(bool watercolour)
@@ -32,6 +34,7 @@ void CanvasItem::prepareWetStroke(bool watercolour)
     commitWetPaint();
     if (!m_wetLayer) {
         m_wetLayer = std::make_unique<WetLayer>(m_document.size());
+        m_wetLayer->setStepBudgetMs(EventBudgetMs);
         m_wetLayerId = m_strokeLayerId;
     }
     m_engine->setWetLayer(m_wetLayer.get());
@@ -86,10 +89,10 @@ void CanvasItem::dryWetPaintTick()
 {
     const double ms = double(m_wetClock.nsecsElapsed()) / 1e6;
     m_wetClock.start();
-    advanceWetPaint(std::min(ms, MaxCatchUpMs));
+    advanceWetPaint(std::min(ms, MaxCatchUpMs), TickBudgetMs);
 }
 
-void CanvasItem::advanceWetPaint(double ms)
+void CanvasItem::advanceWetPaint(double ms, double budgetMs)
 {
     if (!m_wetLayer || m_gesture == Gesture::Stroke) // a stroke steps the simulation itself
         return;
@@ -103,8 +106,20 @@ void CanvasItem::advanceWetPaint(double ms)
     if (steps <= 0)
         return;
     m_wetPendingMs -= steps * WetLayer::StepMs;
+    if (budgetMs > 0) {
+        // The timer: as many steps as fit in the budget; time that does not fit is dropped.
+        QElapsedTimer timer;
+        timer.start();
+        for (int done = 0; done < steps; ++done) {
+            m_wetLayer->advance(1);
+            if (timer.nsecsElapsed() / 1e6 >= budgetMs)
+                break;
+        }
+    } else {
+        m_wetLayer->advance(steps);
+    }
     TiledSurface layer(m_document.pixels(index));
-    const QRect changed = m_wetLayer->step(layer, m_wetBefore, steps);
+    const QRect changed = m_wetLayer->render(layer, m_wetBefore);
     strokePixelsChanged(changed, 0);
     if (m_wetLayer->allocationFailed()) {
         finishWetPaint();

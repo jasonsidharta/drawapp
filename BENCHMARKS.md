@@ -461,6 +461,30 @@ not interleaved (`m10-transform-nobase.md`): transform session memory 238 → 13
 (9 × 2048 × 1536) and 1021 → 583 MiB (7 × 4096²); begin 118 → 70 ms and 476 → 359 ms against the
 milestone 10 medians above.
 
+## Milestone 11: brush engines, 2026-10-13, same machine
+
+Full tables, method and the hypotheses: `docs/m11-performance.md`. Raw output:
+`docs/benchmarks/m11-pass1-*` (before the stage 10 fixes), `m11-pass2-*` (A/B after the
+procedural fix) and `m11-final-raw.md`. `bench_m11` was built from the milestone 10 baseline
+(`dcde383`) and milestone 11 and run alternately, three rounds per workload. CPU time on the
+calling thread, not latency.
+
+| Measurement | Milestone 10 | Milestone 11 |
+|---|---|---|
+| Milestone 10 presets, event median, geomean ratio M11/M10 (2 passes) | 1 | 1.08–1.10 (2048 × 1536 × 10), 1.01–1.15 (4096² × 8), 0.95 (sparse 8192²), 0.93–0.97 (sparse 16384²) |
+| Same, single preset and size | — | 0.53–1.96 (about ±40 % noise per row on this desktop) |
+| Milestone 10 presets, pixels | — | identical (330 exact renders) |
+| Peak private memory, undo snapshot sizes, file sizes | 274 / 1115 / 70 / 120 MiB | same |
+| Round Bristle 34 px, event median / p95 | — | 0.30–0.53 / 0.79–1.36 ms |
+| Hair 30 px / 200 px, event p95 | — | 0.56–0.87 / 2.2–5.5 ms (20.3 ms before the stage 10 fix) |
+| Watercolour Wash 50 px on the canvas, stroke event median / p95 | — | 2.9–3.7 / 12–22 ms |
+| Same, drying tick (20 Hz, 8 ms stepping budget) median | — | 22–37 ms (78 ms every 33 ms before the fixes); paint dries in 11.8–13.2 s for 8.9 s simulated |
+| Watercolour preview drying at pen-up, 1600 px stroke | — | 0.4–1.9 s (0.6–31 s before) |
+
+Hypotheses H-B1 (bristles under 2 ms median) and H-W1 (watercolour median under 16 ms) hold by
+their criteria. The watercolour p95 on dense documents still exceeds a 60 Hz frame. Not measured:
+latency, on-screen frame rate, physical devices, real pens.
+
 ## Not measured yet
 
 - End-to-end latency from pen contact to photons (needs hardware or a high-speed camera). The

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -27,12 +28,15 @@ struct WetLayer::Tile
     std::vector<float> suspended[2]; // 4 per cell: r, g, b (premultiplied by amount), amount
     std::vector<float> settled;      // 4 per cell
     std::vector<float> edge;         // per step: share of dry paper around the cell (0 inside)
+    std::vector<float> rate;         // settling rate per cell (paper height × granulation), cached
+    quint64 rateVersion = 0;         // the parameters' version the cache was made for (0: none)
     std::vector<QRgb> base;          // the layer before this paint arrived
     int current = 0;
-    bool dirty = false; // pixels need writing
+    bool dirty = false;   // pixels need writing
+    bool dormant = false; // dry, no pigment moving, both generations equal: steps skip it
     QRect rect;         // in document pixels (clipped to the layer)
 
-    static constexpr qsizetype Bytes = qsizetype(N) * (2 * 4 + 2 * 16 + 16 + 4 + 4);
+    static constexpr qsizetype Bytes = qsizetype(N) * (2 * 4 + 2 * 16 + 16 + 4 + 4 + 4);
 
     Tile()
     {
@@ -42,6 +46,7 @@ struct WetLayer::Tile
         }
         settled.assign(size_t(N) * 4, 0.0f);
         edge.assign(size_t(N), 0.0f);
+        rate.assign(size_t(N), 0.0f);
         base.assign(size_t(N), 0u);
     }
 };
@@ -150,6 +155,7 @@ bool WetLayer::addPaint(const StrokeSurface &image, TileSnapshot &before, const 
                         || (ly == T - 1 && (row + 1) * T < m_size.height() && !ensureTile(column, row + 1, image)))
                         return false;
                     const size_t i = size_t(ly * T + lx);
+                    tile->dormant = false;
                     float &w = tile->water[tile->current][i];
                     float *s = &tile->suspended[tile->current][i * 4];
                     float *d = &tile->settled[i * 4];
@@ -189,7 +195,7 @@ bool WetLayer::addPaint(const StrokeSurface &image, TileSnapshot &before, const 
     return true;
 }
 
-QRect WetLayer::step(StrokeSurface &image, TileSnapshot &before, int steps)
+void WetLayer::advance(int steps)
 {
     const Params &p = m_params;
     const float dw = float(0.08 + 0.6 * std::clamp(p.spread, 0.0, 1.0)); // water diffusion (≤ 0.68: stable)
@@ -201,13 +207,40 @@ QRect WetLayer::step(StrokeSurface &image, TileSnapshot &before, int steps)
     const float edgeBoost = 3.0f * darkening; // and evaporates there up to 4× faster
     const float settle = 0.004f;
     const float granulation = float(3.0 * std::clamp(p.granulation, 0.0, 1.0));
+    // Each pass computes every tile from the previous generation only and writes nothing but
+    // that tile, so tiles run in parallel (up to 8 threads, at least 4 tiles each) with exactly
+    // the results of one thread.
+    std::vector<std::pair<qint64, Tile *>> tiles;
+    tiles.reserve(m_tiles.size());
+    for (auto &[k, tilePtr] : m_tiles)
+        tiles.emplace_back(k, tilePtr.get());
+    const int count = int(tiles.size());
+    const int workers = std::clamp(std::min(int(std::thread::hardware_concurrency()), 8), 1, std::max(1, count / 4));
+    auto forTiles = [&](auto &&f) {
+        std::vector<qint64> sums(size_t(workers), 0);
+        auto run = [&](int w) {
+            for (int i = w; i < count; i += workers)
+                sums[size_t(w)] += f(tiles[size_t(i)].first, *tiles[size_t(i)].second);
+        };
+        std::vector<std::thread> threads;
+        for (int w = 1; w < workers; ++w)
+            threads.emplace_back(run, w);
+        run(0);
+        for (std::thread &t : threads)
+            t.join();
+        qint64 total = 0;
+        for (const qint64 v : sums)
+            total += v;
+        return total;
+    };
     for (int s = 0; s < steps; ++s) {
         if (m_wetCells == 0)
             break;
         // Pass 1: how close each wet cell is to the edge of the wet area, the share of dry cells
         // within two cells (12 cells: a rim a few pixels wide, not a one-pixel line).
-        for (auto &[k, tilePtr] : m_tiles) {
-            Tile &tile = *tilePtr;
+        forTiles([&](qint64 k, Tile &tile) -> qint64 {
+            if (tile.dormant)
+                return 0;
             const int column = int(quint32(k & 0xFFFFFFFF)), row = int(k >> 32);
             const Tile *around[3][3];
             for (int dy = -1; dy <= 1; ++dy)
@@ -229,19 +262,36 @@ QRect WetLayer::step(StrokeSurface &image, TileSnapshot &before, int steps)
                     }
                     static const int ring[12][2] = {{-1, 0}, {1, 0},  {0, -1}, {0, 1},  {-2, 0}, {2, 0},
                                                     {0, -2}, {0, 2},  {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
-                    const int gx = column * T + lx, gy = row * T + ly;
                     int dry = 0;
-                    for (const auto &o : ring)
-                        dry += waterAt(gx + o[0], gy + o[1]) < DryWater;
+                    if (lx >= 2 && lx < T - 2 && ly >= 2 && ly < T - 2) {
+                        // Inside the tile: read the cells directly.
+                        for (const auto &o : ring)
+                            dry += W[i + size_t(o[1] * T + o[0])] < DryWater;
+                    } else {
+                        const int gx = column * T + lx, gy = row * T + ly;
+                        for (const auto &o : ring)
+                            dry += waterAt(gx + o[0], gy + o[1]) < DryWater;
+                    }
                     tile.edge[i] = float(dry) / 12.0f;
                 }
-        }
+            return 0;
+        });
         // Pass 2: flow, evaporation and settling. Every tile reads the previous generation and
         // writes the next, so the result does not depend on tile order and there are no seams.
-        qint64 wet = 0;
-        for (auto &[k, tilePtr] : m_tiles) {
-            Tile &tile = *tilePtr;
+        const qint64 wet = forTiles([&](qint64 k, Tile &tile) -> qint64 {
+            if (tile.dormant)
+                return 0;
+            qint64 wetCount = 0;
             const int column = int(quint32(k & 0xFFFFFFFF)), row = int(k >> 32);
+            if (tile.rateVersion != m_paramsVersion) {
+                // Settling, more in the paper's valleys: fixed for these parameters.
+                for (int ly = 0; ly < T; ++ly)
+                    for (int lx = 0; lx < T; ++lx)
+                        tile.rate[size_t(ly * T + lx)] = std::min(
+                            1.0f, settle * (1.0f + granulation * float(1.0 - paperHeight(column * T + lx, row * T + ly))));
+                tile.rateVersion = m_paramsVersion;
+            }
+            const float *rates = tile.rate.data();
             const int cur = tile.current, nxt = 1 - cur;
             const float *W = tile.water[cur].data();
             const float *S = tile.suspended[cur].data();
@@ -327,7 +377,7 @@ QRect WetLayer::step(StrokeSurface &image, TileSnapshot &before, int steps)
                         // outward flow brings there stays there (the dark rim of a dried wash).
                         w2 -= evaporation * (1.0f + edgeBoost * E[i]);
                         // Settling, more in the paper's valleys.
-                        const float rate = std::min(1.0f, settle * (1.0f + granulation * float(1.0 - paperHeight(gx, gy))));
+                        const float rate = rates[i];
                         for (int c = 0; c < 4; ++c) {
                             const float dep = std::max(0.0f, s2[c]) * rate;
                             s2[c] -= dep;
@@ -342,7 +392,7 @@ QRect WetLayer::step(StrokeSurface &image, TileSnapshot &before, int steps)
                             s2[c] = 0.0f;
                         }
                     } else {
-                        ++wet;
+                        ++wetCount;
                     }
                     W2[i] = w2;
                     for (int c = 0; c < 4; ++c)
@@ -351,12 +401,37 @@ QRect WetLayer::step(StrokeSurface &image, TileSnapshot &before, int steps)
             }
             if (changed)
                 tile.dirty = true;
-        }
+            else
+                tile.dormant = true; // every cell was copied: both generations are equal now
+            return wetCount;
+        });
         for (auto &[k, tilePtr] : m_tiles)
             tilePtr->current = 1 - tilePtr->current;
         m_wetCells = wet;
     }
+}
+
+QRect WetLayer::step(StrokeSurface &image, TileSnapshot &before, int steps)
+{
+    advance(steps);
     return render(image, before);
+}
+
+void WetLayer::settleAll()
+{
+    for (auto &[k, tilePtr] : m_tiles) {
+        Tile &tile = *tilePtr;
+        for (int g = 0; g < 2; ++g)
+            std::fill(tile.water[g].begin(), tile.water[g].end(), 0.0f);
+        const std::vector<float> &s = tile.suspended[tile.current];
+        for (size_t i = 0; i < tile.settled.size(); ++i)
+            tile.settled[i] += std::max(0.0f, s[i]);
+        for (int g = 0; g < 2; ++g)
+            std::fill(tile.suspended[g].begin(), tile.suspended[g].end(), 0.0f);
+        tile.dirty = true;
+        tile.dormant = true;
+    }
+    m_wetCells = 0;
 }
 
 QRect WetLayer::render(StrokeSurface &image, TileSnapshot &before)
@@ -373,20 +448,52 @@ QRect WetLayer::render(StrokeSurface &image, TileSnapshot &before)
     for (const qint64 k : spread)
         if (auto it = m_tiles.find(k); it != m_tiles.end())
             it->second->dirty = true;
-    QRect changed;
+    // The pixels of each dirty tile are a function of the wet state alone: computed in parallel
+    // (as the steps), then written into the layer and the undo snapshot on this thread.
+    std::vector<std::pair<qint64, Tile *>> dirty;
     for (auto &[k, tilePtr] : m_tiles)
-        if (tilePtr->dirty)
-            writeTile(image, before, k, *tilePtr, changed);
+        if (tilePtr->dirty && !tilePtr->rect.isEmpty())
+            dirty.emplace_back(k, tilePtr.get());
+    const int count = int(dirty.size());
+    std::vector<std::vector<QRgb>> pixels(static_cast<size_t>(count));
+    const int workers = std::clamp(std::min(int(std::thread::hardware_concurrency()), 8), 1, std::max(1, count / 4));
+    auto run = [&](int w) {
+        for (int i = w; i < count; i += workers) {
+            pixels[size_t(i)].resize(size_t(N));
+            computeTile(dirty[size_t(i)].first, *dirty[size_t(i)].second, pixels[size_t(i)].data());
+        }
+    };
+    std::vector<std::thread> threads;
+    for (int w = 1; w < workers; ++w)
+        threads.emplace_back(run, w);
+    run(0);
+    for (std::thread &t : threads)
+        t.join();
+    QRect changed;
+    for (int i = 0; i < count; ++i) {
+        Tile &tile = *dirty[size_t(i)].second;
+        const QRect r = tile.rect;
+        if (!before.storedRow(r.left(), r.top()))
+            image.capture(before, r);
+        const int ox = r.left() % T, oy = r.top() % T;
+        for (int y = r.top(); y <= r.bottom(); ++y) {
+            QRgb *out = image.writableRow(r.left(), y);
+            if (!out) {
+                m_allocationFailed = true;
+                return changed;
+            }
+            const QRgb *src = pixels[size_t(i)].data() + size_t((y - r.top() + oy) * T + ox);
+            std::copy(src, src + r.width(), out);
+        }
+        tile.dirty = false;
+        changed |= r;
+    }
     return changed;
 }
 
-void WetLayer::writeTile(StrokeSurface &image, TileSnapshot &before, qint64 k, Tile &tile, QRect &changed)
+void WetLayer::computeTile(qint64 k, const Tile &tile, QRgb *pixels) const
 {
     const QRect r = tile.rect;
-    if (r.isEmpty())
-        return;
-    if (!before.storedRow(r.left(), r.top()))
-        image.capture(before, r);
     const int column = int(quint32(k & 0xFFFFFFFF)), row = int(k >> 32);
     const float density = float(m_params.density);
     // Pigment as displayed: a 5-point average (the cell twice, its four neighbours once), so the
@@ -408,25 +515,30 @@ void WetLayer::writeTile(StrokeSurface &image, TileSnapshot &before, qint64 k, T
             out[c] += s[c] + d[c];
     };
     for (int y = r.top(); y <= r.bottom(); ++y) {
-        QRgb *out = image.writableRow(r.left(), y);
-        if (!out) {
-            m_allocationFailed = true;
-            return;
-        }
+        QRgb *out = pixels + size_t((y - row * T) * T); // the tile's row, indexed by local x
         const uchar *clip = m_clip.isNull() ? nullptr : m_clip.constScanLine(y);
         for (int x = r.left(); x <= r.right(); ++x) {
             const size_t i = size_t((y - row * T) * T + (x - column * T));
             const QRgb b = tile.base[i];
             float sum[4] = {0, 0, 0, 0};
-            pigmentAt(x, y, sum);
-            pigmentAt(x, y, sum);
-            pigmentAt(x - 1, y, sum);
-            pigmentAt(x + 1, y, sum);
-            pigmentAt(x, y - 1, sum);
-            pigmentAt(x, y + 1, sum);
+            const int lx = x - column * T, ly = y - row * T;
+            if (lx > 0 && lx < T - 1 && ly > 0 && ly < T - 1) {
+                // Inside the tile: the same sums, read directly (same order, same results).
+                const float *S = tile.suspended[tile.current].data(), *D = tile.settled.data();
+                for (const size_t j : {i, i, i - 1, i + 1, i - T, i + T})
+                    for (int c = 0; c < 4; ++c)
+                        sum[c] += S[j * 4 + c] + D[j * 4 + c];
+            } else {
+                pigmentAt(x, y, sum);
+                pigmentAt(x, y, sum);
+                pigmentAt(x - 1, y, sum);
+                pigmentAt(x + 1, y, sum);
+                pigmentAt(x, y - 1, sum);
+                pigmentAt(x, y + 1, sum);
+            }
             const float a = sum[3] / 6.0f;
             if (a <= 1e-6f) {
-                out[x - r.left()] = b;
+                out[x - column * T] = b;
                 continue;
             }
             // Pigment colour (straight) and glaze opacity.
@@ -448,10 +560,8 @@ void WetLayer::writeTile(StrokeSurface &image, TileSnapshot &before, qint64 k, T
                     o[c] = bb[c] + (o[c] - bb[c]) * m;
             }
             const int oa = std::clamp(int(std::lround(o[3] * 255.0f)), 0, 255);
-            out[x - r.left()] = qRgba(std::clamp(int(std::lround(o[0] * 255.0f)), 0, oa), std::clamp(int(std::lround(o[1] * 255.0f)), 0, oa),
-                                      std::clamp(int(std::lround(o[2] * 255.0f)), 0, oa), oa);
+            out[x - column * T] = qRgba(std::clamp(int(std::lround(o[0] * 255.0f)), 0, oa), std::clamp(int(std::lround(o[1] * 255.0f)), 0, oa),
+                           std::clamp(int(std::lround(o[2] * 255.0f)), 0, oa), oa);
         }
     }
-    tile.dirty = false;
-    changed |= r;
 }

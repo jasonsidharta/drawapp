@@ -18,7 +18,8 @@ class WatercolorDeposit : public StrokeDeposit
 {
 public:
     static constexpr int MaxStepsPerCall = 6;
-    static constexpr int MaxDryingSteps = 4000; // own wet layer: drying at pen-up is bounded
+    static constexpr int MaxDryingSteps = 4000;          // own wet layer: drying at pen-up is bounded
+    static constexpr qint64 MaxDryingWork = 30'000'000; // cell-steps (about 0.5 s), then it settles
 
     explicit WatercolorDeposit(StrokeContext &context);
 

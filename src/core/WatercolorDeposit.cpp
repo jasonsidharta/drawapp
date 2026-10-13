@@ -3,6 +3,8 @@
 #include "BrushTips.h"
 #include "TileSnapshot.h"
 
+#include <QElapsedTimer>
+
 #include <cmath>
 
 WatercolorDeposit::WatercolorDeposit(StrokeContext &context)
@@ -76,7 +78,19 @@ QRect WatercolorDeposit::flush(StrokeSurface &image, TileSnapshot &before)
         steps = 1; // no event times: one step per input event
     }
     m_paintedThisCall = false;
-    const QRect changed = steps > 0 ? m_wet->step(image, before, steps) : m_wet->render(image, before);
+    if (steps > 0 && m_wet->stepBudgetMs() > 0) {
+        // On the canvas: steps until the event's time budget is spent; the rest is not caught up.
+        QElapsedTimer timer;
+        timer.start();
+        for (int done = 0; done < steps; ++done) {
+            m_wet->advance(1);
+            if (timer.nsecsElapsed() / 1e6 >= m_wet->stepBudgetMs())
+                break;
+        }
+    } else if (steps > 0) {
+        m_wet->advance(steps);
+    }
+    const QRect changed = m_wet->render(image, before);
     if (m_wet->allocationFailed())
         m_ctx.allocationFailed = true;
     return changed;
@@ -86,12 +100,17 @@ QRect WatercolorDeposit::finishStroke(StrokeSurface &image, TileSnapshot &before
 {
     if (!m_own || m_ctx.allocationFailed)
         return {};
-    // A stroke with its own wet layer is finished dry (bounded).
-    QRect changed;
-    for (int done = 0; done < MaxDryingSteps && m_own->isWet(); done += 50)
-        changed |= m_own->step(image, before, 50);
-    changed |= m_own->render(image, before);
-    return changed;
+    // A stroke with its own wet layer (previews, thumbnails, tests) is finished dry, with bounded
+    // work: at most MaxDryingSteps steps and MaxDryingWork cell-steps, then whatever is still
+    // wet settles where it is.
+    qint64 work = 0;
+    for (int done = 0; done < MaxDryingSteps && m_own->isWet() && work < MaxDryingWork; done += 50) {
+        work += m_own->wetCells() * 50;
+        m_own->advance(50);
+    }
+    if (m_own->isWet())
+        m_own->settleAll();
+    return m_own->render(image, before);
 }
 
 qsizetype WatercolorDeposit::bufferBytes() const
