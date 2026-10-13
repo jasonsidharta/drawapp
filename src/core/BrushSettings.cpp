@@ -80,7 +80,7 @@ BrushSettings BrushSettings::sanitized() const
             break;
         }
     }
-    for (PressureMapping *m : {&s.pressureSize, &s.pressureOpacity, &s.pressureFlow}) {
+    for (PressureMapping *m : {&s.pressureSize, &s.pressureOpacity, &s.pressureFlow, &s.pressureDepth}) {
         m->minimum = clampOr(m->minimum, 0.0, 1.0, 0.0);
         m->gamma = clampOr(m->gamma, 1.0 / 3.0, 3.0, 1.0);
     }
@@ -114,6 +114,8 @@ QJsonObject BrushSettings::toJson() const
             continue;
         }
         const QVariant v = p.get(*this);
+        if (p.since >= 11 && v == p.defaultValue())
+            continue; // milestone 11 keys only when used (BrushProperty::since)
         switch (p.type) {
         case PropertyType::Number: o[p.id] = v.toDouble(); break;
         case PropertyType::Integer: o[p.id] = v.toInt(); break;

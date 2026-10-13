@@ -173,6 +173,11 @@ struct Entry
         p.advanced = false;
         return *this;
     }
+    Entry &since(int milestone)
+    {
+        p.since = milestone;
+        return *this;
+    }
     Entry &access(const Access &a)
     {
         p.get = a.get;
@@ -231,15 +236,18 @@ std::vector<BrushProperty> build()
         .tests("tst_brush, tst_brushengine (engine suites), tst_brushengine::everyImplementedPropertyChangesRendering")
         .access(choice(&BrushSettings::blend, {"paint", "erase", "smudge", "wet"}));
     add("stamp", "Dab type", PropertyType::Choice)
-        .options({"tip", "spray", "hatching"}, {"Tip", "Spray", "Hatching"})
-        .engines(EnginePaint | EngineErase | EngineSpray | EngineHatching)
-        .desc("What one dab of a paint or erase brush is: the tip, a spray of particles, or hatching lines.")
+        .options({"tip", "spray", "hatching", "dry"}, {"Tip", "Spray", "Hatching", "Dry media"})
+        .engines(EngineCoverage)
+        .desc("What one dab of a paint or erase brush is: the tip, a spray of particles, hatching lines, or dry media "
+              "(graphite, charcoal, chalk, pastel) that catches in the paper's tooth.")
         .render("Spray scatters round particles over the dab's disc; hatching draws parallel document-space lines inside "
-                "the tip.")
-        .cost("Spray: per particle O(particle area). Hatching: as the tip plus one distance per pixel.")
-        .tests("tst_brushengine::sprayAndHatching")
+                "the tip; dry media deposits the tip only where the pressure-dependent penetration reaches into the "
+                "paper (the texture, in document space).")
+        .cost("Spray: per particle O(particle area). Hatching: as the tip plus one distance per pixel. Dry media: as "
+              "the tip plus one or two texture samples per pixel.")
+        .tests("tst_brushengine::sprayAndHatching, tst_brushmedia (dry media)")
         .needs("Paint or erase engine")
-        .access(choice(&BrushSettings::stamp, {"tip", "spray", "hatching"}));
+        .access(choice(&BrushSettings::stamp, {"tip", "spray", "hatching", "dry"}));
 
     // -------------------------------------------------------------------------------- Brush tip
     g = QStringLiteral("Brush Tip");
@@ -576,7 +584,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::textureStrength));
     add("textureMode", "Texture mode", PropertyType::Choice)
         .options({"multiply", "subtract"}, {"Multiply", "Tooth (pressure fills it)"})
-        .engines(TexEngines)
+        .engines(TexEngines & ~EngineDry)
         .basic()
         .desc("Multiply scales the paint by the grain; tooth removes paint in the valleys first, so light marks break "
               "up and heavy ones fill in.")
@@ -621,7 +629,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::textureInvert));
     add("textureEachDab", "Texture each dab", PropertyType::Bool)
-        .engines(EngineCoverage)
+        .engines(EngineCoverage & ~EngineDry)
         .desc("Applies the grain to every dab instead of the finished stroke, so overlapping dabs fill the grain in "
               "(build-up). Texture strength dynamics always work this way.")
         .render("The grain multiplies each dab's tip value instead of the stroke coverage at composite time.")
@@ -630,7 +638,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::textureEachDab));
     add("textureMoving", "Moving grain", PropertyType::Bool)
-        .engines(EngineCoverage)
+        .engines(EngineCoverage & ~EngineDry)
         .desc("The grain moves and turns with each dab (stamped), instead of staying fixed on the paper.")
         .render("Texture coordinates relative to the dab centre, rotated with the dab.")
         .cost("Bilinear sampling.")
@@ -645,7 +653,7 @@ std::vector<BrushProperty> build()
         .needs("A texture")
         .tests(EffectTest)
         .access(flag(&BrushSettings::textureRandomOffset));
-    dyn(DynamicTarget::TextureStrength, "Texture strength dynamics", EngineCoverage,
+    dyn(DynamicTarget::TextureStrength, "Texture strength dynamics", EngineCoverage & ~EngineDry,
         "Each dab's texture strength × value (switches the texture to each-dab).", "A texture");
 
     // ---------------------------------------------------------------------------- Shape dynamics
@@ -715,7 +723,7 @@ std::vector<BrushProperty> build()
 
     // ---------------------------------------------------------------------------- Colour dynamics
     g = QStringLiteral("Color Dynamics");
-    const unsigned ColorEngines = EnginePaint | EngineSpray | EngineHatching | EngineWet;
+    const unsigned ColorEngines = EnginePaint | EngineSpray | EngineHatching | EngineDry | EngineWet;
     auto colorJitter = [&](const char *id, const char *name, double max, double scale, const char *unit,
                            double BrushSettings::*m, const char *what, bool perStroke) {
         add(id, name, PropertyType::Number)
@@ -752,7 +760,7 @@ std::vector<BrushProperty> build()
     add("paintMode", "Blend mode", PropertyType::Choice)
         .options({"normal", "multiply", "screen", "behind", "preserveAlpha"},
                  {"Normal", "Multiply", "Screen", "Behind", "Inside (preserve alpha)"})
-        .engines(EnginePaint | EngineSpray | EngineHatching)
+        .engines(EnginePaint | EngineSpray | EngineHatching | EngineDry)
         .desc("How the stroke's colour combines with the layer: over it, multiplied (darkens), screened (lightens), "
               "behind existing paint, or only on existing paint without changing its alpha.")
         .render("W3C compositing formulas on premultiplied pixels with the stroke coverage as source alpha.")
@@ -1015,6 +1023,102 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::hatchThickness));
 
+    // ------------------------------------------------------------------- Dry media (milestone 11)
+    g = QStringLiteral("Dry Media");
+    const char *const DryTests = "tst_brushmedia::dry*";
+    add("dryDepth", "Penetration", PropertyType::Number)
+        .percent()
+        .engines(EngineDry)
+        .basic()
+        .since(11)
+        .desc("How deep into the paper's tooth the medium reaches at full pressure: low values touch only the peaks "
+              "(a light, grainy mark), high values fill the valleys too (a dense mark).")
+        .render("Per pixel of each dab: tip × smoothstep((depth − (1 − paper height)) / softness); the paper is the "
+                "texture in document space, so repeated strokes meet the same tooth.")
+        .cost("Per pixel of each dab: one paper sample.")
+        .tests(DryTests)
+        .access(number(&BrushSettings::dryDepth));
+    add("pressureDepth", "Pressure → penetration", PropertyType::Pressure)
+        .engines(EngineDry)
+        .sensors("pressure")
+        .since(11)
+        .desc("How pressure changes the penetration: depth × (minimum + (1 − minimum) × pressure^firmness). A pen without "
+              "pressure, mouse and touch draw at full depth.")
+        .render("Scales the dab's penetration before the paper comparison.")
+        .cost("Per dab: one power.")
+        .needs("A pen that reports pressure")
+        .tests(DryTests)
+        .access(pressure(&BrushSettings::pressureDepth));
+    add("drySoftness", "Softness", PropertyType::Number)
+        .percent(0.01, 0.5)
+        .engines(EngineDry)
+        .since(11)
+        .desc("Width of the transition between touched and untouched tooth: low values give a crisp, hard-lead grain, "
+              "high values a soft, smudgy one.")
+        .render("Divides the depth difference before the smoothstep.")
+        .cost("None.")
+        .tests(DryTests)
+        .access(number(&BrushSettings::drySoftness));
+    add("dryStreaks", "Streaks", PropertyType::Number)
+        .percent()
+        .engines(EngineDry)
+        .since(11)
+        .desc("Grain that runs along the stroke, as charcoal and pastel leave it; it turns with the stroke direction.")
+        .render("The paper height is mixed with a streak field sampled in the dab's frame (along the heading).")
+        .cost("Per pixel of each dab: one bilinear sample of the streak field.")
+        .tests(DryTests)
+        .access(number(&BrushSettings::dryStreaks));
+    add("dryStreakLength", "Streak length", PropertyType::Number)
+        .range(1, 16, 1, "×")
+        .engines(EngineDry)
+        .since(11)
+        .desc("How elongated the streaks are along the stroke (1 = round grain).")
+        .render("Stretches the streak field along the heading.")
+        .cost("None.")
+        .needs("Streaks above 0")
+        .tests(DryTests)
+        .access(number(&BrushSettings::dryStreakLength));
+    add("dryStreakScale", "Streak size", PropertyType::Number)
+        .range(0.25, 4, 100, "%")
+        .engines(EngineDry)
+        .since(11)
+        .desc("Size of the streak grain.")
+        .render("Divides the streak field coordinates.")
+        .cost("None.")
+        .needs("Streaks above 0")
+        .tests(DryTests)
+        .access(number(&BrushSettings::dryStreakScale));
+    add("dryEdgeBreakup", "Edge breakup", PropertyType::Number)
+        .percent()
+        .engines(EngineDry)
+        .since(11)
+        .desc("Makes the rim of the mark crumble, as charcoal and chalk do, instead of fading evenly.")
+        .render("Lowers the penetration towards the dab's rim by a document-space noise term.")
+        .cost("Per pixel of each dab: one extra paper sample near the rim.")
+        .tests(DryTests)
+        .access(number(&BrushSettings::dryEdgeBreakup));
+    add("dryGrit", "Grit", PropertyType::Number)
+        .percent(0, 0.9)
+        .engines(EngineDry)
+        .since(11)
+        .desc("Pigment that skips: a share of pixels the stroke leaves bare, different for each stroke (seeded).")
+        .render("Pixels whose per-stroke hash is below the grit keep only a fifth of the deposit.")
+        .cost("Per pixel of each dab: one hash.")
+        .tests(DryTests)
+        .access(number(&BrushSettings::dryGrit));
+    add("dryTiltDepth", "Tilt → penetration", PropertyType::Number)
+        .percent()
+        .engines(EngineDry)
+        .sensors("tilt")
+        .since(11)
+        .desc("Penetration at full tilt, as a share of the upright value: shading with the side of the lead touches only "
+              "the peaks.")
+        .render("Penetration × (1 + (value − 1) × tilt amount).")
+        .cost("None.")
+        .needs("A pen that reports tilt")
+        .tests(DryTests)
+        .access(number(&BrushSettings::dryTiltDepth));
+
     std::vector<BrushProperty> out;
     out.reserve(e.size());
     for (Entry &x : e)
@@ -1029,13 +1133,22 @@ QVariant BrushProperty::defaultValue() const
     return get ? get(BrushSettings()) : QVariant();
 }
 
-QStringList BrushProperties::groups()
+QStringList BrushProperties::designGroups()
 {
     return {QStringLiteral("Brush Tip"),         QStringLiteral("Stroke Path"),     QStringLiteral("Pressure and Tilt"),
             QStringLiteral("Opacity and Flow"),  QStringLiteral("Texture and Grain"), QStringLiteral("Shape Dynamics"),
             QStringLiteral("Color Dynamics"),    QStringLiteral("Blending and Smudge"), QStringLiteral("Wet Paint"),
-            QStringLiteral("Stabilization"),     QStringLiteral("Taper"),           QStringLiteral("Special Effects"),
-            QStringLiteral("Engine")};
+            QStringLiteral("Stabilization"),     QStringLiteral("Taper"),           QStringLiteral("Special Effects")};
+}
+
+QStringList BrushProperties::engineGroups()
+{
+    return {QStringLiteral("Dry Media")};
+}
+
+QStringList BrushProperties::groups()
+{
+    return designGroups() + engineGroups() + QStringList{QStringLiteral("Engine")};
 }
 
 const std::vector<BrushProperty> &BrushProperties::all()
@@ -1060,8 +1173,14 @@ int BrushProperties::implementedCount()
 
 int BrushProperties::designTargetCount()
 {
-    return int(std::count_if(all().begin(), all().end(),
-                             [](const BrushProperty &p) { return p.group != QLatin1String("Engine"); }));
+    const QStringList design = designGroups();
+    return int(std::count_if(all().begin(), all().end(), [&](const BrushProperty &p) { return design.contains(p.group); }));
+}
+
+int BrushProperties::engineGroupCount()
+{
+    const QStringList engines = engineGroups();
+    return int(std::count_if(all().begin(), all().end(), [&](const BrushProperty &p) { return engines.contains(p.group); }));
 }
 
 unsigned BrushProperties::engineOf(const BrushSettings &s)
@@ -1075,6 +1194,8 @@ unsigned BrushProperties::engineOf(const BrushSettings &s)
         return EngineSpray;
     if (s.stamp == BrushStamp::Hatching)
         return EngineHatching;
+    if (s.stamp == BrushStamp::Dry)
+        return EngineDry;
     return s.blend == BrushBlend::Erase ? EngineErase : EnginePaint;
 }
 

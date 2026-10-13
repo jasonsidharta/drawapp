@@ -227,7 +227,7 @@ BrushSettings baseSettings()
 unsigned testEngine(unsigned engines)
 {
     for (unsigned e : {unsigned(EnginePaint), unsigned(EngineSmudge), unsigned(EngineWet), unsigned(EngineSpray),
-                       unsigned(EngineHatching), unsigned(EngineErase)})
+                       unsigned(EngineHatching), unsigned(EngineErase), unsigned(EngineDry)})
         if (engines & e)
             return e;
     return EnginePaint;
@@ -241,6 +241,7 @@ void applyEngine(BrushSettings &s, unsigned engine)
     case EngineWet: s.blend = BrushBlend::WetPaint; break;
     case EngineSpray: s.stamp = BrushStamp::Spray; break;
     case EngineHatching: s.stamp = BrushStamp::Hatching; break;
+    case EngineDry: s.stamp = BrushStamp::Dry; break;
     default: break;
     }
 }
@@ -267,6 +268,12 @@ std::map<QString, Scenario> scenarios()
     auto oval = [](BrushSettings &s) { s.roundness = 0.3; };
     auto asym = [](BrushSettings &s) { s.tipImage = BrushProperties::tipFromImage(asymmetricImage()); };
     auto none = [](BrushSettings &) {};
+    auto dry = [](BrushSettings &s) {
+        s.stamp = BrushStamp::Dry;
+        s.texture = QStringLiteral("rough");
+        s.textureStrength = 0.9;
+        s.dryDepth = 0.6;
+    };
     const QVariant asymImage = QVariant::fromValue(asymmetricImage());
     return {
         // Engine
@@ -378,6 +385,16 @@ std::map<QString, Scenario> scenarios()
         {"hatchAngle", {none, -30.0}},
         {"hatchSpacing", {none, 12.0}},
         {"hatchThickness", {none, 4.0}},
+        // Dry media (milestone 11), on the dry stamp with a strong tooth
+        {"dryDepth", {dry, 0.3}},
+        {"pressureDepth", {dry, QVariantMap{{"enabled", true}, {"minimum", 0.0}, {"gamma", 2.5}}}},
+        {"drySoftness", {dry, 0.45}},
+        {"dryStreaks", {dry, 0.8}},
+        {"dryStreakLength", {[=](BrushSettings &s) { dry(s); s.dryStreaks = 0.8; }, 14.0}},
+        {"dryStreakScale", {[=](BrushSettings &s) { dry(s); s.dryStreaks = 0.8; }, 3.0}},
+        {"dryEdgeBreakup", {dry, 1.0}},
+        {"dryGrit", {dry, 0.5}},
+        {"dryTiltDepth", {dry, 0.2}},
     };
 }
 
@@ -390,6 +407,13 @@ QString goldenPath(const QString &name)
 bool writeGolden()
 {
     return qEnvironmentVariableIntValue("DRAWAPP_WRITE_GOLDEN") == 1;
+}
+
+// Milestone 11: golden images of new presets are written only when missing
+// (DRAWAPP_WRITE_NEW_GOLDEN=1), so the committed milestone 6-10 references are never regenerated.
+bool writeMissingGolden(const QString &path)
+{
+    return writeGolden() || (!QFile::exists(path) && qEnvironmentVariableIntValue("DRAWAPP_WRITE_NEW_GOLDEN") == 1);
 }
 
 // A tip computed pixel by pixel (no QPainter), so it is the same on every platform.
@@ -1148,7 +1172,18 @@ private slots:
                 QVERIFY2(p.choices.contains(d.toString()) && p.choices.size() == p.choiceLabels.size(), qPrintable(p.id));
         }
         QCOMPARE(implemented, BrushProperties::implementedCount());
-        qInfo("Implemented brush properties: %d of %d", implemented, BrushProperties::designTargetCount());
+        const QStringList design = BrushProperties::designGroups();
+        const int inDesign = int(std::count_if(all.begin(), all.end(), [&](const BrushProperty &p) {
+            return p.implemented && design.contains(p.group);
+        }));
+        const int inEngines = implemented - inDesign;
+        QCOMPARE(BrushProperties::engineGroupCount(),
+                 int(std::count_if(all.begin(), all.end(), [&](const BrushProperty &p) {
+                     return BrushProperties::engineGroups().contains(p.group);
+                 })));
+        qInfo("Implemented brush properties: %d of the %d in the milestone 9 design target, plus %d of %d in the "
+              "milestone 11 engine groups",
+              inDesign, BrushProperties::designTargetCount(), inEngines, BrushProperties::engineGroupCount());
     }
 
     void everyImplementedPropertyChangesRendering()
@@ -1324,7 +1359,7 @@ private slots:
         for (const auto &[name, settings] : cases) {
             const QImage img = render(settings, standardStroke(), stripes());
             const QString path = goldenPath(QStringLiteral("stroke-%1.png").arg(name));
-            if (writeGolden())
+            if (writeMissingGolden(path))
                 QVERIFY(img.save(path));
             const QImage ref = QImage(path).convertToFormat(QImage::Format_ARGB32_Premultiplied);
             QVERIFY2(!ref.isNull(), qPrintable("missing " + path + " (run with DRAWAPP_WRITE_GOLDEN=1)"));
@@ -1396,7 +1431,7 @@ private slots:
                 const QImage img = tiled.toImage();
                 const QString name = QStringLiteral("m10-seam-%1%2").arg(p.id.mid(8), onTransparency ? "-transparent" : "");
                 const QString path = goldenPath(QStringLiteral("stroke-%1.png").arg(name));
-                if (writeGolden())
+                if (writeMissingGolden(path))
                     QVERIFY(img.save(path));
                 const QImage ref = QImage(path).convertToFormat(QImage::Format_ARGB32_Premultiplied);
                 QVERIFY2(!ref.isNull(), qPrintable("missing " + path + " (run with DRAWAPP_WRITE_GOLDEN=1)"));

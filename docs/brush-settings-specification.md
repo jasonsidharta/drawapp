@@ -20,7 +20,8 @@ A property counts as **implemented** only if it changes rendering: `tst_brusheng
 | Stabilization | 4 | 4 | 8 |
 | Taper | 6 | 2 | 8 |
 | Special Effects | 6 | 0 | 6 |
-| **Total** | **94** | **26** | **120** |
+| Dry Media | 9 | 0 | 9 |
+| **Total** | **103** | **26** | **129** |
 
 The two engine selectors (`blend`, `stamp`) are listed under Engine and not counted.
 
@@ -614,11 +615,11 @@ A generated paper or canvas grain that breaks up the paint.
 
 - Status: implemented (Brush Studio and quick panel)
 - Type: option
-- Range: None / Canvas weave / Paper tooth
+- Range: None / Canvas weave / Laid paper (pastel) / Paper tooth / Rough paper (cold press) / Smooth paper (bristol)
 - Default: None
 - Engines: all
 - Sensors: —
-- Serialisation: `texture`: one of "", "canvas", "paper"
+- Serialisation: `texture`: one of "", "canvas", "laid", "paper", "rough", "smooth"
 - Rendering: Per pixel the coverage is reduced in the texture's valleys (document space unless moving).
 - Cost: Per pixel: one texture sample (nearest at scale 1 without rotation, bilinear otherwise).
 - Tests: tst_brush::textureIsCoherentInDocumentSpace, subtractTextureFillsWithPressure, tst_brushengine::everyImplementedPropertyChangesRendering
@@ -663,7 +664,7 @@ Multiply scales the paint by the grain; tooth removes paint in the valleys first
 - Type: option
 - Range: Multiply / Tooth (pressure fills it)
 - Default: Multiply
-- Engines: all
+- Engines: paint, erase, smudge, wet paint, spray, hatching
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureMode`: one of "multiply", "subtract"
@@ -1682,6 +1683,147 @@ Width of each hatching line.
 - Cost: None.
 - Tests: tst_brushengine::everyImplementedPropertyChangesRendering
 
+## Dry Media
+
+### Penetration — `dryDepth`
+
+How deep into the paper's tooth the medium reaches at full pressure: low values touch only the peaks (a light, grainy mark), high values fill the valleys too (a dense mark).
+
+- Status: implemented (Brush Studio and quick panel)
+- Type: number
+- Range: 0 … 100 %
+- Default: 80 %
+- Engines: 
+- Sensors: —
+- Serialisation: `dryDepth`: JSON number
+- Rendering: Per pixel of each dab: tip × smoothstep((depth − (1 − paper height)) / softness); the paper is the texture in document space, so repeated strokes meet the same tooth.
+- Cost: Per pixel of each dab: one paper sample.
+- Tests: tst_brushmedia::dry*
+
+### Pressure → penetration — `pressureDepth`
+
+How pressure changes the penetration: depth × (minimum + (1 − minimum) × pressure^firmness). A pen without pressure, mouse and touch draw at full depth.
+
+- Status: implemented (Brush Studio)
+- Type: pressure response
+- Range: minimum 0 … 100 %, firmness (gamma) 0.33 … 3
+- Default: {"enabled":true,"gamma":1,"minimum":0.15}
+- Engines: 
+- Sensors: pressure
+- Has an effect with: A pen that reports pressure
+- Serialisation: `pressureDepth`: {enabled, minimum, gamma}
+- Rendering: Scales the dab's penetration before the paper comparison.
+- Cost: Per dab: one power.
+- Tests: tst_brushmedia::dry*
+
+### Softness — `drySoftness`
+
+Width of the transition between touched and untouched tooth: low values give a crisp, hard-lead grain, high values a soft, smudgy one.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 1 … 50 %
+- Default: 12 %
+- Engines: 
+- Sensors: —
+- Serialisation: `drySoftness`: JSON number
+- Rendering: Divides the depth difference before the smoothstep.
+- Cost: None.
+- Tests: tst_brushmedia::dry*
+
+### Streaks — `dryStreaks`
+
+Grain that runs along the stroke, as charcoal and pastel leave it; it turns with the stroke direction.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 0 %
+- Engines: 
+- Sensors: —
+- Serialisation: `dryStreaks`: JSON number
+- Rendering: The paper height is mixed with a streak field sampled in the dab's frame (along the heading).
+- Cost: Per pixel of each dab: one bilinear sample of the streak field.
+- Tests: tst_brushmedia::dry*
+
+### Streak length — `dryStreakLength`
+
+How elongated the streaks are along the stroke (1 = round grain).
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 1 … 16 ×
+- Default: 6 ×
+- Engines: 
+- Sensors: —
+- Has an effect with: Streaks above 0
+- Serialisation: `dryStreakLength`: JSON number
+- Rendering: Stretches the streak field along the heading.
+- Cost: None.
+- Tests: tst_brushmedia::dry*
+
+### Streak size — `dryStreakScale`
+
+Size of the streak grain.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 25 … 400 %
+- Default: 100 %
+- Engines: 
+- Sensors: —
+- Has an effect with: Streaks above 0
+- Serialisation: `dryStreakScale`: JSON number
+- Rendering: Divides the streak field coordinates.
+- Cost: None.
+- Tests: tst_brushmedia::dry*
+
+### Edge breakup — `dryEdgeBreakup`
+
+Makes the rim of the mark crumble, as charcoal and chalk do, instead of fading evenly.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 0 %
+- Engines: 
+- Sensors: —
+- Serialisation: `dryEdgeBreakup`: JSON number
+- Rendering: Lowers the penetration towards the dab's rim by a document-space noise term.
+- Cost: Per pixel of each dab: one extra paper sample near the rim.
+- Tests: tst_brushmedia::dry*
+
+### Grit — `dryGrit`
+
+Pigment that skips: a share of pixels the stroke leaves bare, different for each stroke (seeded).
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 90 %
+- Default: 0 %
+- Engines: 
+- Sensors: —
+- Serialisation: `dryGrit`: JSON number
+- Rendering: Pixels whose per-stroke hash is below the grit keep only a fifth of the deposit.
+- Cost: Per pixel of each dab: one hash.
+- Tests: tst_brushmedia::dry*
+
+### Tilt → penetration — `dryTiltDepth`
+
+Penetration at full tilt, as a share of the upright value: shading with the side of the lead touches only the peaks.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 100 %
+- Engines: 
+- Sensors: tilt
+- Has an effect with: A pen that reports tilt
+- Serialisation: `dryTiltDepth`: JSON number
+- Rendering: Penetration × (1 + (value − 1) × tilt amount).
+- Cost: None.
+- Tests: tst_brushmedia::dry*
+
 ## Engine
 
 ### Engine — `blend`
@@ -1701,17 +1843,17 @@ What the brush does to the layer: paint colour, erase, smudge existing paint, or
 
 ### Dab type — `stamp`
 
-What one dab of a paint or erase brush is: the tip, a spray of particles, or hatching lines.
+What one dab of a paint or erase brush is: the tip, a spray of particles, hatching lines, or dry media (graphite, charcoal, chalk, pastel) that catches in the paper's tooth.
 
 - Status: implemented (Brush Studio)
 - Type: option
-- Range: Tip / Spray / Hatching
+- Range: Tip / Spray / Hatching / Dry media
 - Default: Tip
 - Engines: paint, erase, spray, hatching
 - Sensors: —
 - Has an effect with: Paint or erase engine
-- Serialisation: `stamp`: one of "tip", "spray", "hatching"
-- Rendering: Spray scatters round particles over the dab's disc; hatching draws parallel document-space lines inside the tip.
-- Cost: Spray: per particle O(particle area). Hatching: as the tip plus one distance per pixel.
-- Tests: tst_brushengine::sprayAndHatching
+- Serialisation: `stamp`: one of "tip", "spray", "hatching", "dry"
+- Rendering: Spray scatters round particles over the dab's disc; hatching draws parallel document-space lines inside the tip; dry media deposits the tip only where the pressure-dependent penetration reaches into the paper (the texture, in document space).
+- Cost: Spray: per particle O(particle area). Hatching: as the tip plus one distance per pixel. Dry media: as the tip plus one or two texture samples per pixel.
+- Tests: tst_brushengine::sprayAndHatching, tst_brushmedia (dry media)
 

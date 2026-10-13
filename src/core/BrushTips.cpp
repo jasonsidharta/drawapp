@@ -102,6 +102,75 @@ QImage canvasTexture()
     return image;
 }
 
+// --- Milestone 11 papers (dry media) and the streak field ---
+
+// Cold-press ("rough") paper: rounded pits about 10 px across over fine grain; deep valleys.
+QImage roughTexture()
+{
+    const int n = 256;
+    QImage image = gray(n, n);
+    for (int y = 0; y < n; ++y) {
+        uchar *row = image.scanLine(y);
+        for (int x = 0; x < n; ++x) {
+            const double pits = fbm(x, y, n, 24, 2, 505);  // about 10 px
+            const double grain = fbm(x, y, n, 128, 2, 606); // about 2 px
+            double v = 0.6 * pits + 0.4 * grain;
+            v = smooth(std::clamp((v - 0.2) / 0.6, 0.0, 1.0));
+            row[x] = toByte(v);
+        }
+    }
+    return image;
+}
+
+// Laid paper (as used for pastels): fine parallel laid lines every 4 px, chain lines every 32 px,
+// over soft grain.
+QImage laidTexture()
+{
+    const int n = 256;
+    QImage image = gray(n, n);
+    for (int y = 0; y < n; ++y) {
+        uchar *row = image.scanLine(y);
+        for (int x = 0; x < n; ++x) {
+            const double laid = 0.5 + 0.5 * std::cos(2.0 * Pi * y / 4.0);
+            const double chain = std::max(0.0, 1.0 - std::abs((x % 32) - 16) / 2.0);
+            const double grain = fbm(x, y, n, 64, 2, 707);
+            const double v = 0.45 * laid + 0.35 * grain + 0.2 * (1.0 - chain);
+            row[x] = toByte(std::clamp(v, 0.0, 1.0));
+        }
+    }
+    return image;
+}
+
+// Smooth (bristol) paper: very fine, low-contrast grain.
+QImage smoothTexture()
+{
+    const int n = 256;
+    QImage image = gray(n, n);
+    for (int y = 0; y < n; ++y) {
+        uchar *row = image.scanLine(y);
+        for (int x = 0; x < n; ++x)
+            row[x] = toByte(0.55 + 0.4 * (fbm(x, y, n, 128, 2, 808) - 0.5));
+    }
+    return image;
+}
+
+// Isotropic fine noise (cells about 4 px) that dry media sample stretched along the stroke, so its
+// grains become streaks running with the stroke direction.
+QImage streakField()
+{
+    const int n = 256;
+    QImage image = gray(n, n);
+    for (int y = 0; y < n; ++y) {
+        uchar *row = image.scanLine(y);
+        for (int x = 0; x < n; ++x) {
+            double v = fbm(x, y, n, 64, 2, 909);
+            v = smooth(std::clamp((v - 0.2) / 0.6, 0.0, 1.0));
+            row[x] = toByte(v);
+        }
+    }
+    return image;
+}
+
 // Flat bristle tip: a row of hairs across the tip (along y), each a soft, slightly elongated blob
 // of its own width and load. Moving along x with small spacing, the hairs draw parallel streaks.
 QImage bristleTip()
@@ -221,9 +290,29 @@ BrushTips::Tip BrushTips::makeTip(const QImage &image)
 
 const BrushTips::Texture *BrushTips::texture(const QString &id)
 {
+    // Milestone 11 papers: each generated on its own first use (thread-safe statics), so the
+    // milestone 9 library's start-up cost does not grow.
+    if (id == QLatin1String("rough")) {
+        static const Texture t{QStringLiteral("rough"), label(QStringLiteral("rough")), roughTexture()};
+        return &t;
+    }
+    if (id == QLatin1String("laid")) {
+        static const Texture t{QStringLiteral("laid"), label(QStringLiteral("laid")), laidTexture()};
+        return &t;
+    }
+    if (id == QLatin1String("smooth")) {
+        static const Texture t{QStringLiteral("smooth"), label(QStringLiteral("smooth")), smoothTexture()};
+        return &t;
+    }
     const auto &textures = library().textures;
     const auto it = textures.find(id);
     return it == textures.end() ? nullptr : &it->second;
+}
+
+const QImage &BrushTips::streaks()
+{
+    static const QImage field = streakField();
+    return field;
 }
 
 // Ids and labels without generating any image (the brush property registry needs them at
@@ -235,7 +324,8 @@ QStringList BrushTips::tipIds()
 
 QStringList BrushTips::textureIds()
 {
-    return {QStringLiteral("canvas"), QStringLiteral("paper")};
+    return {QStringLiteral("canvas"), QStringLiteral("laid"), QStringLiteral("paper"), QStringLiteral("rough"),
+            QStringLiteral("smooth")};
 }
 
 QString BrushTips::label(const QString &id)
@@ -246,5 +336,11 @@ QString BrushTips::label(const QString &id)
         return QStringLiteral("Paper tooth");
     if (id == QLatin1String("canvas"))
         return QStringLiteral("Canvas weave");
+    if (id == QLatin1String("rough"))
+        return QStringLiteral("Rough paper (cold press)");
+    if (id == QLatin1String("laid"))
+        return QStringLiteral("Laid paper (pastel)");
+    if (id == QLatin1String("smooth"))
+        return QStringLiteral("Smooth paper (bristol)");
     return QString();
 }

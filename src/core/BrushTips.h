@@ -39,6 +39,8 @@ const Tip *tip(const QString &id);
 // A tip from an image (imported tips): converted to Grayscale8, mip chain and pass length built.
 Tip makeTip(const QImage &image);
 const Texture *texture(const QString &id);
+// Isotropic fine grain that dry media sample stretched along the stroke (milestone 11).
+const QImage &streaks();
 // Ids (sorted) and labels; these never generate images.
 QStringList tipIds();
 QStringList textureIds();

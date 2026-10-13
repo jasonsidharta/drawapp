@@ -67,6 +67,14 @@ StrokeEngine::StrokeEngine(const BrushSettings &settings, const QColor &color, q
         m_ctx.texture = BrushTips::texture(s.texture);
     m_ctx.textureEachDab = m_ctx.texture && m_ctx.coverageBlend && (s.textureEachDab || textureDynamics);
     m_ctx.textureNearest = s.textureScale == 1.0 && s.textureRotation == 0.0 && !(m_ctx.textureEachDab && s.textureMoving);
+    if (m_ctx.coverageBlend && s.stamp == BrushStamp::Dry) {
+        // Dry media always work against a paper, per dab, fixed in document space (DryDeposit).
+        m_ctx.texture = BrushTips::texture(s.texture);
+        if (!m_ctx.texture)
+            m_ctx.texture = BrushTips::texture(QStringLiteral("paper"));
+        m_ctx.textureEachDab = true;
+        m_ctx.textureNearest = s.textureScale == 1.0 && s.textureRotation == 0.0;
+    }
     m_ctx.textureCos = std::cos(s.textureRotation * Pi / 180.0);
     m_ctx.textureSin = std::sin(s.textureRotation * Pi / 180.0);
     if (s.textureRandomOffset)
@@ -551,6 +559,7 @@ StrokeEngine::DabParams StrokeEngine::paramsFor(const Dab &dab) const
     // For milestone 11 strategies (bristle contact, dry-media penetration, strands): not used by the
     // milestone 10 engines.
     d.pressure = pressure;
+    d.tilt = tilt;
     if (m_headingKnown) {
         d.direction = std::atan2(m_heading.y(), m_heading.x());
         d.hasDirection = true;

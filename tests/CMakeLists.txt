@@ -13,6 +13,11 @@ target_link_libraries(tst_brushengine PRIVATE drawcore Qt6::Test)
 target_compile_definitions(tst_brushengine PRIVATE DRAWAPP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME tst_brushengine COMMAND tst_brushengine)
 
+qt_add_executable(tst_brushmedia tst_brushmedia.cpp)
+target_link_libraries(tst_brushmedia PRIVATE drawcore Qt6::Test)
+target_compile_definitions(tst_brushmedia PRIVATE DRAWAPP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME tst_brushmedia COMMAND tst_brushmedia)
+
 qt_add_executable(tst_fileformat tst_fileformat.cpp)
 target_link_libraries(tst_fileformat PRIVATE drawcore Qt6::Test)
 target_compile_definitions(tst_fileformat PRIVATE DRAWAPP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

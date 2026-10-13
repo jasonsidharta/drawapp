@@ -111,6 +111,115 @@ std::vector<BrushPreset> makeBuiltIns()
         s.pressureFlow = {true, 0.1, 1.0};
         list.push_back(preset("soft-eraser", "Soft Eraser", s));
     }
+
+    // --- Milestone 11: dry media (stamp Dry, DryDeposit) ---
+    // Graphite: the lead's grade sets how dark it can go (opacity), how deep into the tooth it
+    // reaches (penetration) and how crisp its grain is (softness). Pressure deepens the mark; the
+    // side of a tilted pencil shades only the peaks.
+    auto graphite = [](double size, double opacity, double depth, double softness, double tooth) {
+        BrushSettings s;
+        s.stamp = BrushStamp::Dry;
+        s.size = size;
+        s.hardness = 0.6;
+        s.spacing = 0.07;
+        s.opacity = opacity;
+        s.flow = 0.55;
+        s.accumulation = Accumulation::BuildUp;
+        s.pressureSize = {true, 0.6, 1.0};
+        s.pressureOpacity = {true, 0.35, 1.2};
+        s.texture = QStringLiteral("paper");
+        s.textureStrength = tooth;
+        s.dryDepth = depth;
+        s.pressureDepth = {true, 0.15, 1.1};
+        s.drySoftness = softness;
+        s.tiltSize = 2.5;
+        s.dryTiltDepth = 0.55;
+        s.smoothing = 10;
+        return s;
+    };
+    list.push_back(preset("graphite-2h", "Graphite 2H", graphite(3.5, 0.6, 0.7, 0.12, 0.8)));
+    list.push_back(preset("graphite-hb", "Graphite HB", graphite(4.5, 0.85, 0.78, 0.14, 0.8)));
+    {
+        BrushSettings s = graphite(7, 0.98, 0.82, 0.18, 0.75);
+        s.hardness = 0.4;
+        s.flow = 0.65;
+        list.push_back(preset("graphite-6b", "Graphite 6B", s));
+    }
+    // Charcoal: streaks along the stroke, a crumbling rim and grit, on rough paper.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Dry;
+        s.size = 14;
+        s.hardness = 0.25;
+        s.roundness = 0.7;
+        s.followDirection = true;
+        s.spacing = 0.06;
+        s.opacity = 0.85;
+        s.flow = 0.5;
+        s.accumulation = Accumulation::BuildUp;
+        s.pressureSize = {true, 0.5, 1.0};
+        s.pressureOpacity = {true, 0.3, 1.0};
+        s.texture = QStringLiteral("rough");
+        s.textureStrength = 0.85;
+        s.dryDepth = 0.68;
+        s.drySoftness = 0.15;
+        s.dryStreaks = 0.45;
+        s.dryStreakLength = 7;
+        s.dryEdgeBreakup = 0.5;
+        s.dryGrit = 0.08;
+        s.tiltSize = 2.0;
+        s.dryTiltDepth = 0.6;
+        list.push_back(preset("vine-charcoal", "Vine Charcoal", s));
+        s.size = 16;
+        s.hardness = 0.5;
+        s.opacity = 1.0;
+        s.flow = 0.7;
+        s.textureStrength = 0.75;
+        s.dryDepth = 0.8;
+        s.drySoftness = 0.1;
+        s.dryStreaks = 0.3;
+        s.dryEdgeBreakup = 0.35;
+        s.dryGrit = 0.05;
+        list.push_back(preset("compressed-charcoal", "Compressed Charcoal", s));
+    }
+    // Chalk and pastel: broad, flattened sticks; the paper shows through, the rim breaks up.
+    {
+        BrushSettings s;
+        s.stamp = BrushStamp::Dry;
+        s.size = 30;
+        s.hardness = 0.35;
+        s.roundness = 0.6;
+        s.followDirection = true;
+        s.spacing = 0.06;
+        s.opacity = 0.95;
+        s.flow = 0.6;
+        s.accumulation = Accumulation::BuildUp;
+        s.pressureSize = {true, 0.55, 1.0};
+        s.texture = QStringLiteral("rough");
+        s.textureStrength = 0.9;
+        s.dryDepth = 0.62;
+        s.drySoftness = 0.12;
+        s.dryStreaks = 0.25;
+        s.dryStreakLength = 4;
+        s.dryEdgeBreakup = 0.5;
+        s.dryGrit = 0.08;
+        s.dryTiltDepth = 0.6;
+        list.push_back(preset("chalk", "Chalk", s));
+        s.size = 30;
+        s.hardness = 0.3;
+        s.roundness = 0.55;
+        s.opacity = 1.0;
+        s.flow = 0.75;
+        s.texture = QStringLiteral("laid");
+        s.textureStrength = 0.85;
+        s.dryDepth = 0.68;
+        s.drySoftness = 0.15;
+        s.dryStreaks = 0.35;
+        s.dryStreakLength = 5;
+        s.dryEdgeBreakup = 0.45;
+        s.dryGrit = 0.06;
+        list.push_back(preset("soft-pastel", "Soft Pastel", s));
+    }
     return list;
 }
 

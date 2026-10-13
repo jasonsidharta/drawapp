@@ -39,6 +39,7 @@ struct DabParams
     QRgb color = 0;       // opaque stroke colour of this dab
     qint64 index = 0;     // render index, for per-dab randomness
     double pressure = 1;  // the dab's pressure (1 without pressure data)
+    double tilt = 0;      // pen tilt amount, 0 (upright or no tilt data) .. 1 (full tilt setting)
     double direction = 0; // heading of the stroke at the dab, radians (0 before it has moved)
     bool hasDirection = false;
 };

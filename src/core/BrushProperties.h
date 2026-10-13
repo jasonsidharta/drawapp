@@ -33,9 +33,10 @@ enum EngineFlag : unsigned {
     EngineWet = 8,
     EngineSpray = 16,   // Paint or Erase with the spray stamp
     EngineHatching = 32, // Paint or Erase with the hatching stamp
-    EngineCoverage = EnginePaint | EngineErase | EngineSpray | EngineHatching,
+    EngineDry = 64,      // Paint or Erase with the dry-media stamp (milestone 11)
+    EngineCoverage = EnginePaint | EngineErase | EngineSpray | EngineHatching | EngineDry,
     EngineCarried = EngineSmudge | EngineWet,
-    EngineAll = 63,
+    EngineAll = 127,
 };
 
 struct BrushProperty
@@ -59,6 +60,10 @@ struct BrushProperty
     QString requires;  // a condition for it to have an effect, for the artist ("" if none)
     bool implemented = false;
     bool advanced = true; // false: also in the quick brush panel
+    // The milestone that added it. Properties from milestone 11 on are written to preset files only
+    // when they differ from their default, so presets that do not use them stay byte-for-byte what
+    // milestones 9 and 10 wrote (and older readers see no new keys).
+    int since = 9;
     std::function<QVariant(const BrushSettings &)> get;
     std::function<void(BrushSettings &, const QVariant &)> set; // sanitising is up to the caller
 
@@ -67,13 +72,17 @@ struct BrushProperty
 
 namespace BrushProperties {
 
-// The design groups, in order, then "Engine" (the blend and stamp selectors, not counted in the
-// 120).
+// The groups in order: the twelve milestone 9 design groups (the 120-property design target), the
+// milestone 11 engine groups (properties of the new engines, counted separately so the original
+// target keeps its meaning), then "Engine" (the blend and stamp selectors, counted in neither).
 QStringList groups();
+QStringList designGroups();
+QStringList engineGroups();
 const std::vector<BrushProperty> &all();
 const BrushProperty *find(const QString &id);
-int implementedCount();
-int designTargetCount(); // properties in the twelve design groups (120)
+int implementedCount();     // implemented, in every group but "Engine"
+int designTargetCount();    // properties in the twelve design groups (120)
+int engineGroupCount();     // properties in the milestone 11 engine groups
 
 // The engine flag of these settings (one bit).
 unsigned engineOf(const BrushSettings &settings);

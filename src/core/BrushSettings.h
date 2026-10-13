@@ -18,7 +18,9 @@ enum class BrushBlend { Paint, Erase, Smudge, WetPaint };
 //   Tip:      the tip image or the computed round tip
 //   Spray:    many small round particles scattered over the dab's disc
 //   Hatching: parallel lines fixed in document space, inside the tip
-enum class BrushStamp { Tip, Spray, Hatching };
+//   Dry:      dry media (milestone 11): the tip deposits only where the pressure-dependent
+//             penetration reaches into the paper's tooth (graphite, charcoal, chalk, pastel)
+enum class BrushStamp { Tip, Spray, Hatching, Dry };
 
 // How the dabs of one stroke combine (see StrokeEngine):
 //   Uniform: a pixel's stroke coverage is the largest any dab gives it, so overlaps and
@@ -183,6 +185,20 @@ struct BrushSettings
     double hatchAngle = 45.0;      // degrees
     double hatchSpacing = 6.0;     // px between line centres
     double hatchThickness = 1.5;   // px
+
+    // --- Dry media --- (stamp Dry; research/m11-brush-architecture.md, A3)
+    // The paper is the texture (document space; "paper" when none is chosen) and its strength is
+    // the tooth: 0 = smooth paper. A dab pixel deposits tip × smoothstep(depth − (1 − height)),
+    // so light pressure catches the peaks and heavy pressure fills the valleys.
+    double dryDepth = 0.8;                        // penetration at full pressure, 0..1
+    PressureMapping pressureDepth{true, 0.15, 1.0}; // pressure → penetration
+    double drySoftness = 0.12;                    // width of the touched/untouched transition
+    double dryStreaks = 0.0;                      // grain running along the stroke (charcoal, pastel)
+    double dryStreakLength = 6.0;                 // how elongated the streaks are (1 = round)
+    double dryStreakScale = 1.0;                  // size of the streak grain
+    double dryEdgeBreakup = 0.0;                  // the mark's rim crumbles
+    double dryGrit = 0.0;                         // share of pixels the pigment skips (per stroke)
+    double dryTiltDepth = 1.0;                    // penetration × this at full tilt (side shading)
 
     // --- Dynamics: parameters following sensors (BrushDynamics.h) ---
     DynamicsSet dynamics;
