@@ -134,6 +134,7 @@ CanvasItem::CanvasItem(QQuickItem *parent)
     m_airbrushTimer.setInterval(16);
     m_airbrushTimer.setTimerType(Qt::PreciseTimer);
     connect(&m_airbrushTimer, &QTimer::timeout, this, &CanvasItem::advanceAirbrush);
+    connect(&m_wetTimer, &QTimer::timeout, this, &CanvasItem::dryWetPaintTick); // watercolour drying
     // Constructed with a parent already in a window: ItemSceneChange ran before this class existed.
     watchWindow(window());
 }
@@ -324,6 +325,7 @@ void CanvasItem::undo()
     // An edit in progress is committed first, so undo removes it as a whole.
     if (m_gesture == Gesture::Stroke)
         endStroke();
+    finishWetPaint();
     if (!m_history.canUndo())
         return;
     applyHistoryResult(m_history.undo(m_document));
@@ -337,6 +339,7 @@ void CanvasItem::redo()
         return;
     if (m_gesture == Gesture::Stroke)
         endStroke();
+    finishWetPaint();
     if (!m_history.canRedo())
         return;
     applyHistoryResult(m_history.redo(m_document));
@@ -712,6 +715,7 @@ void CanvasItem::replaceDocument(const LayeredDocument &document)
 {
     if (m_gesture == Gesture::Stroke)
         endStroke();
+    finishWetPaint();
     // An open transform belongs to the old document: it is dropped (never part of a file).
     if (m_transform.isActive())
         cancelTransform();
@@ -894,6 +898,7 @@ QString CanvasItem::startSave(const QString &path, const QUrl &url)
     }
     if (m_gesture == Gesture::Stroke)
         endStroke();
+    noteWetPaintSaved();
     if (m_opacityDragLayerId != 0)
         commitLayerOpacity(int(m_opacityDragLayerId), m_document.layer(m_document.indexOf(m_opacityDragLayerId)).opacity);
 
@@ -1048,6 +1053,7 @@ QString CanvasItem::exportPng(const QUrl &url)
         return QStringLiteral("Wait until the current file operation has finished.");
     if (m_gesture == Gesture::Stroke)
         endStroke();
+    noteWetPaintSaved();
     QString path = pathFromUrl(url);
     QUrl target = url;
     ensureSuffix(path, target, QStringLiteral("png"));
@@ -1502,6 +1508,7 @@ bool CanvasItem::startStroke(const StrokeSample &sample, PointerKind kind, bool 
                                               StrokeEngine::smoothingRadius(settings, m_view.zoom()));
     if (selected.isActive())
         m_engine->setClipMask(selected.mask()); // applied once, when each pixel is composited
+    prepareWetStroke(settings.blend == BrushBlend::Watercolor);
     TiledImage &layer = m_document.pixels(index);
     const qint64 dabs = m_engine->dabCount();
     const QRect changed = m_engine->begin(layer, sample, m_strokeBefore);
@@ -1611,6 +1618,12 @@ void CanvasItem::endStroke()
                 return;
             }
         }
+        // Watercolour still wet: the undo record stays open while it dries.
+        if (m_strokeBlend == BrushBlend::Watercolor && keepStrokeWet()) {
+            m_engine.reset();
+            m_gesture = Gesture::None;
+            return;
+        }
         commitPixels(m_strokeLayerId, std::move(m_strokeBefore),
                      m_strokeBlend == BrushBlend::Erase    ? QStringLiteral("Eraser stroke")
                      : m_strokeBlend == BrushBlend::Smudge ? QStringLiteral("Smudge stroke")
@@ -1634,6 +1647,8 @@ bool CanvasItem::strokeOutOfMemory()
     m_strokeBefore = TileSnapshot();
     m_engine.reset();
     m_gesture = Gesture::None;
+    if (m_strokeBlend == BrushBlend::Watercolor)
+        finishWetPaint(); // the wet state includes the stroke just taken back
     emit notice(QStringLiteral("Not enough memory to continue this stroke (%1), so it was undone. "
                                "Undo history, hidden layers, a smaller canvas or closing other programs free memory.")
                     .arg(MemoryBudget::shortageText()));
@@ -1657,6 +1672,8 @@ void CanvasItem::cancelStroke()
     m_strokeBefore = TileSnapshot();
     m_engine.reset();
     m_gesture = Gesture::None;
+    if (m_strokeBlend == BrushBlend::Watercolor)
+        finishWetPaint(); // the wet state includes the stroke just taken back
     emit notice(QStringLiteral("Stroke cancelled"));
 }
 

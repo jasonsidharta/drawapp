@@ -228,13 +228,13 @@ std::vector<BrushProperty> build()
     // ----------------------------------------------------------------------------------- Engine
     g = QStringLiteral("Engine");
     add("blend", "Engine", PropertyType::Choice)
-        .options({"paint", "erase", "smudge", "wet"}, {"Paint", "Erase", "Smudge", "Wet paint"})
+        .options({"paint", "erase", "smudge", "wet", "watercolor"}, {"Paint", "Erase", "Smudge", "Wet paint", "Watercolour"})
         .desc("What the brush does to the layer: paint colour, erase, smudge existing paint, or wet paint (carries and "
               "mixes paint).")
         .render("Selects the renderer: coverage composite (paint, erase) or carried patch (smudge, wet paint).")
         .cost("Smudge and wet paint touch pixels per dab; paint and erase recomposite each pixel once per input event.")
         .tests("tst_brush, tst_brushengine (engine suites), tst_brushengine::everyImplementedPropertyChangesRendering")
-        .access(choice(&BrushSettings::blend, {"paint", "erase", "smudge", "wet"}));
+        .access(choice(&BrushSettings::blend, {"paint", "erase", "smudge", "wet", "watercolor"}));
     add("stamp", "Dab type", PropertyType::Choice)
         .options({"tip", "spray", "hatching", "dry", "bristle"}, {"Tip", "Spray", "Hatching", "Dry media", "Bristles"})
         .engines(EngineCoverage)
@@ -564,7 +564,7 @@ std::vector<BrushProperty> build()
         .access(text(&BrushSettings::texture));
     add("textureScale", "Texture scale", PropertyType::Number)
         .range(0.1, 8, 100, "%")
-        .engines(TexEngines)
+        .engines(TexEngines & ~EngineWatercolor)
         .basic()
         .desc("Size of the grain.")
         .render("Texture coordinates divided by the scale (bilinear).")
@@ -584,7 +584,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::textureStrength));
     add("textureMode", "Texture mode", PropertyType::Choice)
         .options({"multiply", "subtract"}, {"Multiply", "Tooth (pressure fills it)"})
-        .engines(TexEngines & ~EngineDry)
+        .engines(TexEngines & ~EngineDry & ~EngineWatercolor)
         .basic()
         .desc("Multiply scales the paint by the grain; tooth removes paint in the valleys first, so light marks break "
               "up and heavy ones fill in.")
@@ -595,7 +595,7 @@ std::vector<BrushProperty> build()
         .access(choice(&BrushSettings::textureMode, {"multiply", "subtract"}));
     add("textureRotation", "Texture rotation", PropertyType::Number)
         .range(-180, 180, 1, "°")
-        .engines(TexEngines)
+        .engines(TexEngines & ~EngineWatercolor)
         .desc("Turns the grain.")
         .render("Rotates the texture coordinates (bilinear sampling).")
         .cost("Bilinear sampling.")
@@ -604,7 +604,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::textureRotation));
     add("textureBrightness", "Texture brightness", PropertyType::Number)
         .range(-1, 1, 100, "%")
-        .engines(TexEngines)
+        .engines(TexEngines & ~EngineWatercolor)
         .desc("Lightens (fewer valleys) or darkens (more valleys) the grain.")
         .render("t + brightness, after contrast, clamped to 0..1.")
         .cost("None.")
@@ -613,7 +613,7 @@ std::vector<BrushProperty> build()
         .access(number(&BrushSettings::textureBrightness));
     add("textureContrast", "Texture contrast", PropertyType::Number)
         .range(0, 3, 100, "%")
-        .engines(TexEngines)
+        .engines(TexEngines & ~EngineWatercolor)
         .desc("Flattens (below 100 %) or sharpens (above) the grain.")
         .render("(t − 0.5) × contrast + 0.5.")
         .cost("None.")
@@ -621,7 +621,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(number(&BrushSettings::textureContrast));
     add("textureInvert", "Invert texture", PropertyType::Bool)
-        .engines(TexEngines)
+        .engines(TexEngines & ~EngineWatercolor)
         .desc("Swaps the grain's peaks and valleys.")
         .render("t → 1 − t before contrast and brightness.")
         .cost("None.")
@@ -646,7 +646,7 @@ std::vector<BrushProperty> build()
         .tests(EffectTest)
         .access(flag(&BrushSettings::textureMoving));
     add("textureRandomOffset", "Random grain offset", PropertyType::Bool)
-        .engines(TexEngines)
+        .engines(TexEngines & ~EngineWatercolor)
         .desc("Shifts the grain to a new random position for every stroke, so repeated strokes do not line up.")
         .render("Adds a per-stroke offset (from the stroke seed) to the texture coordinates.")
         .cost("None.")
@@ -723,7 +723,7 @@ std::vector<BrushProperty> build()
 
     // ---------------------------------------------------------------------------- Colour dynamics
     g = QStringLiteral("Color Dynamics");
-    const unsigned ColorEngines = EnginePaint | EngineSpray | EngineHatching | EngineDry | EngineWet;
+    const unsigned ColorEngines = EnginePaint | EngineSpray | EngineHatching | EngineDry | EngineWet | EngineWatercolor;
     auto colorJitter = [&](const char *id, const char *name, double max, double scale, const char *unit,
                            double BrushSettings::*m, const char *what, bool perStroke) {
         add(id, name, PropertyType::Number)
@@ -1117,6 +1117,58 @@ std::vector<BrushProperty> build()
         .tests(InkTests)
         .access(number(&BrushSettings::smoothingSpeedAdapt));
 
+    // ------------------------------------------------------------------ Watercolour (milestone 11)
+    g = QStringLiteral("Watercolour");
+    const char *const WcTests = "tst_brushmedia::watercolour*";
+    auto wc = [&](const char *id, const char *name, double BrushSettings::*m, double lo, double hi, double scale,
+                  const char *unit, const char *desc, const char *render, const char *cost) {
+        add(id, name, PropertyType::Number)
+            .range(lo, hi, scale, unit)
+            .engines(EngineWatercolor)
+            .since(11)
+            .desc(desc)
+            .render(render)
+            .cost(cost)
+            .tests(WcTests)
+            .access(number(m));
+    };
+    wc("wcWater", "Water", &BrushSettings::wcWater, 0, 1, 100, "%",
+       "How wet the brush is: the paper under it is wetted up to this level. Wetter paint spreads further and stays "
+       "wet longer; a wetter brush in a damp wash adds water to it.",
+       "Water → water + (value × min(1, 3 × tip) − water) × min(1, 4 × pass), where lower; pass = flow normalised to "
+       "the spacing.",
+       "Per pixel of each dab: one update of the wet cell.");
+    wc("wcPigment", "Pigment", &BrushSettings::wcPigment, 0, 1, 100, "%",
+       "How much colour the brush carries (with opacity and its pressure response): low values give pale washes "
+       "that can be glazed once dry.",
+       "The wash under the brush moves towards value × opacity of the brush colour by min(1, 4 × pass) × contact "
+       "per dab; glaze opacity = 1 − e^(−2.5 × amount).",
+       "None beyond the water update.");
+    wc("wcSpread", "Spread", &BrushSettings::wcSpread, 0, 1, 100, "%",
+       "How readily water and pigment move through the wet area: high values bloom into a wet wash, low values stay "
+       "where they were put.", "Water diffusion between wet cells 0.08 + 0.6 × spread per step; pigment 0.02 + 0.2 × spread.",
+       "Per wet cell and step: four neighbour exchanges.");
+    wc("wcEdgeDarkening", "Edge darkening", &BrushSettings::wcEdgeDarkening, 0, 1, 100, "%",
+       "Water flows to the edge of a wash and evaporates there, leaving its pigment: the darker rim of real "
+       "watercolour.",
+       "Pressure = water × (1 − 0.8 × value × edge) and evaporation × (1 + 4 × value × edge), edge = share of dry "
+       "paper within two cells; the outward flow carries pigment.",
+       "None beyond the step.");
+    wc("wcGranulation", "Granulation", &BrushSettings::wcGranulation, 0, 1, 100, "%",
+       "Pigment settles in the valleys of the paper, so dried washes show the paper's grain.",
+       "Settling rate × (1 + 3 × value × (1 − paper height)).", "Per wet cell and step: one paper sample.");
+    wc("wcDryingTime", "Drying time", &BrushSettings::wcDryingTime, 0.5, 60, 1, "s",
+       "How long a wash stays wet (simulation time; on the canvas it dries in real time after the stroke). Painting "
+       "into a wash before it dries mixes wet-on-wet.",
+       "Evaporation per 16 ms step = 0.6 / (time / 16 ms), more at the wet edge.",
+       "The canvas runs a bounded number of steps per timer tick until the paint is dry.");
+    wc("wcLifting", "Lifting", &BrushSettings::wcLifting, 0, 1, 100, "%",
+       "Clear water over paint that has settled lifts it: the damp brush takes part of the colour up and the rest "
+       "moves in the wash (while the canvas keeps the paint's wet state).",
+       "Per dab: settled pigment × lifting × contact × pass is loosened into the wash, where the brush's paint "
+       "exchange takes part of it up.",
+       "Per pixel of each dab: one mix.");
+
     // -------------------------------------------------------------------- Bristles (milestone 11)
     g = QStringLiteral("Bristles");
     const char *const BristleTests = "tst_brushmedia::bristle*";
@@ -1322,7 +1374,8 @@ QStringList BrushProperties::designGroups()
 
 QStringList BrushProperties::engineGroups()
 {
-    return {QStringLiteral("Ink and Stroke"), QStringLiteral("Dry Media"), QStringLiteral("Mixing"), QStringLiteral("Bristles")};
+    return {QStringLiteral("Ink and Stroke"), QStringLiteral("Dry Media"), QStringLiteral("Mixing"), QStringLiteral("Bristles"),
+            QStringLiteral("Watercolour")};
 }
 
 QStringList BrushProperties::groups()
@@ -1367,6 +1420,7 @@ unsigned BrushProperties::engineOf(const BrushSettings &s)
     switch (s.blend) {
     case BrushBlend::Smudge: return EngineSmudge;
     case BrushBlend::WetPaint: return EngineWet;
+    case BrushBlend::Watercolor: return EngineWatercolor;
     default: break;
     }
     if (s.stamp == BrushStamp::Spray)

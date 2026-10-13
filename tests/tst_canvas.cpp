@@ -158,6 +158,14 @@ private:
         return shot;
     }
 
+    // Lets watercolour on the canvas dry completely (simulation time, without the timer).
+    void dryWetPaint()
+    {
+        for (int i = 0; i < 400 && m_canvas->hasWetPaint(); ++i)
+            m_canvas->advanceWetPaint(500);
+        QVERIFY(!m_canvas->hasWetPaint());
+    }
+
 private slots:
     void initTestCase()
     {
@@ -2005,7 +2013,8 @@ private slots:
             QVERIFY(m_canvas->drawStroke(docCurve({150, qreal(y)}, {1850, qreal(800 - y)})));
             const QImage after = layerImage(layerIndex(top));
             QVERIFY2(after != before, qPrintable(p.id));
-            QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+            // Watercolour still drying: its one step is open until the paint dries or undo commits it.
+            QCOMPARE(m_canvas->history().undoCount() + (m_canvas->wetStepOpen() ? 1 : 0), steps + 1);
             QCOMPARE(layerImage(layerIndex(bottom)), bottomPixels); // only the active layer changes
             m_canvas->undo();
             QVERIFY2(layerImage(layerIndex(top)) == before, qPrintable(p.id + " undo"));
@@ -2080,6 +2089,147 @@ private slots:
         const QImage before = doc().copy();
         QVERIFY(m_canvas->drawStroke(docCurve({1100, 300}, {1900, 300}, 0)));
         QVERIFY(doc() != before); // without a selection, the right half paints again
+    }
+
+    // --- watercolour on the canvas (CanvasItemWet.cpp) ---
+
+    void watercolourStaysWetDriesAndIsOneUndoStep()
+    {
+        const QImage blank = doc().copy();
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.watercolor-wash")));
+        m_canvas->setBrushColor(QColor(40, 70, 160));
+        const int steps = m_canvas->history().undoCount();
+        QVERIFY(m_canvas->drawStroke(docCurve({300, 400}, {1200, 400})));
+        // Still wet after the stroke: its undo step stays open while it dries.
+        QVERIFY(m_canvas->hasWetPaint());
+        QVERIFY(m_canvas->wetStepOpen());
+        QVERIFY(m_canvas->isModified());
+        QVERIFY(m_canvas->canUndo());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Watercolour stroke"));
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        const QImage wet = doc().copy();
+        QVERIFY(wet != blank);
+        // The paint keeps moving while it dries, then stops.
+        m_canvas->advanceWetPaint(500);
+        QVERIFY(doc() != wet);
+        dryWetPaint();
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        const QImage dried = doc().copy();
+        m_canvas->advanceWetPaint(5000);
+        QCOMPARE(doc(), dried);
+        m_canvas->undo();
+        QCOMPARE(doc(), blank);
+        m_canvas->redo();
+        QCOMPARE(doc(), dried);
+    }
+
+    void watercolourDriesOnTheTimer()
+    {
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.watercolor-round")));
+        QVERIFY(m_canvas->drawStroke(docCurve({300, 400}, {900, 420})));
+        QVERIFY(m_canvas->hasWetPaint());
+        const QImage wet = doc().copy();
+        QElapsedTimer clock;
+        clock.start();
+        QTRY_VERIFY_WITH_TIMEOUT(!m_canvas->hasWetPaint(), 30000);
+        qInfo("Watercolour Round (4 s drying time) dried on the timer after %lld ms", clock.elapsed());
+        QVERIFY(doc() != wet);
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Watercolour stroke"));
+    }
+
+    void watercolourPaintsWetOnWetAcrossStrokes()
+    {
+        // The second stroke crosses the first while it is wet, and again after it has dried.
+        const QImage blank = doc().copy();
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.watercolor-wash")));
+        QImage results[2];
+        for (const bool wetOnWet : {true, false}) {
+            const int steps = m_canvas->history().undoCount();
+            m_canvas->setBrushColor(QColor(40, 70, 160));
+            QVERIFY(m_canvas->drawStroke(docCurve({300, 400}, {1200, 400}, 0)));
+            if (!wetOnWet)
+                dryWetPaint();
+            m_canvas->setBrushColor(QColor(200, 50, 40));
+            QVERIFY(m_canvas->drawStroke(docCurve({750, 150}, {750, 650}, 0)));
+            QCOMPARE(m_canvas->history().undoCount(), steps + 1); // the first stroke is its own step
+            QVERIFY(m_canvas->wetStepOpen());
+            dryWetPaint();
+            QCOMPARE(m_canvas->history().undoCount(), steps + 2);
+            results[wetOnWet ? 0 : 1] = doc().copy();
+            m_canvas->undo();
+            m_canvas->undo();
+            QCOMPARE(doc(), blank);
+        }
+        // Where the strokes cross the paint mixed while wet; away from the crossing both agree.
+        int crossing = 0, away = 0;
+        for (int y = 330; y <= 470; ++y)
+            for (int x = 680; x <= 820; ++x)
+                crossing += results[0].pixel(x, y) != results[1].pixel(x, y);
+        for (int y = 330; y <= 470; ++y)
+            for (int x = 350; x <= 500; ++x)
+                away += results[0].pixel(x, y) != results[1].pixel(x, y);
+        qInfo("wet-on-wet against wet-on-dry: %d pixels differ at the crossing, %d away from it", crossing, away);
+        QVERIFY(crossing > 2000);
+        QCOMPARE(away, 0);
+    }
+
+    void watercolourEndsAsItLooksBeforeOtherEdits()
+    {
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.watercolor-wash")));
+        QVERIFY(m_canvas->drawStroke(docCurve({300, 400}, {1200, 400})));
+        QVERIFY(m_canvas->hasWetPaint());
+        const QImage wet = doc().copy();
+        const int steps = m_canvas->history().undoCount();
+        m_canvas->selectAll(); // another edit: the paint stays exactly as it looks, dry from now on
+        QVERIFY(!m_canvas->hasWetPaint());
+        QCOMPARE(doc(), wet);
+        QCOMPARE(m_canvas->history().undoCount(), steps + 2); // the stroke, then the selection
+        m_canvas->deselect();
+
+        // Another brush's stroke ends it too.
+        QVERIFY(m_canvas->drawStroke(docCurve({300, 700}, {1200, 700})));
+        QVERIFY(m_canvas->hasWetPaint());
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.solid-round")));
+        QVERIFY(m_canvas->drawStroke(docCurve({300, 900}, {1200, 900})));
+        QVERIFY(!m_canvas->hasWetPaint());
+
+        // Undo while wet takes the wet stroke back whole.
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.watercolor-wash")));
+        const QImage before = doc().copy();
+        QVERIFY(m_canvas->drawStroke(docCurve({300, 1100}, {1200, 1100})));
+        m_canvas->advanceWetPaint(300);
+        QVERIFY(m_canvas->hasWetPaint());
+        m_canvas->undo();
+        QVERIFY(!m_canvas->hasWetPaint());
+        QCOMPARE(doc(), before);
+
+        // Another layer ends it as well.
+        QVERIFY(m_canvas->drawStroke(docCurve({300, 1100}, {1200, 1100})));
+        QVERIFY(m_canvas->hasWetPaint());
+        m_canvas->addLayer();
+        QVERIFY(!m_canvas->hasWetPaint());
+    }
+
+    void watercolourIsSavedAsItLooksWhileWet()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("wet.drawapp"));
+        QVERIFY(m_canvas->brushes()->select(QStringLiteral("builtin.watercolor-wash")));
+        QVERIFY(m_canvas->drawStroke(docCurve({300, 400}, {1200, 400})));
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        QCOMPARE(saveAs(QUrl::fromLocalFile(path)), QString());
+        QVERIFY(std::any_of(notices.begin(), notices.end(),
+                            [](const QList<QVariant> &n) { return n.at(0).toString().contains(QStringLiteral("still wet")); }));
+        // Saving does not stop the drying; the drying after it is its own undo step.
+        QTRY_VERIFY_WITH_TIMEOUT(!m_canvas->hasWetPaint(), 60000);
+        QVERIFY(m_canvas->isModified());
+        QCOMPARE(m_canvas->undoText(), QStringLiteral("Watercolour drying"));
+        const QImage dried = doc().copy();
+        // The file holds the paint as it looked when saved: undoing the drying shows exactly that.
+        m_canvas->undo();
+        const QImage saved = ProjectFile::load(path).document.composite();
+        QCOMPARE(doc(), saved);
+        QVERIFY(saved != dried);
     }
 
     // --- selections on the canvas ---

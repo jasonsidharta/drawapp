@@ -5,6 +5,7 @@
 #include "CarriedDeposit.h"
 #include "CoverageDeposit.h"
 #include "DryDeposit.h"
+#include "WatercolorDeposit.h"
 
 #include <cmath>
 
@@ -101,5 +102,7 @@ std::unique_ptr<StrokeDeposit> StrokeDeposit::create(StrokeContext &context)
         return std::make_unique<BristleDeposit>(context);
     if (context.coverageBlend)
         return std::make_unique<CoverageDeposit>(context);
+    if (context.settings.blend == BrushBlend::Watercolor)
+        return std::make_unique<WatercolorDeposit>(context);
     return std::make_unique<CarriedDeposit>(context);
 }

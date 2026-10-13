@@ -227,7 +227,8 @@ BrushSettings baseSettings()
 unsigned testEngine(unsigned engines)
 {
     for (unsigned e : {unsigned(EnginePaint), unsigned(EngineSmudge), unsigned(EngineWet), unsigned(EngineSpray),
-                       unsigned(EngineHatching), unsigned(EngineErase), unsigned(EngineDry), unsigned(EngineBristle)})
+                       unsigned(EngineHatching), unsigned(EngineErase), unsigned(EngineDry), unsigned(EngineBristle),
+                       unsigned(EngineWatercolor)})
         if (engines & e)
             return e;
     return EnginePaint;
@@ -243,6 +244,7 @@ void applyEngine(BrushSettings &s, unsigned engine)
     case EngineHatching: s.stamp = BrushStamp::Hatching; break;
     case EngineDry: s.stamp = BrushStamp::Dry; break;
     case EngineBristle: s.stamp = BrushStamp::Bristle; break;
+    case EngineWatercolor: s.blend = BrushBlend::Watercolor; break;
     default: break;
     }
 }
@@ -286,6 +288,7 @@ std::map<QString, Scenario> scenarios()
     auto none = [](BrushSettings &) {};
     auto mixMode = [](BrushSettings &s) { s.smudgeMode = SmudgeMode::Mix; };
     auto bristle = [](BrushSettings &s) { s.stamp = BrushStamp::Bristle; s.size = 40; };
+    auto watercolor = [](BrushSettings &s) { s.blend = BrushBlend::Watercolor; s.size = 30; };
     auto dry = [](BrushSettings &s) {
         s.stamp = BrushStamp::Dry;
         s.texture = QStringLiteral("rough");
@@ -412,6 +415,14 @@ std::map<QString, Scenario> scenarios()
         {"bristleDepletion", {bristle, 0.9}},
         {"bristlePickup", {bristle, 0.9}},
         {"bristleWobble", {bristle, 1.0}},
+        // Watercolour (milestone 11); lifting acts on what the stroke itself has let settle
+        {"wcWater", {watercolor, 1.0}},
+        {"wcPigment", {watercolor, 0.15}},
+        {"wcSpread", {watercolor, 1.0}},
+        {"wcEdgeDarkening", {watercolor, 1.0}},
+        {"wcGranulation", {[=](BrushSettings &s) { watercolor(s); s.texture = QStringLiteral("rough"); s.textureStrength = 0.9; }, 1.0}},
+        {"wcDryingTime", {watercolor, 1.0}},
+        {"wcLifting", {watercolor, 1.0}},
         // Mixing (milestone 11), on the smudge engine in mix mode
         {"smudgeLength", {mixMode, 0.95}},
         {"smudgeRadius", {mixMode, 0.25}},

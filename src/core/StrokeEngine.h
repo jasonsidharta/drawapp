@@ -101,6 +101,9 @@ public:
     // Optional selection: a Format_Grayscale8 image the size of the layer, 255 = fully editable,
     // 0 = protected. Set before begin().
     void setClipMask(const QImage &mask);
+    // Watercolour: the layer's wet state, kept between strokes by the caller (milestone 11). Without
+    // one a watercolour stroke has its own and dries completely at finish(). Set before begin().
+    void setWetLayer(WetLayer *wet) { m_ctx.wet = wet; }
 
     // Each call changes `image` (Format_ARGB32_Premultiplied, the stroke's layer) and captures
     // the tiles it is about to change into `before` (the stroke's undo snapshot) first. Returns
@@ -177,7 +180,7 @@ private:
     void renderPlaced(StrokeSurface &image, const Dab &dab, bool timed, TileSnapshot &before, QRect &dirty);
     void applyLiveTaper(StrokeSurface &image, TileSnapshot &before, QRect &dirty);
     void adaptSmoothing(const StrokeSample &sample);
-    void flushDeposit(StrokeSurface &image, const TileSnapshot &before);
+    void flushDeposit(StrokeSurface &image, TileSnapshot &before, QRect &dirty);
 
     StrokeContext m_ctx; // settings, colour, seed and what every deposit strategy shares
     std::unique_ptr<BrushTips::Tip> m_importedTip;

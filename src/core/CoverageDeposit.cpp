@@ -228,12 +228,13 @@ void CoverageDeposit::rasterizeSpray(const DabParams &dab, const QRect &rect)
     }
 }
 
-void CoverageDeposit::flush(StrokeSurface &image, const TileSnapshot &before)
+QRect CoverageDeposit::flush(StrokeSurface &image, TileSnapshot &before)
 {
     // Each pixel is recomputed once per call, however many dabs covered it.
     for (const auto &[key, area] : m_touched)
         composite(image, area, before);
     m_touched.clear();
+    return {}; // only inside the dabs' rectangles, already reported
 }
 
 void CoverageDeposit::composite(StrokeSurface &image, const QRect &rect, const TileSnapshot &before)

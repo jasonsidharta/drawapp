@@ -42,6 +42,8 @@ add_library(drawcore STATIC
     src/core/CarriedDeposit.cpp src/core/CarriedDeposit.h
     src/core/DryDeposit.cpp src/core/DryDeposit.h
     src/core/BristleDeposit.cpp src/core/BristleDeposit.h
+    src/core/WetLayer.cpp src/core/WetLayer.h
+    src/core/WatercolorDeposit.cpp src/core/WatercolorDeposit.h
     src/core/StrokeSmoother.cpp src/core/StrokeSmoother.h
     src/core/StrokeSpacer.cpp src/core/StrokeSpacer.h
     src/core/TiledImage.cpp src/core/TiledImage.h
@@ -62,7 +64,7 @@ qt_add_qml_module(drawapp_ui
     URI DrawApp
     VERSION 1.0
     QML_FILES src/app/Main.qml src/app/BrushPanel.qml src/app/BrushStudioPage.qml src/app/CurveEditor.qml
-    SOURCES src/app/CanvasItem.cpp src/app/CanvasItem.h src/app/CanvasItemSelection.cpp
+    SOURCES src/app/CanvasItem.cpp src/app/CanvasItem.h src/app/CanvasItemSelection.cpp src/app/CanvasItemWet.cpp
             src/app/BrushLibrary.cpp src/app/BrushLibrary.h
             src/app/BrushStudio.cpp src/app/BrushStudio.h
             src/app/BrushScratchpad.cpp src/app/BrushScratchpad.h

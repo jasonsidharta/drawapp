@@ -138,6 +138,7 @@ void CanvasItem::finishPendingEdits()
 {
     if (m_gesture == Gesture::Stroke)
         endStroke();
+    finishWetPaint(); // watercolour still drying stays as it looks (CanvasItemWet.cpp)
     if (m_transform.isActive())
         applyTransformWith(false);
 }

@@ -99,7 +99,8 @@ StrokeEngine::StrokeEngine(const BrushSettings &settings, const QColor &color, q
         const QColor j = QColor::fromHslF(float(m_hue / 360.0), float(m_saturation), float(m_lightness));
         m_ctx.color = qRgb(j.red(), j.green(), j.blue());
     }
-    m_ctx.colorPerDab = (s.blend == BrushBlend::Paint || s.blend == BrushBlend::WetPaint) && s.hasColorDynamics();
+    m_ctx.colorPerDab = (s.blend == BrushBlend::Paint || s.blend == BrushBlend::WetPaint || s.blend == BrushBlend::Watercolor)
+                     && s.hasColorDynamics();
     m_deposit = StrokeDeposit::create(m_ctx);
     m_baseRadius = std::max<qreal>(0.0, smoothingRadius);
     // The live end taper redraws the tail from the stroke's own buffers; engines that cannot
@@ -262,7 +263,7 @@ QRect StrokeEngine::begin(StrokeSurface &image, const StrokeSample &sample, Tile
     m_smoothed.clear();
     acceptInput(sample);
     process(image, before, sample.timeMs, dirty);
-    flushDeposit(image, before);
+    flushDeposit(image, before, dirty);
     return dirty;
 }
 
@@ -282,7 +283,7 @@ QRect StrokeEngine::moveTo(StrokeSurface &image, const StrokeSample &sample, Til
         acceptInput(sample);
     }
     process(image, before, sample.timeMs, dirty);
-    flushDeposit(image, before);
+    flushDeposit(image, before, dirty);
     return dirty;
 }
 
@@ -293,7 +294,7 @@ QRect StrokeEngine::advanceTime(StrokeSurface &image, double timeMs, TileSnapsho
         return dirty;
     m_smoothed.clear();
     process(image, before, timeMs, dirty);
-    flushDeposit(image, before);
+    flushDeposit(image, before, dirty);
     return dirty;
 }
 
@@ -321,6 +322,7 @@ QRect StrokeEngine::finish(StrokeSurface &image, TileSnapshot &before)
         renderPlaced(image, m_firstDab, false, before, dirty);
     }
     applyLiveTaper(image, before, dirty);
+    dirty |= m_deposit->finishStroke(image, before);
     // A dot gets one full pass of paint, like any point of a moving stroke, instead of the single
     // spacing-normalised dab (which for a low flow would be nearly invisible).
     if (m_ctx.buildUp && m_ctx.coverageBlend && m_distanceDabCount == 1 && m_timeDabCount == 0 && m_firstParams.flow < 1.0) {
@@ -330,7 +332,7 @@ QRect StrokeEngine::finish(StrokeSurface &image, TileSnapshot &before)
         if (topUp.flow > 0)
             renderDab(image, topUp, before, dirty);
     }
-    flushDeposit(image, before);
+    flushDeposit(image, before, dirty);
     m_started = false;
     return dirty;
 }
@@ -620,6 +622,7 @@ StrokeEngine::DabParams StrokeEngine::paramsFor(const Dab &dab) const
     // For milestone 11 strategies (bristle contact, dry-media penetration, strands): not used by the
     // milestone 10 engines.
     d.pressure = pressure;
+    d.timeMs = s.timeMs;
     d.tilt = tilt;
     if (m_headingKnown) {
         d.direction = std::atan2(m_heading.y(), m_heading.x());
@@ -742,7 +745,7 @@ void StrokeEngine::applyLiveTaper(StrokeSurface &image, TileSnapshot &before, QR
     m_path.clear();
 }
 
-void StrokeEngine::flushDeposit(StrokeSurface &image, const TileSnapshot &before)
+void StrokeEngine::flushDeposit(StrokeSurface &image, TileSnapshot &before, QRect &dirty)
 {
-    m_deposit->flush(image, before);
+    dirty |= m_deposit->flush(image, before);
 }

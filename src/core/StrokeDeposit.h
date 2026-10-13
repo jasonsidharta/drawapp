@@ -31,8 +31,19 @@ public:
     // One dab at `rect` (StrokeContext::dabRect, clipped to the image, never empty).
     virtual void dab(StrokeSurface &image, const DabParams &dab, const QRect &rect, TileSnapshot &before, QRect &dirty) = 0;
     // After the dabs of one engine call (begin, moveTo, advanceTime, finish): bring the layer up to
-    // date with what the dabs recorded, once per pixel.
-    virtual void flush(StrokeSurface &image, const TileSnapshot &before) { Q_UNUSED(image) Q_UNUSED(before) }
+    // date with what the dabs recorded, once per pixel. Returns any area changed beyond the dabs'
+    // own rectangles (watercolour spreading and drying).
+    virtual QRect flush(StrokeSurface &image, TileSnapshot &before)
+    {
+        Q_UNUSED(image) Q_UNUSED(before)
+        return {};
+    }
+    // Pen up, after the last dabs and before the last flush. Returns the area it changed.
+    virtual QRect finishStroke(StrokeSurface &image, TileSnapshot &before)
+    {
+        Q_UNUSED(image) Q_UNUSED(before)
+        return {};
+    }
 
     // Live end taper (milestone 11): engines that keep the whole stroke in rebuildable buffers can
     // forget part of it and draw it again. clearTiles() empties the given 64 × 64 tiles of the

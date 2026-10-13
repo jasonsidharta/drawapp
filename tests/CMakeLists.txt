@@ -41,7 +41,7 @@ add_test(NAME tst_recovery COMMAND tst_recovery)
 
 # Drives the real CanvasItem in a window with synthetic mouse, pen and touch events.
 set(CANVAS_SOURCES
-    ../src/app/CanvasItem.cpp ../src/app/CanvasItem.h ../src/app/CanvasItemSelection.cpp
+    ../src/app/CanvasItem.cpp ../src/app/CanvasItem.h ../src/app/CanvasItemSelection.cpp ../src/app/CanvasItemWet.cpp
     ../src/app/BrushLibrary.cpp ../src/app/BrushLibrary.h
     ../src/app/BrushStudio.cpp ../src/app/BrushStudio.h
     ../src/app/BrushScratchpad.cpp ../src/app/BrushScratchpad.h

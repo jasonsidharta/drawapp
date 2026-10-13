@@ -430,6 +430,51 @@ std::vector<BrushPreset> makeBuiltIns()
         s.bristleDepletion = 0.35;
         list.push_back(preset("dry-brush", "Dry Brush", s));
     }
+
+    // --- Milestone 11: watercolour (WetLayer; a bounded approximation, not a fluid simulation) ---
+    // A soft round wash brush: wet, spreads, darkens at its edges, granulates on rough paper.
+    {
+        BrushSettings s;
+        s.blend = BrushBlend::Watercolor;
+        s.size = 50;
+        s.hardness = 0.3;
+        s.spacing = 0.06;
+        s.flow = 0.7;
+        s.pressureSize = {true, 0.4, 1.0};
+        s.pressureOpacity = {true, 0.3, 1.0};
+        s.texture = QStringLiteral("rough");
+        s.textureStrength = 0.7;
+        s.wcWater = 0.7;
+        s.wcPigment = 0.45;
+        s.wcSpread = 0.55;
+        s.wcEdgeDarkening = 0.55;
+        s.wcGranulation = 0.35;
+        s.wcDryingTime = 8;
+        s.wcLifting = 0.15;
+        list.push_back(preset("watercolor-wash", "Watercolour Wash", s));
+    }
+    // A pointed round for detail: less water, more pigment, crisper edges.
+    {
+        BrushSettings s;
+        s.blend = BrushBlend::Watercolor;
+        s.size = 16;
+        s.hardness = 0.6;
+        s.spacing = 0.05;
+        s.flow = 0.8;
+        s.pressureSize = {true, 0.15, 1.0};
+        s.texture = QStringLiteral("rough");
+        s.textureStrength = 0.6;
+        s.wcWater = 0.4;
+        s.wcPigment = 0.7;
+        s.wcSpread = 0.3;
+        s.wcEdgeDarkening = 0.4;
+        s.wcGranulation = 0.2;
+        s.wcDryingTime = 4;
+        s.wcLifting = 0.1;
+        s.taperStart = 15;
+        s.taperEnd = 25;
+        list.push_back(preset("watercolor-round", "Watercolour Round", s));
+    }
     return list;
 }
 

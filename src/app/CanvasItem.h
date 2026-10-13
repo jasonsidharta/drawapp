@@ -13,6 +13,7 @@
 #include "TransformApply.h"
 #include "TransformSession.h"
 #include "UndoHistory.h"
+#include "WetLayer.h"
 #include "ViewPyramid.h"
 #include "ViewTransform.h"
 
@@ -138,6 +139,14 @@ public:
     // future automation; no pointer events are involved. Returns false (and changes nothing) if
     // the active layer cannot be painted or another gesture is in progress.
     bool drawStroke(const std::vector<StrokeSample> &samples, bool erase = false);
+    // Watercolour paint still drying on the canvas (CanvasItemWet.cpp).
+    bool hasWetPaint() const { return m_wetLayer != nullptr; }
+    // True while the latest wet stroke's undo step is open (not yet in history()).
+    bool wetStepOpen() const { return !m_wetBefore.isEmpty(); }
+    const WetLayer *wetLayer() const { return m_wetLayer.get(); }
+    // Advances the drying by `ms` of simulation time, as the drying timer does with the time that
+    // passed. For tests.
+    void advanceWetPaint(double ms);
     // Combines a shape (document coordinates) with the selection, as one undo step, like the
     // selection tools. For tests and automation.
     void selectPath(const QPainterPath &docPath, SelectionMode mode);
@@ -246,11 +255,12 @@ public:
     const ViewTransform &viewTransform() const { return m_view; }
     const UndoHistory &history() const { return m_history; }
 
-    bool canUndo() const { return m_history.canUndo(); }
-    bool canRedo() const { return m_history.canRedo(); }
-    QString undoText() const { return m_history.undoLabel(); }
+    // Watercolour still drying is an undo step that is not yet in the history (CanvasItemWet.cpp).
+    bool canUndo() const { return m_history.canUndo() || !m_wetBefore.isEmpty(); }
+    bool canRedo() const { return m_wetBefore.isEmpty() && m_history.canRedo(); }
+    QString undoText() const { return m_wetBefore.isEmpty() ? m_history.undoLabel() : m_wetLabel; }
     QString redoText() const { return m_history.redoLabel(); }
-    bool isModified() const { return m_history.stateId() != m_savedStateId; }
+    bool isModified() const { return m_history.stateId() != m_savedStateId || !m_wetBefore.isEmpty(); }
     bool hasFile() const { return !m_filePath.isEmpty(); }
     QUrl fileUrl() const { return m_fileUrl; }
     QString documentTitle() const;
@@ -451,6 +461,13 @@ private:
     bool startStroke(const StrokeSample &sample, PointerKind kind, bool erase);
     void extendStroke(const StrokeSample &sample);
     void advanceAirbrush();
+    // Watercolour (CanvasItemWet.cpp).
+    void prepareWetStroke(bool watercolour);
+    bool keepStrokeWet();
+    void commitWetPaint();
+    void finishWetPaint();
+    void dryWetPaintTick();
+    void noteWetPaintSaved();
     StrokeSample strokeSample(const QPointF &viewPos, qreal pressure, const QPointF &tilt, bool hasTilt) const;
     void beginPan(const QPointF &viewPos);
     void continuePan(const QPointF &viewPos);
@@ -568,6 +585,16 @@ private:
     QElapsedTimer m_strokeClock;
     QTimer m_airbrushTimer;
     quint64 m_strokeCount = 0; // per-stroke random seed
+    // Watercolour: the wet state of one layer's paint, kept after the stroke while it dries
+    // (wet-on-wet across strokes), with the open undo record of the latest wet stroke. Any other
+    // edit, undo or redo first ends it: the paint stays exactly as it looks (CanvasItemWet.cpp).
+    std::unique_ptr<WetLayer> m_wetLayer;
+    quint64 m_wetLayerId = 0;
+    TileSnapshot m_wetBefore;
+    QString m_wetLabel;
+    QTimer m_wetTimer;
+    QElapsedTimer m_wetClock;
+    double m_wetPendingMs = 0;
     PointerTask m_pointerTask = PointerTask::Paint;
     Qt::KeyboardModifiers m_pointerModifiers; // from the latest pointer event
 

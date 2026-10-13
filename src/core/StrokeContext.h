@@ -19,6 +19,7 @@ namespace BrushTips {
 struct Tip;
 struct Texture;
 }
+class WetLayer;
 
 // The parameters of one dab, as derived from the brush settings and the input sample.
 struct DabParams
@@ -41,6 +42,7 @@ struct DabParams
     qint64 index = 0;     // render index, for per-dab randomness
     double pressure = 1;  // the dab's pressure (1 without pressure data)
     double tilt = 0;      // pen tilt amount, 0 (upright or no tilt data) .. 1 (full tilt setting)
+    double timeMs = -1;   // input event time of the dab (< 0 unknown)
     double direction = 0; // heading of the stroke at the dab, radians (0 before it has moved)
     bool hasDirection = false;
 };
@@ -95,6 +97,7 @@ struct StrokeContext
     double passLength = 1.0; // in diameters
     QImage clip;             // Grayscale8 selection, or null
     bool allocationFailed = false;
+    WetLayer *wet = nullptr; // watercolour: the layer's wet state, kept by the canvas (or null)
 
     double random(qint64 index, quint64 salt) const { return BrushTips::hash01(qint64(seed), index, salt); }
 

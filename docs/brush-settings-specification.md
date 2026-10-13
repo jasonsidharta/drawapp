@@ -24,7 +24,8 @@ A property counts as **implemented** only if it changes rendering: `tst_brusheng
 | Dry Media | 9 | 0 | 9 |
 | Mixing | 3 | 0 | 3 |
 | Bristles | 8 | 0 | 8 |
-| **Total** | **120** | **24** | **144** |
+| Watercolour | 7 | 0 | 7 |
+| **Total** | **127** | **24** | **151** |
 
 The two engine selectors (`blend`, `stamp`) are listed under Engine and not counted.
 
@@ -635,7 +636,7 @@ Size of the grain.
 - Type: number
 - Range: 10 … 800 %
 - Default: 100 %
-- Engines: all
+- Engines: paint, erase, smudge, wet paint, spray, hatching
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureScale`: JSON number
@@ -683,7 +684,7 @@ Turns the grain.
 - Type: number
 - Range: -180 … 180 °
 - Default: 0 °
-- Engines: all
+- Engines: paint, erase, smudge, wet paint, spray, hatching
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureRotation`: JSON number
@@ -699,7 +700,7 @@ Lightens (fewer valleys) or darkens (more valleys) the grain.
 - Type: number
 - Range: -100 … 100 %
 - Default: 0 %
-- Engines: all
+- Engines: paint, erase, smudge, wet paint, spray, hatching
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureBrightness`: JSON number
@@ -715,7 +716,7 @@ Flattens (below 100 %) or sharpens (above) the grain.
 - Type: number
 - Range: 0 … 300 %
 - Default: 100 %
-- Engines: all
+- Engines: paint, erase, smudge, wet paint, spray, hatching
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureContrast`: JSON number
@@ -731,7 +732,7 @@ Swaps the grain's peaks and valleys.
 - Type: boolean
 - Range: on / off
 - Default: off
-- Engines: all
+- Engines: paint, erase, smudge, wet paint, spray, hatching
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureInvert`: true/false
@@ -779,7 +780,7 @@ Shifts the grain to a new random position for every stroke, so repeated strokes 
 - Type: boolean
 - Range: on / off
 - Default: off
-- Engines: all
+- Engines: paint, erase, smudge, wet paint, spray, hatching
 - Sensors: —
 - Has an effect with: A texture
 - Serialisation: `textureRandomOffset`: true/false
@@ -2083,6 +2084,113 @@ Sideways jitter of each bristle from dab to dab, as a share of the space between
 - Cost: None.
 - Tests: tst_brushmedia::bristle*
 
+## Watercolour
+
+### Water — `wcWater`
+
+How wet the brush is: the paper under it is wetted up to this level. Wetter paint spreads further and stays wet longer; a wetter brush in a damp wash adds water to it.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 60 %
+- Engines: 
+- Sensors: —
+- Serialisation: `wcWater`: JSON number
+- Rendering: Water → water + (value × min(1, 3 × tip) − water) × min(1, 4 × pass), where lower; pass = flow normalised to the spacing.
+- Cost: Per pixel of each dab: one update of the wet cell.
+- Tests: tst_brushmedia::watercolour*
+
+### Pigment — `wcPigment`
+
+How much colour the brush carries (with opacity and its pressure response): low values give pale washes that can be glazed once dry.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 50 %
+- Engines: 
+- Sensors: —
+- Serialisation: `wcPigment`: JSON number
+- Rendering: The wash under the brush moves towards value × opacity of the brush colour by min(1, 4 × pass) × contact per dab; glaze opacity = 1 − e^(−2.5 × amount).
+- Cost: None beyond the water update.
+- Tests: tst_brushmedia::watercolour*
+
+### Spread — `wcSpread`
+
+How readily water and pigment move through the wet area: high values bloom into a wet wash, low values stay where they were put.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 50 %
+- Engines: 
+- Sensors: —
+- Serialisation: `wcSpread`: JSON number
+- Rendering: Water diffusion between wet cells 0.08 + 0.6 × spread per step; pigment 0.02 + 0.2 × spread.
+- Cost: Per wet cell and step: four neighbour exchanges.
+- Tests: tst_brushmedia::watercolour*
+
+### Edge darkening — `wcEdgeDarkening`
+
+Water flows to the edge of a wash and evaporates there, leaving its pigment: the darker rim of real watercolour.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 50 %
+- Engines: 
+- Sensors: —
+- Serialisation: `wcEdgeDarkening`: JSON number
+- Rendering: Pressure = water × (1 − 0.8 × value × edge) and evaporation × (1 + 4 × value × edge), edge = share of dry paper within two cells; the outward flow carries pigment.
+- Cost: None beyond the step.
+- Tests: tst_brushmedia::watercolour*
+
+### Granulation — `wcGranulation`
+
+Pigment settles in the valleys of the paper, so dried washes show the paper's grain.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 30 %
+- Engines: 
+- Sensors: —
+- Serialisation: `wcGranulation`: JSON number
+- Rendering: Settling rate × (1 + 3 × value × (1 − paper height)).
+- Cost: Per wet cell and step: one paper sample.
+- Tests: tst_brushmedia::watercolour*
+
+### Drying time — `wcDryingTime`
+
+How long a wash stays wet (simulation time; on the canvas it dries in real time after the stroke). Painting into a wash before it dries mixes wet-on-wet.
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0.5 … 60 s
+- Default: 6 s
+- Engines: 
+- Sensors: —
+- Serialisation: `wcDryingTime`: JSON number
+- Rendering: Evaporation per 16 ms step = 0.6 / (time / 16 ms), more at the wet edge.
+- Cost: The canvas runs a bounded number of steps per timer tick until the paint is dry.
+- Tests: tst_brushmedia::watercolour*
+
+### Lifting — `wcLifting`
+
+Clear water over paint that has settled lifts it: the damp brush takes part of the colour up and the rest moves in the wash (while the canvas keeps the paint's wet state).
+
+- Status: implemented (Brush Studio)
+- Type: number
+- Range: 0 … 100 %
+- Default: 20 %
+- Engines: 
+- Sensors: —
+- Serialisation: `wcLifting`: JSON number
+- Rendering: Per dab: settled pigment × lifting × contact × pass is loosened into the wash, where the brush's paint exchange takes part of it up.
+- Cost: Per pixel of each dab: one mix.
+- Tests: tst_brushmedia::watercolour*
+
 ## Engine
 
 ### Engine — `blend`
@@ -2091,11 +2199,11 @@ What the brush does to the layer: paint colour, erase, smudge existing paint, or
 
 - Status: implemented (Brush Studio)
 - Type: option
-- Range: Paint / Erase / Smudge / Wet paint
+- Range: Paint / Erase / Smudge / Wet paint / Watercolour
 - Default: Paint
 - Engines: all
 - Sensors: —
-- Serialisation: `blend`: one of "paint", "erase", "smudge", "wet"
+- Serialisation: `blend`: one of "paint", "erase", "smudge", "wet", "watercolor"
 - Rendering: Selects the renderer: coverage composite (paint, erase) or carried patch (smudge, wet paint).
 - Cost: Smudge and wet paint touch pixels per dab; paint and erase recomposite each pixel once per input event.
 - Tests: tst_brush, tst_brushengine (engine suites), tst_brushengine::everyImplementedPropertyChangesRendering

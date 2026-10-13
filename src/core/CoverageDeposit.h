@@ -30,7 +30,7 @@ public:
     explicit CoverageDeposit(StrokeContext &context) : StrokeDeposit(context) {}
 
     void dab(StrokeSurface &image, const DabParams &dab, const QRect &rect, TileSnapshot &before, QRect &dirty) override;
-    void flush(StrokeSurface &image, const TileSnapshot &before) override;
+    QRect flush(StrokeSurface &image, TileSnapshot &before) override;
     qsizetype bufferBytes() const override;
     int coverageTileCount() const override { return int(m_coverage.size()); }
     bool supportsRebuild() const override { return true; }

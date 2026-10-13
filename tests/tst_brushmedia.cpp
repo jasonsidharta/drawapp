@@ -13,6 +13,7 @@
 #include "StrokeEngine.h"
 #include "TiledImage.h"
 #include "TileSnapshot.h"
+#include "WetLayer.h"
 
 #include <QFile>
 #include <QPainter>
@@ -222,6 +223,74 @@ int painted(const QImage &img, const QRect &r, int threshold = 128)
         for (int x = r.left(); x <= r.right(); ++x)
             n += qAlpha(img.pixel(x, y)) > threshold;
     return n;
+}
+
+// Watercolour for measurements: smooth paper (no tooth) unless a test sets it, nothing lifted.
+BrushSettings watercolor(double spread = 0.5, double edge = 0.5, double granulation = 0.0)
+{
+    BrushSettings s;
+    s.blend = BrushBlend::Watercolor;
+    s.size = 30;
+    s.hardness = 0.5;
+    s.spacing = 0.06;
+    s.flow = 0.8;
+    s.pressureSize = {false, 0, 1};
+    s.texture = QStringLiteral("rough");
+    s.textureStrength = 0.0;
+    s.wcWater = 0.6;
+    s.wcPigment = 0.5;
+    s.wcSpread = spread;
+    s.wcEdgeDarkening = edge;
+    s.wcGranulation = granulation;
+    s.wcDryingTime = 3;
+    s.wcLifting = 0.0;
+    return s.sanitized();
+}
+
+// One watercolour stroke into a wet layer that outlives it (as the canvas keeps one).
+void wetStroke(QImage &image, WetLayer &wet, const BrushSettings &settings, const std::vector<StrokeSample> &samples,
+               const QColor &color = QColor(40, 70, 160), quint64 seed = 7)
+{
+    TileSnapshot before;
+    StrokeEngine engine(settings, color, seed, 0);
+    engine.setWetLayer(&wet);
+    engine.begin(image, samples.front(), before);
+    for (size_t i = 1; i < samples.size(); ++i)
+        engine.moveTo(image, samples[i], before);
+    engine.finish(image, before);
+}
+
+// Lets the paint dry completely; returns the simulation steps it took.
+int dry(QImage &image, WetLayer &wet, int maxSteps = 20000)
+{
+    DenseSurface surface(image);
+    TileSnapshot before;
+    int steps = 0;
+    for (; wet.isWet() && steps < maxSteps; steps += 10)
+        wet.step(surface, before, 10);
+    return steps;
+}
+
+// 0 (white paper) .. 255 (black).
+int darkness(const QImage &image, int x, int y)
+{
+    return 255 - qGray(image.pixel(x, y));
+}
+
+// Mean darkness over columns x0..x1 at distances d0..d1 from the row yc (both sides).
+double darknessAt(const QImage &image, int x0, int x1, int yc, int d0, int d1)
+{
+    double sum = 0;
+    int n = 0;
+    for (int x = x0; x <= x1; ++x)
+        for (int d = d0; d <= d1; ++d)
+            for (const int y : {yc - d, yc + d}) {
+                sum += darkness(image, x, y);
+                ++n;
+                if (d == 0)
+                    break;
+            }
+    return n ? sum / n : 0.0;
 }
 
 } // namespace
@@ -444,13 +513,14 @@ private slots:
     void strokesStopCleanlyAtEveryMemoryLimit()
     {
         // Swept: the stroke runs out of tiles at every point from the first tile on, for a
-        // milestone 10 brush and a dry-media brush, on transparency and on paint; the snapshot
+        // milestone 10 brush, a dry-media brush and watercolour (whose wet tiles are charged to the
+        // budget too), on transparency and on paint; the snapshot
         // always restores the layer exactly.
         const qint64 limit = MemoryBudget::limit();
         const auto restore = qScopeGuard([&] { MemoryBudget::setLimit(limit == MemoryBudget::defaultLimit() ? 0 : limit); });
         const qint64 tile = 64 * 64 * 4;
         for (const QString &id : {QStringLiteral("builtin.solid-round"), QStringLiteral("builtin.compressed-charcoal"),
-                                  QStringLiteral("builtin.textured-paint")}) {
+                                  QStringLiteral("builtin.textured-paint"), QStringLiteral("builtin.watercolor-wash")}) {
             for (const bool painted : {false, true}) {
                 QImage start = canvas(QSize(1024, 256));
                 if (painted) {
@@ -1292,6 +1362,296 @@ private slots:
             QImage img = canvas(QSize(400, 200), Qt::white);
             paint(img, p->settings, wobble());
             paint(img, p->settings, line({50, 150}, {350, 150}, 40, 0.5), 11); // a second, lighter stroke
+            checkGolden(id, img);
+        }
+    }
+
+    // --- watercolour (A7: a bounded cellular approximation, not a fluid simulation) ---
+
+    void watercolorWetOnDryHasHardDarkEdges()
+    {
+        // On dry paper the paint stops where the water stops: nothing beyond the brush's reach.
+        // With edge darkening water flows to the edge and evaporates there, leaving its pigment:
+        // the rim dries clearly darker than the middle. Without it the rim is at most a little
+        // darker (the thin rim dries first, so some pigment still flows out).
+        double ratio[2] = {0, 0};
+        int i = 0;
+        for (const double edge : {0.0, 0.9}) {
+            QImage img = canvas(QSize(400, 200), Qt::white);
+            WetLayer wet(img.size());
+            wetStroke(img, wet, watercolor(0.5, edge), line({60, 100}, {340, 100}, 40));
+            QVERIFY(wet.isWet()); // still wet at pen-up: the stroke lasted 320 ms
+            dry(img, wet);
+            QVERIFY(!wet.isWet());
+            QVERIFY(validPremultiplied(img));
+            for (int x = 120; x <= 280; ++x) {
+                for (int y = 0; y < 100 - 17; ++y)
+                    QVERIFY2(img.pixel(x, y) == qRgb(255, 255, 255), qPrintable(QStringLiteral("%1, %2").arg(x).arg(y)));
+                for (int y = 100 + 18; y < 200; ++y)
+                    QVERIFY(img.pixel(x, y) == qRgb(255, 255, 255));
+            }
+            // The edge from paint to paper is a few pixels wide (anti-aliased, not a gradient).
+            const int peak = std::max(darkness(img, 200, 100), darkness(img, 200, 88));
+            int inside = 100, outside = 100;
+            for (int y = 100; y > 70; --y) {
+                if (darkness(img, 200, y) >= 0.5 * peak)
+                    inside = y;
+                if (darkness(img, 200, y) > 0.1 * peak)
+                    outside = y;
+            }
+            // The rim: the darkest one-pixel band in the outer third of the stroke (both sides).
+            const double centre = darknessAt(img, 120, 280, 100, 0, 4);
+            double rim = 0;
+            for (int d = 10; d <= 15; ++d)
+                rim = std::max(rim, darknessAt(img, 120, 280, 100, d, d));
+            ratio[i++] = rim / centre;
+            qInfo("edge darkening %.1f: centre %.1f, rim %.1f (ratio %.2f), edge 50-10 %% %d px", edge, centre, rim,
+                  rim / centre, inside - outside);
+            QVERIFY(centre > 20);
+            QVERIFY(inside - outside <= 4);
+        }
+        // Measured at this commit: 1.03 without, 1.13 with (the one-pixel band; the rim is 1-2 px).
+        QVERIFY2(ratio[0] < 1.07, "no edge darkening: the rim is at most a little darker");
+        QVERIFY2(ratio[1] > 1.1 && ratio[1] > ratio[0] + 0.07, "edge darkening: the rim dries darker than the middle");
+    }
+
+    void watercolorWetOnWetBleeds()
+    {
+        // Clear water first, then pigment across it while it is still wet: the pigment spreads
+        // into the wet band, but next to the band (dry paper) it stays where the brush put it.
+        QImage img = canvas(QSize(400, 200), Qt::white);
+        WetLayer wet(img.size());
+        BrushSettings water = watercolor(0.8, 0.3);
+        water.size = 60;
+        water.wcPigment = 0.0;
+        water.wcDryingTime = 8;
+        wetStroke(img, wet, water, line({20, 100}, {380, 100}, 30));
+        QCOMPARE(img, canvas(QSize(400, 200), Qt::white)); // clear water shows nothing
+        BrushSettings pigment = watercolor(0.8, 0.3);
+        pigment.size = 10;
+        pigment.wcWater = 0.3;
+        pigment.wcPigment = 0.9;
+        wetStroke(img, wet, pigment, line({200, 10}, {200, 190}, 30));
+        dry(img, wet);
+        auto width = [](const QImage &image, int y) {
+            int n = 0;
+            for (int x = 150; x <= 250; ++x)
+                n += darkness(image, x, y) > 8;
+            return n;
+        };
+        const int inBand = width(img, 100), onDry = width(img, 30);
+        qInfo("pigment width in the wet band %d px, on dry paper %d px", inBand, onDry);
+        QVERIFY(onDry >= 6 && onDry <= 14);
+        QVERIFY2(inBand >= onDry + 8, "wet-on-wet: the pigment bleeds into the wet paper");
+
+        // The same pigment stroke once the water has dried: no bleeding.
+        QImage dryImg = canvas(QSize(400, 200), Qt::white);
+        WetLayer wet2(dryImg.size());
+        wetStroke(dryImg, wet2, water, line({20, 100}, {380, 100}, 30));
+        dry(dryImg, wet2);
+        wetStroke(dryImg, wet2, pigment, line({200, 10}, {200, 190}, 30));
+        dry(dryImg, wet2);
+        const int dryBand = width(dryImg, 100);
+        qInfo("on the dried band %d px", dryBand);
+        QVERIFY(dryBand <= onDry + 2);
+    }
+
+    void watercolorGranulatesInThePaperValleys()
+    {
+        // Settling is faster in the paper's valleys: with granulation the pigment collects there.
+        double contrast[2] = {0, 0};
+        int i = 0;
+        for (const double granulation : {0.0, 1.0}) {
+            BrushSettings s = watercolor(0.3, 0.0, granulation);
+            s.size = 90;
+            s.textureStrength = 1.0;
+            s.wcDryingTime = 6;
+            QImage img = canvas(QSize(400, 200), Qt::white);
+            WetLayer wet(img.size());
+            wetStroke(img, wet, s, line({60, 100}, {340, 100}, 40));
+            dry(img, wet);
+            double v = 0, p = 0;
+            int nv = 0, np = 0;
+            for (int y = 75; y <= 125; ++y)
+                for (int x = 110; x <= 290; ++x) {
+                    const double h = paperHeight(QStringLiteral("rough"), x, y);
+                    if (h < 0.3) {
+                        v += darkness(img, x, y);
+                        ++nv;
+                    } else if (h > 0.7) {
+                        p += darkness(img, x, y);
+                        ++np;
+                    }
+                }
+            QVERIFY(nv > 100 && np > 100);
+            contrast[i++] = v / nv - p / np;
+            qInfo("granulation %.0f: valleys %.1f, peaks %.1f", granulation, v / nv, p / np);
+        }
+        QVERIFY2(std::abs(contrast[0]) < 3, "no granulation: the paper does not show");
+        QVERIFY2(contrast[1] > 8, "granulation: the valleys are darker than the peaks");
+    }
+
+    void watercolorDriesInItsDryingTime()
+    {
+        int steps[2] = {0, 0};
+        int i = 0;
+        for (const double seconds : {1.0, 4.0}) {
+            BrushSettings s = watercolor();
+            s.wcDryingTime = seconds;
+            QImage img = canvas(QSize(400, 200), Qt::white);
+            WetLayer wet(img.size());
+            wetStroke(img, wet, s, line({60, 100}, {340, 100}, 40));
+            steps[i++] = dry(img, wet);
+            QVERIFY(!wet.isWet());
+            QCOMPARE(wet.water(200, 100), 0.0f);
+            QCOMPARE(wet.suspended(200, 100), 0.0f);
+            QVERIFY(wet.settled(200, 100) > 0.0f);
+            // Dry paint is fixed: further steps change nothing.
+            const QImage done = img.copy();
+            DenseSurface surface(img);
+            TileSnapshot before;
+            QVERIFY(wet.step(surface, before, 50).isEmpty());
+            QCOMPARE(img, done);
+        }
+        const double ms[2] = {steps[0] * WetLayer::StepMs, steps[1] * WetLayer::StepMs};
+        qInfo("dried after %.0f ms (1 s setting) and %.0f ms (4 s setting) of simulation time", ms[0], ms[1]);
+        QVERIFY(steps[1] > 2.5 * steps[0]);
+        QVERIFY(ms[0] < 3000 && ms[1] < 12000);
+    }
+
+    void watercolorLiftsDriedPaintOnlyWithLifting()
+    {
+        for (const double lifting : {0.0, 1.0}) {
+            QImage img = canvas(QSize(400, 200), Qt::white);
+            WetLayer wet(img.size());
+            BrushSettings wash = watercolor(0.4, 0.0);
+            wash.size = 70;
+            wash.wcPigment = 0.8;
+            wetStroke(img, wet, wash, line({40, 100}, {360, 100}, 40));
+            dry(img, wet);
+            const QImage washed = img.copy();
+            BrushSettings water = watercolor(0.4, 0.6);
+            water.size = 24;
+            water.wcPigment = 0.0;
+            water.wcLifting = lifting;
+            wetStroke(img, wet, water, line({100, 100}, {300, 100}, 30));
+            dry(img, wet);
+            const double before = darknessAt(washed, 140, 260, 100, 0, 3), after = darknessAt(img, 140, 260, 100, 0, 3);
+            qInfo("lifting %.0f: centre darkness %.1f -> %.1f", lifting, before, after);
+            if (lifting == 0.0)
+                QCOMPARE(img, washed); // clear water over dried paint, nothing lifted: unchanged
+            else
+                QVERIFY2(after < 0.85 * before, "lifting takes pigment out of the stroke's middle");
+        }
+    }
+
+    void watercolorGlazesBuildUpAndStayTransparent()
+    {
+        QImage bg = canvas(QSize(400, 200), Qt::white);
+        {
+            QPainter p(&bg);
+            for (int i = 0; i < 8; ++i)
+                p.fillRect(QRect(i * 50, 0, 25, 200), QColor(230, 200, 60));
+        }
+        QImage once = bg.copy();
+        WetLayer wet(once.size());
+        BrushSettings s = watercolor(0.4, 0.2);
+        s.size = 60;
+        wetStroke(once, wet, s, line({30, 100}, {370, 100}, 40));
+        dry(once, wet);
+        QImage twice = once.copy();
+        wetStroke(twice, wet, s, line({30, 100}, {370, 100}, 40), QColor(40, 70, 160), 8);
+        dry(twice, wet);
+        const double d1 = darknessAt(once, 60, 340, 100, 0, 8), d2 = darknessAt(twice, 60, 340, 100, 0, 8);
+        qInfo("one glaze %.1f, two glazes %.1f", d1, d2);
+        QVERIFY2(d2 > d1 + 15, "a second glaze over dried paint deepens it");
+        // Transparent: the stripes under the paint still show.
+        const int under = std::abs(qGray(twice.pixel(110, 100)) - qGray(twice.pixel(135, 100)));
+        qInfo("stripe contrast under two glazes %d", under);
+        QVERIFY(under > 15);
+        QVERIFY(validPremultiplied(twice));
+    }
+
+    void watercolorOnTilesSelectionsSeamsAndSeeds()
+    {
+        QImage clip(400, 200, QImage::Format_Grayscale8);
+        clip.fill(0);
+        {
+            QPainter p(&clip);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(Qt::white);
+            p.drawEllipse(QRectF(40, 20, 300, 150));
+        }
+        QImage bg = canvas();
+        {
+            QPainter p(&bg);
+            for (int i = 0; i < 12; ++i)
+                p.fillRect(QRect(i * 34, 0, 17, 200), QColor::fromHsv(i * 30, 220, 230));
+        }
+        std::vector<StrokeSample> seam;
+        for (int i = 0; i <= 60; ++i)
+            seam.push_back(sample(20 + i * 6.0, i < 30 ? 64.0 : 128.0 - (i - 30) * 2.1, 0.3 + 0.7 * (i % 10) / 10.0, i * 8.0));
+        for (const QString &id : {QStringLiteral("builtin.watercolor-wash"), QStringLiteral("builtin.watercolor-round")}) {
+            const BrushSettings s = BrushPresets::builtIn(id)->settings;
+            for (const QImage &mask : {QImage(), clip}) {
+                QImage dense = bg.copy();
+                TiledImage tiled = TiledImage::fromImage(bg);
+                TileSnapshot db, tb;
+                StrokeEngine a(s, Ink, 7, 0), b(s, Ink, 7, 0);
+                if (!mask.isNull()) {
+                    a.setClipMask(mask);
+                    b.setClipMask(mask);
+                }
+                a.begin(dense, seam.front(), db);
+                b.begin(tiled, seam.front(), tb);
+                for (size_t i = 1; i < seam.size(); ++i) {
+                    a.moveTo(dense, seam[i], db);
+                    b.moveTo(tiled, seam[i], tb);
+                }
+                a.finish(dense, db);
+                b.finish(tiled, tb);
+                QVERIFY2(validPremultiplied(dense), qPrintable(id));
+                QVERIFY2(tiled == dense, qPrintable(id));
+                QVERIFY2(differingPixels(dense, bg) > 1000, qPrintable(id));
+                if (!mask.isNull())
+                    for (int y = 0; y < 200; y += 3)
+                        for (int x = 0; x < 400; x += 3)
+                            if (qGray(clip.pixel(x, y)) == 0)
+                                QVERIFY(dense.pixel(x, y) == bg.pixel(x, y));
+                tb.swapWith(tiled);
+                QVERIFY(tiled == bg);
+            }
+            QCOMPARE(render(s, seam, bg, 3), render(s, seam, bg, 3));
+        }
+        // Seams: on smooth paper the same stroke moved by (37, 21) pixels, so it meets the 64-pixel
+        // tile grid elsewhere, gives the same pixels moved by the same amount.
+        BrushSettings smooth = watercolor(0.7, 0.8);
+        smooth.size = 40;
+        std::vector<StrokeSample> moved;
+        for (const StrokeSample &p : seam) {
+            StrokeSample q = p;
+            q.pos += QPointF(37, 21);
+            moved.push_back(q);
+        }
+        const QImage white = canvas(QSize(480, 280), Qt::white);
+        const QImage at = render(smooth, seam, white), shifted = render(smooth, moved, white);
+        QVERIFY(differingPixels(at, white) > 1000);
+        QCOMPARE(shifted.copy(37, 21, 400, 200), at.copy(0, 0, 400, 200));
+    }
+
+    void watercolorPresetGoldenImages()
+    {
+        QImage base = canvas(QSize(400, 200), QColor(244, 240, 232));
+        {
+            QPainter p(&base);
+            p.fillRect(QRect(150, 0, 100, 200), QColor(220, 180, 60));
+        }
+        for (const QString &id : {QStringLiteral("watercolor-wash"), QStringLiteral("watercolor-round")}) {
+            const BrushPreset *p = BrushPresets::builtIn(QStringLiteral("builtin.") + id);
+            QVERIFY2(p, qPrintable(id));
+            QImage img = base.copy();
+            paint(img, p->settings, wobble(), 7, QColor(40, 70, 160));
             checkGolden(id, img);
         }
     }

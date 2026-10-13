@@ -12,7 +12,9 @@
 //   Smudge:       a carried patch of canvas paint is dragged along
 //   WetPaint:     a carried patch that starts charged with the brush colour, deposits it and
 //                 picks up canvas paint as it goes (a bounded prototype, see StrokeEngine)
-enum class BrushBlend { Paint, Erase, Smudge, WetPaint };
+//   Watercolor:   (milestone 11) water and pigment on a wet layer that spreads, darkens at its
+//                 edges, granulates and dries (WetLayer.h: a bounded approximation, not a fluid solver)
+enum class BrushBlend { Paint, Erase, Smudge, WetPaint, Watercolor };
 
 // What one dab is (Paint and Erase only; the other blends always use the tip).
 //   Tip:      the tip image or the computed round tip
@@ -214,6 +216,16 @@ struct BrushSettings
     double dryEdgeBreakup = 0.0;                  // the mark's rim crumbles
     double dryGrit = 0.0;                         // share of pixels the pigment skips (per stroke)
     double dryTiltDepth = 1.0;                    // penetration × this at full tilt (side shading)
+
+    // --- Watercolour --- (blend Watercolor; research/m11-brush-architecture.md, A7)
+    // The paper is the texture (rough paper when none is set) and its strength the tooth.
+    double wcWater = 0.6;          // water each pass adds
+    double wcPigment = 0.5;        // pigment each pass adds (× opacity and its dynamics)
+    double wcSpread = 0.5;         // how readily water and pigment spread through the wet area
+    double wcEdgeDarkening = 0.5;  // the wet edge dries first and gathers pigment
+    double wcGranulation = 0.3;    // pigment settles in the paper's valleys
+    double wcDryingTime = 6.0;     // seconds of simulation time for a wash to dry
+    double wcLifting = 0.2;        // share of settled paint new water lifts back, per pass
 
     // --- Bristles --- (stamp Bristle; research/m11-brush-architecture.md, A5)
     // The footprint is the dab's size, roundness and angle (a flat brush is a thin ellipse turned
