@@ -80,6 +80,12 @@ public:
     // and name cannot be changed this way.
     Q_INVOKABLE void setValue(const QString &key, const QVariant &value);
     Q_INVOKABLE void toggleFavorite(const QString &id);
+    // Whether a setting (BrushSettings JSON key; "pressureSize.minimum" is pressureSize) does
+    // anything with the current working brush's engine (the registry, BrushProperties::appliesTo),
+    // so the panel shows only controls that work. `dependency` is ignored: QML passes the current
+    // settings so the binding re-evaluates when they change.
+    Q_INVOKABLE bool applies(const QString &key, const QVariant &dependency = {}) const;
+
     Q_INVOKABLE void saveCurrent();
     // A new custom preset from the current working settings; selected afterwards. Returns its id.
     Q_INVOKABLE QString saveAsNew(const QString &name);

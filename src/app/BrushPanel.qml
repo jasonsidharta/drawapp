@@ -45,9 +45,12 @@ Item {
     }
 
     // Slider value = stored value × factor.
+    // Shown when `when` holds and the setting works with the current brush's engine (registry).
     component SettingSlider: RowLayout {
         id: row
         property string key
+        property bool when: true
+        visible: when && panel.lib.applies(key, panel.cur)
         property string label
         property real from: 0
         property real to: 100
@@ -86,6 +89,8 @@ Item {
 
     component SettingSwitch: Switch {
         property string key
+        property bool when: true
+        visible: when && panel.lib.applies(key, panel.cur)
         Layout.fillWidth: true
         checked: panel.val(key) === true
         onToggled: panel.lib.setValue(key, checked)
@@ -287,7 +292,7 @@ Item {
                 tip: "The most one stroke can cover. Overlaps within a stroke never go past it; separate strokes build up."
             }
             SettingSlider {
-                visible: panel.cur.accumulation === "buildUp" || panel.cur.airbrush
+                when: panel.cur.accumulation === "buildUp" || panel.cur.airbrush
                 key: "flow"
                 label: "Flow"
                 from: 1
@@ -295,13 +300,13 @@ Item {
                 tip: "How much one pass adds, towards the opacity. Slow or repeated passes within the stroke build up."
             }
             SettingSlider {
-                visible: panel.cur.tip === ""
+                when: panel.cur.tip === ""
                 key: "hardness"
                 label: "Hardness"
                 tip: "100% = crisp anti-aliased edge; lower = softer falloff"
             }
             SettingSlider {
-                visible: panel.cur.blend === "smudge"
+                when: panel.cur.blend === "smudge"
                 key: "smudgeStrength"
                 label: "Strength"
                 tip: "How strongly the carried colour is laid down"
@@ -316,7 +321,7 @@ Item {
                      + " screen pixels and catches up when you lift it"
             }
             SettingSlider {
-                visible: panel.cur.pressureSize.enabled
+                when: panel.cur.pressureSize.enabled
                 key: "pressureSize.minimum"
                 label: "Lightest size"
                 slider.objectName: "pressureMinSlider"
@@ -371,12 +376,12 @@ Item {
                           : "Uniform: the stroke reaches its opacity at once; overlaps never darken."
                 }
                 SettingSwitch {
-                    visible: panel.cur.blend !== "smudge"
+                    when: panel.cur.blend !== "smudge"
                     key: "airbrush"
                     text: "Airbrush: keeps adding while held still"
                 }
                 SettingSlider {
-                    visible: panel.cur.airbrush && panel.cur.blend !== "smudge"
+                    when: panel.cur.airbrush && panel.cur.blend !== "smudge"
                     key: "airbrushRate"
                     label: "Rate"
                     from: 1
@@ -424,17 +429,17 @@ Item {
                     text: panel.cur.blend === "smudge" ? "Pressure changes strength" : "Pressure changes opacity"
                 }
                 SettingSlider {
-                    visible: panel.cur.pressureOpacity.enabled
+                    when: panel.cur.pressureOpacity.enabled
                     key: "pressureOpacity.minimum"
                     label: panel.cur.blend === "smudge" ? "Lightest strength" : "Lightest opacity"
                 }
                 SettingSwitch {
-                    visible: panel.cur.accumulation === "buildUp" || panel.cur.airbrush
+                    when: panel.cur.accumulation === "buildUp" || panel.cur.airbrush
                     key: "pressureFlow.enabled"
                     text: "Pressure changes flow"
                 }
                 SettingSlider {
-                    visible: panel.cur.pressureFlow.enabled && (panel.cur.accumulation === "buildUp" || panel.cur.airbrush)
+                    when: panel.cur.pressureFlow.enabled && (panel.cur.accumulation === "buildUp" || panel.cur.airbrush)
                     key: "pressureFlow.minimum"
                     label: "Lightest flow"
                 }
@@ -487,12 +492,12 @@ Item {
                     }
                 }
                 SettingSlider {
-                    visible: panel.cur.texture !== ""
+                    when: panel.cur.texture !== ""
                     key: "textureStrength"
                     label: "Strength"
                 }
                 SettingSlider {
-                    visible: panel.cur.texture !== ""
+                    when: panel.cur.texture !== ""
                     key: "textureScale"
                     label: "Scale"
                     from: 10
@@ -533,7 +538,7 @@ Item {
                     text: "Smudge"
                 }
                 SettingSlider {
-                    visible: panel.cur.blend === "smudge"
+                    when: panel.cur.blend === "smudge"
                     key: "smudgePickup"
                     label: "Pickup"
                     tip: "How quickly the carried colour takes on the colours it passes"

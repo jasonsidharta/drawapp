@@ -260,6 +260,33 @@ reinstalled after each fix):
 | Fixed during testing (4) | Five-layer 4096² transform: the preview kept 867.5 of 979.9 MiB (a transparent "base" copy per layer without a selection), so Apply was refused with "Not enough memory". Now 499.7 MiB; Apply committed ("Applying… 35 %" seen) (`tst_canvas::transformWithoutSelectionKeepsOneCopyPerLayer`) |
 | Not checked | Pen pressure and tilt (no pen), stroke latency and frame rate (an emulator says nothing about device performance), saving a format 3 file through the system picker, physical devices, low-memory kills by Android during a save |
 
+**Milestone 11 emulator results, 2026-10-13.** Setup:
+- Pixel Tablet AVD `drawapp_test_api36`, Android 16 / API 36, x86_64, emulator `-gpu host
+  -no-window` (headless: no window on the desktop).
+- x86_64 debug APK of commit `987b6dc` (77.1 MB), built into a separate directory:
+  `toolsuild-android.ps1 -Config Debug -Abi x86_64 -BuildDir
+  %USERPROFILE%\drawapp-build\m11-android-x86_64-debug`.
+- Input from `adb shell input` taps, swipes and typed text: touch only, no pressure or tilt.
+- Results checked from `adb exec-out screencap`.
+
+| Check | Result |
+|---|---|
+| Start | Started; offered recovery of the milestone 10 session's drawing (discarded) |
+| Brush panel | Category headers (Basic, Erasers, Ink, Dry Media, Bristles, …) and engine-drawn thumbnails for all 38 presets |
+| Search | Typing "water" left Watercolour Wash and Round under "Watercolour"; "grass", "hair", "foliage" and "splatter" found their presets; picking from the filtered list selected the brush |
+| Scratchpad, Watercolour Wash | Transparent glaze over the colour bands, darker edge, dried at pen-up |
+| Watercolour on the canvas | Stroke drawn. Between pen-up and 6 s later, 21,112 screen pixels changed (the paint kept moving while drying); the rim was slightly darker after drying |
+| Undo of a wet stroke | The whole stroke went, including its drying (no paint left) |
+| Round Bristle | Streaked strokes |
+| Grass | Blades growing upward from the stroke |
+| Hair, Foliage, Splatter | Strands, scattered leaves, drops of mixed sizes |
+| Found | The panel's basic Hardness slider showed for Round Bristle and Grass, which ignore hardness. Fixed afterwards: panel sliders and switches now also ask the property registry whether the setting applies (`BrushLibrary::applies`); verified on Windows (tst_ui), not yet on the emulator |
+| Not checked | Pen pressure and tilt (no pen); stroke latency and frame rate (an emulator is not a performance measure); saving while wet through the system picker; dry media, mixing, ink and pattern presets by touch; physical devices |
+
+The arm64 debug APK of the same commit was **built** (74.2 MB, `-Abi arm64_v8a -BuildDir
+%USERPROFILE%\drawapp-build\m11-android-arm64-debug`) and **not run**: no physical device was
+available.
+
 ### Physical Android device (arm64): install and test
 
 Nothing below has been run yet; no device was available.

@@ -537,7 +537,7 @@ How much of the way to the opacity one pass deposits (build-up and airbrush).
 - Type: number
 - Range: 1 … 100 %
 - Default: 100 %
-- Engines: paint, erase, spray, hatching, dry media, bristles, strands, grass, foliage, splatter, pattern
+- Engines: paint, erase, spray, hatching, dry media, bristles, watercolour, strands, grass, foliage, splatter, pattern
 - Sensors: —
 - Has an effect with: Build-up or airbrush
 - Serialisation: `flow`: JSON number

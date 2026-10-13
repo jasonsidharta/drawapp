@@ -515,7 +515,7 @@ std::vector<BrushProperty> build()
     add("flow", "Flow", PropertyType::Number)
         .percent(0.01, 1)
         .basic()
-        .engines(EngineCoverage)
+        .engines(EngineCoverage | EngineWatercolor) // watercolour: the share each dab exchanges
         .desc("How much of the way to the opacity one pass deposits (build-up and airbrush).")
         .render("Per dab f = 1 − (1 − flow)^(step / pass length).")
         .cost("Per dab: one pow().")

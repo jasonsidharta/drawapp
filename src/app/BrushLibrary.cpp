@@ -170,6 +170,15 @@ QString BrushLibrary::currentName() const
     return workingSettings(currentId()).name;
 }
 
+bool BrushLibrary::applies(const QString &key, const QVariant &dependency) const
+{
+    Q_UNUSED(dependency)
+    const BrushProperty *p = BrushProperties::find(key);
+    if (!p)
+        p = BrushProperties::find(key.section(QLatin1Char('.'), 0, 0));
+    return !p || BrushProperties::appliesTo(*p, workingSettings(currentId()));
+}
+
 QVariantMap BrushLibrary::current() const
 {
     return workingSettings(currentId()).toJson().toVariantMap();
