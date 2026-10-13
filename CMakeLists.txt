@@ -34,6 +34,10 @@ add_library(drawcore STATIC
     src/core/SafeSave.cpp src/core/SafeSave.h
     src/core/Selection.cpp src/core/Selection.h
     src/core/StrokeEngine.cpp src/core/StrokeEngine.h
+    src/core/StrokeContext.h src/core/BrushRaster.h
+    src/core/StrokeDeposit.cpp src/core/StrokeDeposit.h
+    src/core/CoverageDeposit.cpp src/core/CoverageDeposit.h
+    src/core/CarriedDeposit.cpp src/core/CarriedDeposit.h
     src/core/StrokeSmoother.cpp src/core/StrokeSmoother.h
     src/core/StrokeSpacer.cpp src/core/StrokeSpacer.h
     src/core/TiledImage.cpp src/core/TiledImage.h

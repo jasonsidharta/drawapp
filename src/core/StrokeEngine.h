@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BrushSettings.h"
+#include "StrokeContext.h"
 #include "StrokeSurface.h"
 #include "StrokeSmoother.h"
 #include "StrokeSpacer.h"
@@ -14,6 +15,7 @@
 #include <vector>
 
 class TileSnapshot;
+class StrokeDeposit;
 
 namespace BrushTips {
 struct Tip;
@@ -33,9 +35,9 @@ struct Texture;
 //     -> StrokeSpacer (distance-spaced dabs; size and spacing from dynamics)
 //     (+ airbrush dabs from elapsed time)
 //     -> dab parameters (BrushSettings + CompiledDynamics + jitter + taper)
-//     -> stamp (tip, spray, hatching) into stroke coverage S (Paint, Erase),
-//        or carried-patch rendering (Smudge, WetPaint)
-//     -> composite once per pixel per call, through the selection.
+//     -> deposit strategy (StrokeDeposit.h): what the dab does to the stroke buffers and the layer
+//        (coverage for Paint and Erase, the carried patch for Smudge and WetPaint, milestone 11
+//        engines), brought up to date once per pixel per call, through the selection.
 //
 // Coverage (Paint, Erase). Each pixel holds the stroke's coverage S, 0..1, in a sparse map of
 // 64 × 64 tiles (16-bit). A dab with tip value v, opacity ceiling C and per-dab flow f gives:
@@ -75,7 +77,7 @@ public:
     // At most this many airbrush dabs per call; a longer stall is not caught up all at once.
     static constexpr int MaxTimeDabsPerCall = 24;
     // Tips smaller than this radius are area-sampled (4 × 4 per pixel) instead of edge-estimated.
-    static constexpr double SmallTipRadius = 3.0;
+    static constexpr double SmallTipRadius = DabShape::SmallTipRadius;
     // Speed sensor: instantaneous speeds are capped and smoothed with this time constant.
     static constexpr double MaxSpeed = 100.0;      // px/ms
     static constexpr double MaxAcceleration = 10.0; // px/ms²
@@ -125,12 +127,12 @@ public:
     QRect finish(TiledImage &image, TileSnapshot &b) { TiledSurface d(image); return finish(d, b); }
 
     // A tile could not be allocated during this stroke (memory budget); pixels stopped changing.
-    bool allocationFailed() const { return m_allocationFailed; }
+    bool allocationFailed() const { return m_ctx.allocationFailed; }
 
-    const BrushSettings &settings() const { return m_settings; }
+    const BrushSettings &settings() const { return m_ctx.settings; }
     bool usesTime() const;
     qint64 dabCount() const { return m_dabCount; }
-    int coverageTileCount() const { return int(m_coverage.size()); }
+    int coverageTileCount() const;
     // Memory held by the stroke itself (coverage and colour tiles, patch), not the undo snapshot.
     qsizetype bufferBytes() const;
 
@@ -150,34 +152,14 @@ public:
         return render(surface, settings, color, samples, seed, before);
     }
 
-    // The parameters of one dab, as derived from the brush settings and the input sample.
-    struct DabParams
-    {
-        QPointF center;
-        double diameter = 1;
-        double ceiling = 1;  // 0..1, a whole 8-bit level
-        double flow = 1;     // per dab, already normalised to the spacing
-        double passFlow = 1; // the flow setting: what one pass deposits (towards the ceiling)
-        double angle = 0;    // radians
-        double strength = 0; // smudge: strength; wet paint: attack
-        double roundness = 1;
-        bool flipX = false;
-        bool flipY = false;
-        double stepFraction = 0.15; // step after this dab / diameter
-        double textureStrength = 0;
-        double distance = 0;  // along the stroke, px (wet paint load)
-        QRgb color = 0;       // opaque stroke colour of this dab
-        qint64 index = 0;     // render index, for per-dab randomness
-    };
+    // The parameters of one dab (StrokeContext.h).
+    using DabParams = ::DabParams;
 
 private:
-    using CoverageTile = std::vector<quint16>;
-    using ColorTile = std::vector<quint32>;
-
     void acceptInput(StrokeSample sample);
     void annotate(StrokeSample &sample);
     // Spaces the smoothed samples into dabs, adds airbrush dabs up to nowMs (< 0: none) and
-    // renders them; the caller composites.
+    // renders them; the caller flushes the deposit.
     void process(StrokeSurface &image, TileSnapshot &before, double nowMs, QRect &dirty);
     void addTimeDabs(double nowMs);
     void updateHeading(double direction, double stepFraction);
@@ -186,42 +168,18 @@ private:
     double diameterAt(const StrokeSample &sample);
     double spacingFactorAt(const StrokeSample &sample);
     double taperFactor(double distance) const;
-    double random(qint64 index, quint64 salt) const;
+    double random(qint64 index, quint64 salt) const { return m_ctx.random(index, salt); }
     DabParams paramsFor(const Dab &dab) const;
     QRgb dabColor(const SensorReadings &readings, qint64 index) const;
     void renderDab(StrokeSurface &image, const DabParams &dab, TileSnapshot &before, QRect &dirty);
-    void rasterize(const DabParams &dab, const QRect &rect);
-    void rasterizeSpray(const DabParams &dab, const QRect &rect);
-    void compositeTouched(StrokeSurface &image, const TileSnapshot &before);
-    void composite(StrokeSurface &image, const QRect &rect, const TileSnapshot &before);
-    void carry(StrokeSurface &image, const DabParams &dab, const QRect &rect, const TileSnapshot &before);
-    void carryInto(QImage &target, const QPoint &origin, const DabParams &dab, const QRect &rect);
-    void loadPatch(const StrokeSurface &image, const DabParams &dab);
-    QRgb workPixel(const StrokeSurface &image, int x, int y) const;
-    double grain(double x, double y) const;
-    double passExponent(double stepFraction) const;
-    CoverageTile &coverageTile(int column, int row);
-    QRect dabRect(const DabParams &dab, const StrokeSurface &image) const;
+    void flushDeposit(StrokeSurface &image, const TileSnapshot &before);
 
-    BrushSettings m_settings;
-    quint32 m_color; // opaque RGB as ARGB32, after the per-stroke colour jitter
-    double m_hue = 0, m_saturation = 0, m_lightness = 0; // of m_color, for per-dab colour changes
-    quint64 m_seed;
-    bool m_buildUp;
-    bool m_coverageBlend; // Paint or Erase
-    bool m_colorPerDab = false;
-    bool m_textureEachDab = false;
+    StrokeContext m_ctx; // settings, colour, seed and what every deposit strategy shares
     std::unique_ptr<BrushTips::Tip> m_importedTip;
-    const BrushTips::Tip *m_tip = nullptr;
-    const BrushTips::Texture *m_texture = nullptr;
-    bool m_textureNearest = true; // scale 1, no rotation: nearest texel
-    QPoint m_textureOffset;
-    double m_textureCos = 1, m_textureSin = 0;
-    double m_passLength = 1.0; // in diameters
+    std::unique_ptr<StrokeDeposit> m_deposit;
+    double m_hue = 0, m_saturation = 0, m_lightness = 0; // of the stroke colour, for per-dab colour changes
     double m_strokeSize = 1.0; // per-stroke size factor
     double m_minimumDiameter = 1.0;
-    QImage m_clip;
-    bool m_allocationFailed = false;
     CompiledDynamics m_dyn[DynamicTargetCount];
     bool m_anyDynamics = false;
 
@@ -272,15 +230,4 @@ private:
     qint64 m_distanceDabCount = 0;
     qint64 m_timeDabCount = 0;
     DabParams m_firstParams; // the first rendered dab, for the dot top-up in finish()
-
-    std::unordered_map<qint64, CoverageTile> m_coverage;
-    std::unordered_map<qint64, ColorTile> m_colors; // per-dab colour only
-    std::unordered_map<qint64, QRect> m_touched;    // per tile: area to recomposite in this call
-
-    // Smudge and wet paint: the carried paint, premultiplied RGBA as floats 0..255, centred on the dab.
-    std::vector<float> m_patch;
-    int m_patchSize = 0;
-    bool m_patchLoaded = false;
-    // Under a selection: the unclipped result, per 64 × 64 tile touched.
-    std::unordered_map<qint64, QImage> m_work;
 };
