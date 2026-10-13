@@ -22,6 +22,13 @@ the MinGW **13.1** tool and bundles 13.1 runtime DLLs, but `config_qtbase.summar
 
 ## Windows (verified)
 
+Milestone 10.5 uses a separate `build/codex-m105-release` CMake directory in
+`DrawApp-Codex` (MinGW 15.1, Qt 6.12). Configure with the same kit described below;
+build with `cmake --build build/codex-m105-release --parallel 3` and test with
+`ctest --test-dir build/codex-m105-release --output-on-failure`. Generated files
+and screenshots stay inside this directory. New validation is recorded in
+`docs/m105-engineering.md`, separately from historical platform results.
+
 Prerequisites: Python 3.10+, Git, internet access, about 2 GB of disk.
 
 ```powershell
@@ -353,3 +360,8 @@ Resolve the Qt LGPL/static linking question (ARCHITECTURE.md) before shipping.
 | Android arm64 | **Built; not run on a physical device** | Debug APK (development key) rebuilt for milestone 10. Same source as the emulator build. Pen pressure and tilt, brush feel, palm rejection, cloud providers and performance on real hardware are unverified (instructions above) |
 | Linux | **Blocked** | Needs the owner to run one `sudo apt install` command (above); everything after it is prepared |
 | iOS / iPadOS | **Blocked** | Needs a Mac with Xcode 16+ (above) |
+
+Milestone 10.5 correctness checkpoint: all 10 Windows suites passed in the Codex
+build directory (65.91 s). Transaction preparation and dense-buffer ownership
+fixes are implemented; preview performance and Android validation remain pending.
+See `docs/m105-engineering.md`.

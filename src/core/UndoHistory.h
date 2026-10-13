@@ -59,6 +59,7 @@ public:
     // Pixel memory this command retains right now (tile copies, a removed layer's image or a
     // selection mask).
     qsizetype byteSize() const;
+    qsizetype reclaimableBytes() const;
     // False for selection-only commands.
     bool changesArtwork() const;
 
@@ -95,7 +96,7 @@ public:
     UndoCommand::Result redo(LayeredDocument &doc);
     void clear();
     // Drops the oldest undo entries, then the farthest redo entries, until at least `wanted`
-    // bytes are released (memory pressure). Returns the bytes those entries were counted for;
+    // bytes are released (memory pressure). Returns conservatively reclaimable tile bytes;
     // *dropped (optional) receives how many entries went.
     qsizetype shed(qsizetype wanted, int *dropped = nullptr);
 

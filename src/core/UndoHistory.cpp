@@ -213,12 +213,14 @@ UndoHistory::UndoHistory(qsizetype budgetBytes)
 
 void UndoHistory::push(UndoCommand command)
 {
+    // Allocate first: an exception must preserve both history branches and IDs.
+    const qsizetype bytes = command.byteSize();
+    m_undo.push_back({std::move(command), m_nextId, bytes});
+    ++m_nextId;
     for (const Entry &entry : m_redo)
         m_bytes -= entry.bytes;
     m_redo.clear();
-    const qsizetype bytes = command.byteSize();
     m_bytes += bytes;
-    m_undo.push_back({std::move(command), m_nextId++, bytes});
     enforceBudget();
 }
 
@@ -267,16 +269,33 @@ qsizetype UndoHistory::budgetForLimit(qint64 memoryLimit)
 
 qsizetype UndoHistory::shed(qsizetype wanted, int *dropped)
 {
-    const qsizetype keep = std::max<qsizetype>(0, m_bytes - std::max<qsizetype>(wanted, 1));
-    const qsizetype before = m_bytes;
-    const int entries = int(m_undo.size() + m_redo.size());
-    const qsizetype budget = m_budget;
-    m_budget = keep;
-    enforceBudget();
-    m_budget = budget;
     if (dropped)
-        *dropped = entries - int(m_undo.size() + m_redo.size());
-    return before - m_bytes;
+        *dropped = 0;
+    if (wanted <= 0)
+        return 0;
+    qsizetype available = 0;
+    for (const Entry &e : m_undo)
+        available += e.command.reclaimableBytes();
+    for (const Entry &e : m_redo)
+        available += e.command.reclaimableBytes();
+    if (available < wanted)
+        return 0;
+    qsizetype freed = 0;
+    auto remove = [&](std::deque<Entry> &entries, bool undo) {
+        while (freed < wanted && !entries.empty()) {
+            const Entry &e = entries.front();
+            freed += e.command.reclaimableBytes();
+            m_bytes -= e.bytes;
+            if (undo && e.command.changesArtwork())
+                m_baseId = e.id;
+            entries.pop_front();
+            if (dropped)
+                ++*dropped;
+        }
+    };
+    remove(m_undo, true);
+    remove(m_redo, false);
+    return freed;
 }
 
 void UndoHistory::enforceBudget()
@@ -306,4 +325,14 @@ void UndoHistory::clear()
     m_redo.clear();
     m_bytes = 0;
     m_baseId = m_nextId++;
+}
+
+qsizetype UndoCommand::reclaimableBytes() const
+{
+    qsizetype bytes = m_tiles.reclaimableBytes();
+    for (const UndoCommand &child : m_children)
+        bytes += child.reclaimableBytes();
+    // Presence images can share their tile table. Dense selections are not
+    // necessarily budgeted either: neither can safely fund a reservation.
+    return bytes;
 }

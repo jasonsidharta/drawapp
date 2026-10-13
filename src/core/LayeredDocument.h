@@ -41,6 +41,7 @@ public:
     // unallocated). Refreshing returns false if the memory budget refused composite tiles.
     const TiledImage &composite() const { return m_composite; }
     bool refreshComposite(const QRect &rect);
+    void setPreparedComposite(TiledImage composite) noexcept { m_composite = std::move(composite); }
     bool refreshComposite() { return refreshComposite(m_composite.rect()); }
 
     // Shallow copy for saving and recovery: images are shared until either side writes. The

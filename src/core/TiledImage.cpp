@@ -1,4 +1,5 @@
 #include "TiledImage.h"
+#include "BudgetImage.h"
 
 #include <QPainter>
 #include <algorithm>
@@ -363,13 +364,8 @@ QImage TiledImage::copy(const QRect &requested) const
     const QRect r = requested.normalized();
     if (r.isEmpty())
         return QImage();
-    const qint64 bytes = qint64(r.width()) * r.height() * BytesPerPixel;
-    if (!MemoryBudget::tryReserve(bytes, MemoryBudget::Category::Temporary))
-        return QImage();
-    // The image's own buffer is not tracked after it is returned; the reservation only checks
-    // that there is room for it now.
-    MemoryBudget::release(bytes, MemoryBudget::Category::Temporary);
-    QImage out(r.size(), QImage::Format_ARGB32_Premultiplied);
+    QImage out = BudgetImage::create(r.size(), QImage::Format_ARGB32_Premultiplied,
+                                     MemoryBudget::Category::Temporary);
     if (out.isNull())
         return QImage();
     out.fill(Qt::transparent);

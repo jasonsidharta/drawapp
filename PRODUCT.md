@@ -59,6 +59,10 @@ future feature with no work scheduled.
 
 See ROADMAP.md for acceptance status.
 
+Milestone 10.5 is in progress: transactional transform Apply, memory ownership,
+history preservation and display-resolution previews. Validation is tracked in
+`docs/m105-engineering.md`; these additions are not yet release-validated.
+
 ## Deferred (not planned for the first release unless decided otherwise)
 
 - Animation; liquify; masks and clipping groups (clipping may move into the first release).
@@ -75,3 +79,8 @@ See ROADMAP.md for acceptance status.
 - Default canvas sizes per platform. The maximum is 16384 × 16384 everywhere since milestone 10,
   with memory bounded by the painted area; whether phones need a smaller default still needs
   measurements on devices (only the emulator was used).
+
+Milestone 10.5 correctness checkpoint: all 10 Windows suites passed in the Codex
+build directory (65.91 s). Transaction preparation and dense-buffer ownership
+fixes are implemented; preview performance and Android validation remain pending.
+See `docs/m105-engineering.md`.

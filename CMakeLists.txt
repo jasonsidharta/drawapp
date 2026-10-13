@@ -13,6 +13,7 @@ option(DRAWAPP_BUILD_TESTS "Build unit tests and benchmarks" ON)
 
 # Document model and raster operations: QtGui only, no Qt Quick, so they can be tested headless.
 add_library(drawcore STATIC
+    src/core/BudgetImage.cpp src/core/BudgetImage.h
     src/core/AndroidDocumentProvider.cpp
     src/core/BrushPresetFile.cpp src/core/BrushPresetFile.h
     src/core/BrushPresetStore.cpp src/core/BrushPresetStore.h
@@ -40,6 +41,7 @@ add_library(drawcore STATIC
     src/core/TileSnapshot.cpp src/core/TileSnapshot.h
     src/core/TransformApply.cpp src/core/TransformApply.h
     src/core/TransformSession.cpp src/core/TransformSession.h
+    src/core/TransformPreview.cpp src/core/TransformPreview.h
     src/core/UndoHistory.cpp src/core/UndoHistory.h
     src/core/ViewPyramid.cpp src/core/ViewPyramid.h
     src/core/ViewRenderer.cpp src/core/ViewRenderer.h

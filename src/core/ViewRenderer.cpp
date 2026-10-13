@@ -92,3 +92,11 @@ void ViewRenderer::render(QPainter &painter, const TiledImage &document, const V
             painter.drawImage(QRectF(source), visible, visible.rect());
     });
 }
+
+void ViewRenderer::renderPreview(QPainter &painter, QSize documentSize, const QImage &pixels, const QRectF &documentArea,
+                                 const ViewTransform &view, const QRect &exposed)
+{
+    renderWith(painter, QRect(QPoint(), documentSize), view, exposed, [&](const QRect &) {
+        painter.drawImage(documentArea, pixels, pixels.rect());
+    });
+}

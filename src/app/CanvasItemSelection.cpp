@@ -521,7 +521,8 @@ void CanvasItem::abortPointerGesture()
 // --- transform ---
 
 QString CanvasItem::beginTransform()
-{
+try {
+    MemoryBudget::PreserveHistory preserve;
     if (m_apply.isRunning())
         return applyBusyText();
     if (m_transform.isActive())
@@ -543,8 +544,13 @@ QString CanvasItem::beginTransform()
     // Several adjacent layers without a selection: the preview is drawn from one merged copy (one
     // resampling per frame instead of one per layer; source-over is associative, so only
     // anti-aliased edges where the layers overlap can differ slightly). Apply transforms each layer.
+    QRect sourceBounds = selected.isActive() ? selected.bounds() : QRect();
+    if (!selected.isActive())
+        for (const TiledImage &image : images)
+            sourceBounds |= image.allocatedBounds();
+    m_displayPreviewMode = qint64(sourceBounds.width()) * sourceBounds.height() > 2 * 1024 * 1024;
     bool merged = false;
-    if (!selected.isActive() && ids.size() > 1) {
+    if (!m_displayPreviewMode && !selected.isActive() && ids.size() > 1) {
         bool adjacent = true;
         for (size_t i = 1; i < ids.size(); ++i)
             adjacent = adjacent && m_document.indexOf(ids[i]) == m_document.indexOf(ids[i - 1]) + 1;
@@ -581,13 +587,26 @@ QString CanvasItem::beginTransform()
     return {};
 }
 
+catch (const std::bad_alloc &) {
+    endTransformSession();
+    return QStringLiteral("Not enough memory to start the transform. Nothing was changed.");
+}
+
 void CanvasItem::updateTransformPreview(TransformSession::Quality quality)
-{
+try {
+    MemoryBudget::PreserveHistory preserve;
     if (!m_transform.isActive())
         return;
     if (m_transformLayerIds.empty()) {
         // Outline only: show where the selection will be.
         m_transformedOutline = m_transform.transformedSelection().outline();
+        updateAll();
+        emit transformChanged();
+        return;
+    }
+    if (m_displayPreviewMode) {
+        m_previewQuality = quality;
+        m_previewTimer.start(); // one pending request, read the latest geometry on delivery
         updateAll();
         emit transformChanged();
         return;
@@ -627,6 +646,46 @@ void CanvasItem::updateTransformPreview(TransformSession::Quality quality)
     emit transformChanged();
 }
 
+catch (const std::bad_alloc &) {
+    emit notice(QStringLiteral("Not enough memory to update the transform preview. The drawing is unchanged."));
+}
+
+void CanvasItem::updateDisplayPreview()
+try {
+    if (!m_displayPreviewMode || !m_transform.isActive())
+        return;
+    MemoryBudget::PreserveHistory preserve;
+    const double ratio = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+    const int level = ViewPyramid::levelFor(m_view.zoom() * ratio / std::sqrt(2.0), m_document.size());
+    const QRect visible = m_view.viewToDoc(boundingRect()).toAlignedRect() & QRect(QPoint(), m_document.size());
+    if (visible.isEmpty()) {
+        m_displayPreviewImage = {};
+        return;
+    }
+    const QRect area = QRect(QPoint(visible.left() >> level, visible.top() >> level),
+                             QPoint(visible.right() >> level, visible.bottom() >> level))
+                           .adjusted(-1, -1, 1, 1)
+                       & QRect(QPoint(), ViewPyramid::levelSize(m_document.size(), level));
+    if (m_displayPreview.area() != area || m_displayPreview.level() != level) {
+        TransformPreview prepared;
+        if (!prepared.prepare(m_transform, m_document.layers(), m_transformLayerIds, area, level))
+            throw std::bad_alloc();
+        QImage frame = prepared.render(m_transform, m_previewQuality);
+        if (frame.isNull())
+            throw std::bad_alloc();
+        m_displayPreview = std::move(prepared);
+        m_displayPreviewImage = std::move(frame);
+    } else {
+        QImage frame = m_displayPreview.render(m_transform, m_previewQuality);
+        if (frame.isNull())
+            throw std::bad_alloc();
+        m_displayPreviewImage = std::move(frame);
+    }
+    updateAll();
+} catch (const std::bad_alloc &) {
+    emit notice(QStringLiteral("Not enough memory to update the transform preview. The drawing is unchanged."));
+}
+
 void CanvasItem::endTransformSession()
 {
     if (m_apply.isRunning()) {
@@ -634,6 +693,10 @@ void CanvasItem::endTransformSession()
         m_applyProgressTimer.stop();
         emit applyChanged();
     }
+    m_previewTimer.stop();
+    m_displayPreviewImage = {};
+    m_displayPreview = {};
+    m_displayPreviewMode = false;
     m_transform.end();
     m_transformedOutline = QPainterPath();
     m_transformLayerIds.clear();
@@ -671,7 +734,8 @@ bool CanvasItem::applyBlocks()
 }
 
 void CanvasItem::applyTransformWith(bool background)
-{
+try {
+    MemoryBudget::PreserveHistory preserve;
     if (!m_transform.isActive())
         return;
     if (m_apply.isRunning()) {
@@ -710,6 +774,9 @@ void CanvasItem::applyTransformWith(bool background)
     }
     TransformApply::Input input;
     input.session = m_transform.workerCopy();
+    input.document = m_document.snapshot();
+    input.composite = m_document.composite();
+    input.revision = m_contentRevision;
     input.area = m_transform.changedRect();
     for (const quint64 id : m_transformLayerIds) {
         const int index = m_document.indexOf(id);
@@ -721,11 +788,13 @@ void CanvasItem::applyTransformWith(bool background)
         input.layers.push_back(m_document.layer(index).image);
         input.versions.push_back(m_document.layer(index).image.version());
     }
-    // Room for the new tiles is made here: the worker cannot run evictors (they belong to this
-    // thread).
+    // Only caches may be discarded while preparing a fallible operation. History
+    // is retained even when this means refusing a transform under memory pressure.
     const qint64 tiles = qint64(input.area.width() / TiledImage::DefaultTileSize + 2)
                          * (input.area.height() / TiledImage::DefaultTileSize + 2);
-    MemoryBudget::evict(tiles * TiledImage::DefaultTileSize * TiledImage::DefaultTileSize * 4 * qint64(input.layers.size()));
+    const qint64 estimate = tiles * TiledImage::DefaultTileSize * TiledImage::DefaultTileSize * 4
+                            * qint64(input.layers.size() + 1);
+    MemoryBudget::evict(std::max<qint64>(0, MemoryBudget::usedTotal() + estimate - MemoryBudget::limit()));
     const qint64 work = qint64(input.area.width()) * input.area.height() * qint64(input.layers.size());
     if (!background || work < m_backgroundApplyPixels) {
         commitApply(TransformApply::run(std::move(input)));
@@ -737,9 +806,13 @@ void CanvasItem::applyTransformWith(bool background)
     emit applyProgressChanged();
 }
 
-void CanvasItem::commitApply(const TransformApply::Result &result)
+catch (const std::exception &) {
+    emit notice(QStringLiteral("Not enough resources to apply the transform. Nothing was changed; the preview is still open."));
+}
+
+void CanvasItem::commitApply(TransformApply::Result result)
 {
-    if (!m_transform.isActive())
+    if (!m_transform.isActive() || (result.generation && result.generation != m_apply.generation()))
         return;
     if (!result.ok) {
         emit notice(result.outOfMemory
@@ -749,8 +822,24 @@ void CanvasItem::commitApply(const TransformApply::Result &result)
         updateAll();
         return;
     }
+    if (result.revision != m_contentRevision || result.layerIds != m_transformLayerIds || result.layers.size() != result.layerIds.size()
+        || result.versions.size() != result.layerIds.size()) {
+        emit notice(QStringLiteral("The transform result is stale or incomplete. Nothing was changed."));
+        return;
+    }
     // The job's inputs must still be the document's layers (edits wait for Apply, so this only
     // guards against mistakes).
+    if (result.baseline.layers.size() != m_document.layers().size())
+        return;
+    for (size_t i = 0; i < result.baseline.layers.size(); ++i) {
+        const LayerData &before = result.baseline.layers[i], &now = m_document.layer(int(i));
+        if (before.id != now.id || before.image.version() != now.image.version()
+            || before.opacity != now.opacity || before.visible != now.visible || before.locked != now.locked
+            || before.name != now.name) {
+            emit notice(QStringLiteral("The layers changed during Apply. Nothing was changed."));
+            return;
+        }
+    }
     for (size_t i = 0; i < result.layerIds.size(); ++i) {
         const int index = m_document.indexOf(result.layerIds[i]);
         if (index < 0 || m_document.layer(index).image.version() != result.versions[i]) {
@@ -760,40 +849,47 @@ void CanvasItem::commitApply(const TransformApply::Result &result)
         }
     }
     const QRect changed = result.area;
-    Selection newSelection;
-    bool ok = true;
+    bool recorded = false;
+    QString historyNotice;
     try {
+        MemoryBudget::PreserveHistory preserve;
+        auto checkpoint = [&] {
+            if (m_failApplyPreparation == 0)
+                throw std::bad_alloc();
+            if (m_failApplyPreparation > 0)
+                --m_failApplyPreparation;
+        };
+        checkpoint();
+        LayeredDocument prepared = m_document;
         if (m_transform.hasSelection())
-            newSelection = m_transform.transformedSelection();
-    } catch (const std::bad_alloc &) {
-        ok = false;
-    }
-    if (!ok || (m_transform.hasSelection() && !newSelection.isActive())) {
-        emit notice(QStringLiteral("Not enough memory to apply the transform. Nothing was changed; the preview is still open."));
+            prepared.setSelection(result.selection);
+        checkpoint();
+        for (size_t i = 0; i < result.layerIds.size(); ++i) {
+            const int index = m_document.indexOf(result.layerIds[i]);
+            prepared.pixels(index) = std::move(result.layers[i]);
+            checkpoint();
+        }
+        recorded = result.command.has_value();
+        if (recorded && result.command->byteSize() > m_history.budgetBytes())
+            historyNotice = QStringLiteral("The transform exceeds the undo budget, so it cannot be undone.");
+        if (result.composite.isNull())
+            throw std::bad_alloc();
+        prepared.setPreparedComposite(std::move(result.composite));
+        checkpoint();
+        // push has the strong exception guarantee; after it, only noexcept moves
+        // publish the prepared document, including its composite and selection.
+        if (recorded)
+            m_history.push(std::move(*result.command));
+        static_assert(std::is_nothrow_move_assignable_v<LayeredDocument>);
+        m_document = std::move(prepared);
+    } catch (const std::exception &) {
+        emit notice(QStringLiteral("Not enough memory to prepare the transform transaction. Nothing was changed; the preview is still open."));
         return;
     }
-    // Commit: tile references only, which cannot fail.
-    std::vector<UndoCommand> children;
-    for (size_t i = 0; i < result.layerIds.size(); ++i) {
-        const quint64 id = result.layerIds[i];
-        TiledImage &layer = m_document.pixels(m_document.indexOf(id));
-        TileSnapshot before;
-        before.capture(layer, changed);
-        layer = result.layers[i];
-        before.dropUnchanged(layer);
-        if (!before.isEmpty())
-            children.push_back(UndoCommand::pixels(id, std::move(before), QStringLiteral("Transform")));
-    }
-    const Selection oldSelection = m_document.selection();
-    if (m_transform.hasSelection())
-        m_document.setSelection(newSelection); // follows the pixels
-    if (!children.empty() || m_transform.hasSelection()) {
-        UndoCommand command = UndoCommand::group(std::move(children), QStringLiteral("Transform"));
-        if (m_transform.hasSelection())
-            command.withSelection(oldSelection);
-        pushCommand(std::move(command));
-    }
-    refreshComposite(changed);
+    if (!historyNotice.isEmpty())
+        emit notice(historyNotice);
+    if (recorded)
+        emit historyChanged();
     markContentChanged();
     endTransformSession();
     updateDocumentRect(changed);

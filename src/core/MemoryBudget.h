@@ -67,6 +67,17 @@ void removeEvictor(int id);
 // can); returns bytes freed. Used before starting large background work.
 qint64 evict(qint64 wanted);
 
+// Transaction preparation may discard caches but must preserve undo on failure.
+// Thread-local: a worker has no UI evictors in either case.
+class PreserveHistory
+{
+public:
+    PreserveHistory();
+    ~PreserveHistory();
+    PreserveHistory(const PreserveHistory &) = delete;
+    PreserveHistory &operator=(const PreserveHistory &) = delete;
+};
+
 // Tests: make the next `count` reservations fail after `after` successful ones (-1 = off).
 void failReservationsForTesting(int after, int count);
 

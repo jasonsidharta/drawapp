@@ -91,3 +91,10 @@ if(WIN32)
     set_property(TEST tst_canvas tst_ui APPEND PROPERTY ENVIRONMENT_MODIFICATION
         "QT_QPA_PLATFORM=set:offscreen;QT_QPA_FONTDIR=set:C:/Windows/Fonts")
 endif()
+
+# M10.5 real CanvasItem timings and a matching legacy per-layer preview path.
+qt_add_executable(bench_m105 bench_m105.cpp)
+target_link_libraries(bench_m105 PRIVATE drawapp_ui drawapp_uiplugin Qt6::Test)
+if(WIN32)
+    target_link_libraries(bench_m105 PRIVATE psapi)
+endif()

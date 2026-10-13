@@ -24,24 +24,81 @@ TransformApply::Result TransformApply::runGated(Input input, const std::atomic<b
     QElapsedTimer timer;
     timer.start();
     Result r;
-    r.layerIds = input.layerIds;
-    r.versions = input.versions;
+    try {
+    r.layerIds = std::move(input.layerIds);
+    r.versions = std::move(input.versions);
     r.area = input.area;
     auto cancelled = [&] { return cancel && cancel->load(std::memory_order_relaxed); };
     for (size_t i = 0; i < input.layers.size(); ++i) {
         if (gate)
             gate->waitAtGate(cancel);
-        if (cancelled())
+        if (cancelled()) {
+            r.layers.clear();
             return r;
+        }
+        if (int(i) == input.throwBeforePartForTesting)
+            throw std::bad_alloc();
         TiledImage out = input.layers[i]; // shares the layer's tiles; changed tiles are copied
         if (!input.session.render(int(i), out, input.area, TransformSession::Quality::Final, cancel, rowsDone)) {
             r.outOfMemory = !cancelled();
+            r.layers.clear();
             return r;
         }
         out.pruneTransparent(input.area);
         r.layers.push_back(std::move(out));
     }
+    if (cancelled()) {
+        r.layers.clear();
+        return r;
+    }
+    if (!input.document.layers.empty()) {
+        r.baseline = input.document;
+        r.revision = input.revision;
+        r.selection = input.session.transformedSelection();
+        std::vector<UndoCommand> children;
+        children.reserve(r.layerIds.size());
+        for (size_t i = 0; i < r.layerIds.size(); ++i) {
+            if (cancelled())
+                return Result();
+            TileSnapshot before;
+            before.capture(input.layers[i], input.area);
+            before.dropUnchanged(r.layers[i]);
+            if (!before.isEmpty())
+                children.push_back(UndoCommand::pixels(r.layerIds[i], std::move(before), QStringLiteral("Transform")));
+            auto found = std::find_if(input.document.layers.begin(), input.document.layers.end(),
+                                     [&](const LayerData &layer) { return layer.id == r.layerIds[i]; });
+            if (found == input.document.layers.end())
+                return Result();
+            found->image = r.layers[i];
+        }
+        if (!children.empty() || input.session.hasSelection()) {
+            r.command = UndoCommand::group(std::move(children), QStringLiteral("Transform"));
+            if (input.session.hasSelection())
+                r.command->withSelection(input.session.originalSelection());
+        }
+        r.composite = std::move(input.composite);
+        // Composite in short bands so Stop also interrupts transaction preparation.
+        for (int y = input.area.top(); y <= input.area.bottom(); y += 64) {
+            if (cancelled())
+                return Result();
+            if (!compositeLayers(r.composite, QRect(input.area.x(), y, input.area.width(),
+                                                   std::min(64, input.area.bottom() - y + 1)), input.document.layers))
+                throw std::bad_alloc();
+        }
+    }
     r.ok = true;
+    } catch (const std::bad_alloc &) {
+        r.outOfMemory = true;
+    } catch (...) {
+        r.ok = false;
+    }
+    if (!r.ok) {
+        r.layers.clear();
+        r.baseline = {};
+        r.composite = {};
+        r.selection = {};
+        r.command.reset();
+    }
     r.workerMs = timer.elapsed();
     return r;
 }
@@ -54,6 +111,7 @@ quint64 TransformApply::start(Input input)
     m_rowsDone = std::make_shared<std::atomic<qint64>>(0);
     m_rowsTotal = qint64(input.area.height()) * qint64(input.layers.size());
     m_running = true;
+    try {
     m_thread = std::thread([this, generation, cancel = m_cancel, rows = m_rowsDone, input = std::move(input)]() mutable {
         Result r = runGated(std::move(input), cancel.get(), rows.get(), this);
         r.generation = generation;
@@ -65,8 +123,17 @@ quint64 TransformApply::start(Input input)
         }
         // Queued to this object's thread. If this object is destroyed first, its destructor has
         // already joined this thread, and Qt drops the call with the object.
-        QMetaObject::invokeMethod(this, &TransformApply::deliverPending, Qt::QueuedConnection);
+        try {
+            QMetaObject::invokeMethod(this, &TransformApply::deliverPending, Qt::QueuedConnection);
+        } catch (...) {
+            // The UI progress timer also polls the pending result if queueing
+            // could not allocate an event. No exception may leave this thread.
+        }
     });
+    } catch (...) {
+        m_running = false;
+        throw;
+    }
     return generation;
 }
 

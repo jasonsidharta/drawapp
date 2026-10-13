@@ -66,7 +66,7 @@ namespace {
 bool compositeSmall(TiledImage &target, const QRect &r, const std::vector<LayerData> &layers)
 {
     static thread_local QImage buffer, layerPixels;
-    if (buffer.width() < r.width() || buffer.height() < r.height()) {
+    if (buffer.isNull() || layerPixels.isNull() || buffer.width() < r.width() || buffer.height() < r.height()) {
         buffer = QImage(std::max(buffer.width(), r.width()), std::max(buffer.height(), r.height()),
                         QImage::Format_ARGB32_Premultiplied);
         layerPixels = QImage(buffer.size(), QImage::Format_ARGB32_Premultiplied);

@@ -64,13 +64,23 @@ void ensureSuffix(QString &path, QUrl &url, const QString &suffix)
 CanvasItem::CanvasItem(QQuickItem *parent)
     : QQuickPaintedItem(parent)
 {
-    connect(&m_apply, &TransformApply::finished, this, [this](const TransformApply::Result &result) {
+    connect(&m_apply, &TransformApply::finished, this, [this](TransformApply::Result &result) {
         m_applyProgressTimer.stop();
         emit applyChanged();
-        commitApply(result);
+        m_lastApplyWorkerMs = result.workerMs;
+        QElapsedTimer commitTimer;
+        commitTimer.start();
+        commitApply(std::move(result));
+        m_lastApplyCommitMs = commitTimer.nsecsElapsed() / 1e6;
     });
+    m_previewTimer.setSingleShot(true);
+    m_previewTimer.setInterval(0);
+    connect(&m_previewTimer, &QTimer::timeout, this, &CanvasItem::updateDisplayPreview);
     m_applyProgressTimer.setInterval(100);
-    connect(&m_applyProgressTimer, &QTimer::timeout, this, &CanvasItem::applyProgressChanged);
+    connect(&m_applyProgressTimer, &QTimer::timeout, this, [this] {
+        m_apply.poll();
+        emit applyProgressChanged();
+    });
     // Undo history sized from the memory limit, and given up oldest-first when memory runs out
     // (after the view caches, which are cheaper to lose).
     m_history = UndoHistory(UndoHistory::budgetForLimit(MemoryBudget::limit()));
@@ -1112,7 +1122,14 @@ void CanvasItem::paint(QPainter *painter)
 
     const QRect exposed = painter->hasClipping() ? painter->clipBoundingRect().toAlignedRect()
                                                  : boundingRect().toAlignedRect();
-    ViewRenderer::render(*painter, displayedComposite(), m_viewPyramid, m_view, exposed);
+    if (m_displayPreviewMode && !m_displayPreviewImage.isNull()) {
+        const double stride = double(qint64(1) << m_displayPreview.level());
+        const QRect a = m_displayPreview.area();
+        ViewRenderer::renderPreview(*painter, m_document.size(), m_displayPreviewImage,
+            QRectF(a.x() * stride, a.y() * stride, a.width() * stride, a.height() * stride), m_view, exposed);
+    } else {
+        ViewRenderer::render(*painter, displayedComposite(), m_viewPyramid, m_view, exposed);
+    }
     drawOverlays(painter);
 
     if (m_statsEnabled) {
@@ -1136,8 +1153,11 @@ void CanvasItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeom
     }
     // A new size needs a whole new picture: on Android the area uncovered when the toolbar wrapped
     // onto fewer lines stayed black (found on the emulator, milestone 10).
-    if (newGeometry.size() != oldGeometry.size())
+    if (newGeometry.size() != oldGeometry.size()) {
+        if (m_displayPreviewMode && m_transform.isActive())
+            m_previewTimer.start();
         updateAll();
+    }
 }
 
 void CanvasItem::itemChange(ItemChange change, const ItemChangeData &value)
@@ -1976,6 +1996,8 @@ void CanvasItem::updateDocumentRect(const QRect &docRect)
 
 void CanvasItem::viewModified()
 {
+    if (m_displayPreviewMode && m_transform.isActive())
+        m_previewTimer.start();
     if (m_gesture != Gesture::Pan)
         setCursor(m_spaceHeld ? Qt::OpenHandCursor : Qt::CrossCursor);
     updateAll();

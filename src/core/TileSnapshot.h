@@ -48,6 +48,7 @@ public:
     // Memory this snapshot keeps alive: pixel copies, or referenced tiles (a referenced tile the
     // layer still shares is not counted: it would exist anyway).
     qsizetype byteSize() const { return m_bytes; }
+    qsizetype reclaimableBytes() const;
     // The stored (pre-edit) pixel at (x, y): a pointer valid to the end of its 64-pixel tile
     // segment, or nullptr if that tile was not captured. A captured missing tile reads as
     // transparent.

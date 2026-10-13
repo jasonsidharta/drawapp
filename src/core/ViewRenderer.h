@@ -31,4 +31,7 @@ void render(QPainter &painter, const TiledImage &document, const ViewTransform &
 void render(QPainter &painter, const TiledImage &document, ViewPyramid &pyramid, const ViewTransform &view,
             const QRect &exposed);
 
+void renderPreview(QPainter &painter, QSize documentSize, const QImage &pixels, const QRectF &documentArea,
+                   const ViewTransform &view, const QRect &exposed);
+
 } // namespace ViewRenderer

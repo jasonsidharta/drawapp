@@ -192,6 +192,13 @@ Next (report section P): hardware validation, ASan/TSan with clang or MSVC, a re
 transform preview with a lighter transform source, a commit under 100 ms, sparse selection masks,
 the external comparison.
 
+## Milestone 10.5: transform safety and performance (in progress)
+
+Verify and fix transaction, allocation and reservation defects, preserve unrelated
+history on failure, then implement display-resolution previews and measure them.
+The correctness gate, platform validation and local commits are tracked in
+`docs/m105-engineering.md`. The 30 FPS target remains unverified.
+
 ## Milestone 7: hardware validation (outstanding: no pen hardware yet)
 
 - Run the short Windows on-screen checklist with real mouse input (and a pen if available).
@@ -213,3 +220,8 @@ writes (only changed layers); the 26 planned brush properties (`docs/brush-setti
 bristle, clone and sketch engines; a real wet-media model; more layer blend modes, groups, clipping, masks; drag-and-drop layer reordering; canvas rotation
 and mirroring; perspective/warp transforms; iOS build (needs macOS and a licensing decision);
 Play Store AAB with an upload key and release pipeline.
+
+Milestone 10.5 correctness checkpoint: all 10 Windows suites passed in the Codex
+build directory (65.91 s). Transaction preparation and dense-buffer ownership
+fixes are implemented; preview performance and Android validation remain pending.
+See `docs/m105-engineering.md`.

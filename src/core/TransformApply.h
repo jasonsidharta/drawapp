@@ -2,6 +2,7 @@
 
 #include "TiledImage.h"
 #include "TransformSession.h"
+#include "UndoHistory.h"
 
 #include <QElapsedTimer>
 #include <QMutex>
@@ -35,6 +36,10 @@ public:
         std::vector<TiledImage> layers;
         std::vector<quint64> versions; // each layer's TiledImage::version() when the job started
         QRect area;                    // the document area that changes
+        int throwBeforePartForTesting = -1;
+        DocumentData document; // optional complete stack for transaction preparation
+        TiledImage composite;
+        quint64 revision = 0;
     };
     struct Result
     {
@@ -46,6 +51,11 @@ public:
         bool ok = false;
         bool outOfMemory = false;
         qint64 workerMs = 0;
+        DocumentData baseline;
+        TiledImage composite;
+        Selection selection;
+        std::optional<UndoCommand> command;
+        quint64 revision = 0;
     };
 
     explicit TransformApply(QObject *parent = nullptr);
@@ -60,6 +70,7 @@ public:
     // Waits for the running job and delivers its result now (finished() is emitted before this
     // returns). For callers that need the transform applied before they continue.
     void finishNow();
+    void poll() { deliverPending(); }
     bool isRunning() const { return m_running; }
     quint64 generation() const { return m_generation; }
     // 0..1 for the running job.
@@ -73,7 +84,7 @@ public:
 
 signals:
     // Delivered on this object's thread for the current generation only.
-    void finished(const TransformApply::Result &result);
+    void finished(TransformApply::Result &result);
 
 private:
     static Result runGated(Input input, const std::atomic<bool> *cancel, std::atomic<qint64> *rowsDone,

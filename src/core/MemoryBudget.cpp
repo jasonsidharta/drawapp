@@ -44,6 +44,7 @@ struct EvictorEntry
 QMutex s_evictorMutex;
 std::vector<EvictorEntry> s_evictors;
 int s_nextEvictorId = 1;
+thread_local int s_preserveHistory = 0;
 
 qint64 effectiveLimit()
 {
@@ -303,13 +304,15 @@ void MemoryBudget::removeEvictor(int id)
 
 qint64 MemoryBudget::evict(qint64 wanted)
 {
+    if (wanted <= 0)
+        return 0;
     // Copy the callbacks for this thread, then call them without the lock (they release memory,
     // which calls release()).
     std::vector<Evictor> mine;
     {
         QMutexLocker lock(&s_evictorMutex);
         for (const EvictorEntry &e : s_evictors)
-            if (e.thread == QThread::currentThread())
+            if (e.thread == QThread::currentThread() && (!s_preserveHistory || e.order < 10))
                 mine.push_back(e.evictor);
     }
     qint64 freed = 0;
@@ -320,6 +323,9 @@ qint64 MemoryBudget::evict(qint64 wanted)
     }
     return freed;
 }
+
+MemoryBudget::PreserveHistory::PreserveHistory() { ++s_preserveHistory; }
+MemoryBudget::PreserveHistory::~PreserveHistory() { --s_preserveHistory; }
 
 void MemoryBudget::failReservationsForTesting(int after, int count)
 {

@@ -220,3 +220,12 @@ QRect TileSnapshot::swapWith(QImage &image)
     }
     return changed;
 }
+
+qsizetype TileSnapshot::reclaimableBytes() const
+{
+    qsizetype bytes = 0;
+    for (const Ref &ref : m_refs)
+        if (ref.tile && !ref.tile.get()->isShared())
+            bytes += ref.tile.get()->bytes();
+    return bytes;
+}

@@ -62,6 +62,7 @@ public:
 
     QSize documentSize() const { return m_docSize; }
     QRect sourceRect() const { return m_sourceRect; }
+    const Selection &originalSelection() const { return m_selection; }
     bool hasSelection() const { return m_selection.isActive(); }
 
     QPointF center() const { return m_center; }
@@ -115,17 +116,15 @@ public:
     // Safe on a worker thread for a session no one modifies meanwhile (see workerCopy()).
     bool render(int part, TiledImage &out, const QRect &area, Quality quality, const std::atomic<bool> *cancel = nullptr,
                 std::atomic<qint64> *rowsDone = nullptr) const;
-    // A copy for a worker thread: shares every cache (nothing is copied), but does not own the
-    // memory reservation, so only this session releases it. Keep this session active until the
-    // worker is done with the copy.
-    TransformSession workerCopy() const
-    {
-        TransformSession s = *this;
-        s.m_reserved = 0;
-        return s;
-    }
+    // Shares immutable caches and their budget charges until the last reader is gone.
+    TransformSession workerCopy() const { return *this; }
     // The transformed layer within area, as a new image of area's size (null if out of memory).
     QImage renderRegion(int part, const QRect &area, Quality quality) const;
+    // Static remainder for preview filtering; never modifies the original layer.
+    TiledImage baseLayer(int part) const;
+    void prepareDisplaySources();
+    // Source over a prepared base, directly into pixels of the viewport's LOD.
+    void renderDisplaySource(int part, QImage &out, const QRect &levelArea, int level, Quality quality) const;
     // Tests: renderRegion and the tiled render for this part behave as if memory ran out (-1 = off).
     void failRenderRegionForTesting(int part) { m_failRegionPart = part; }
     // The selection after Apply: the source's mask, transformed. "None" when there was none.
@@ -141,6 +140,7 @@ private:
     {
         TiledImage original;          // the layer as it was (a copy-on-write snapshot)
         QImage base;                  // layer − source over the source rectangle
+        std::vector<QImage> displaySource; // uniform 2x filtering with transparent padding
         std::vector<QImage> source;   // source pixels and 2× reductions (premultiplied ARGB32)
     };
     template <typename RowFn>
@@ -156,7 +156,6 @@ private:
     std::vector<Part> m_parts;
     int m_failRegionPart = -1;
     QImage m_sourceMask;           // the selection over m_sourceRect (Grayscale8), when selected
-    qint64 m_reserved = 0;         // MemoryBudget bytes held for the dense caches
     bool m_beginOutOfMemory = false;
 
     QPointF m_center;

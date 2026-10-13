@@ -1,4 +1,5 @@
 #include "TransformSession.h"
+#include "BudgetImage.h"
 
 #include <QSemaphore>
 #include <QThread>
@@ -48,12 +49,18 @@ void parallelRows(int y0, int y1, F &&rowFn)
     };
     QSemaphore done;
     int started = 0;
+    try {
     for (int i = 0; i < helpers; ++i) {
         if (pool.tryStart([&] {
                 work();
                 done.release();
             }))
             ++started;
+    }
+    } catch (...) {
+        work();
+        done.acquire(started);
+        throw;
     }
     work();
     done.acquire(started);
@@ -75,7 +82,9 @@ inline double cubicWeight(double x)
 QImage halve(const QImage &src)
 {
     const int w = std::max(1, src.width() / 2), h = std::max(1, src.height() / 2);
-    QImage dst(w, h, QImage::Format_ARGB32_Premultiplied);
+    QImage dst = BudgetImage::create(QSize(w, h), QImage::Format_ARGB32_Premultiplied, MemoryBudget::Category::Preview);
+    if (dst.isNull())
+        throw std::bad_alloc();
     for (int y = 0; y < h; ++y) {
         const QRgb *r0 = reinterpret_cast<const QRgb *>(src.constScanLine(std::min(2 * y, src.height() - 1)));
         const QRgb *r1 = reinterpret_cast<const QRgb *>(src.constScanLine(std::min(2 * y + 1, src.height() - 1)));
@@ -176,7 +185,10 @@ bool TransformSession::begin(const QImage &layer, const Selection &selection)
 }
 
 bool TransformSession::begin(const std::vector<QImage> &layers, const Selection &selection)
-{
+try {
+    end();
+    m_beginOutOfMemory = false;
+    MemoryBudget::PreserveHistory preserve;
     std::vector<TiledImage> tiled;
     for (const QImage &layer : layers) {
         if (layer.isNull() || layer.format() != QImage::Format_ARGB32_Premultiplied)
@@ -190,15 +202,24 @@ bool TransformSession::begin(const std::vector<QImage> &layers, const Selection 
     return begin(tiled, selection);
 }
 
+catch (const std::bad_alloc &) {
+    end();
+    m_beginOutOfMemory = true;
+    return false;
+}
+
 bool TransformSession::begin(const std::vector<TiledImage> &layers, const Selection &selection)
-{
+try {
+    MemoryBudget::PreserveHistory preserve;
     end();
     m_beginOutOfMemory = false;
     // No layers: the selection's outline alone (Transform Selection).
     if (layers.empty()) {
         if (!selection.isActive() || selection.isEmpty())
             return false;
-        m_sourceMask = selection.mask().copy(selection.bounds());
+        m_sourceMask = BudgetImage::copy(selection.mask(), selection.bounds(), MemoryBudget::Category::Preview);
+        if (m_sourceMask.isNull())
+            throw std::bad_alloc();
         m_selection = selection;
         m_docSize = selection.mask().size();
         m_sourceRect = selection.bounds();
@@ -226,21 +247,14 @@ bool TransformSession::begin(const std::vector<TiledImage> &layers, const Select
     // transparent: on the Android emulator five 4096² layers plus the merged preview otherwise
     // held 868 of 980 MiB, and Apply had no room left).
     const bool withBase = selection.isActive();
-    const qint64 perLayer = qint64(rect.width()) * rect.height() * 4;
-    const qint64 wanted = qint64(layers.size()) * (perLayer * (withBase ? 2 : 1) + perLayer / 3 + 64);
-    if (!MemoryBudget::tryReserve(wanted, MemoryBudget::Category::Preview)) {
-        m_beginOutOfMemory = true;
-        return false;
-    }
-    m_reserved = wanted;
     std::vector<Part> parts;
     parts.reserve(layers.size());
     for (const TiledImage &layer : layers) {
         Part part;
         part.original = layer; // a snapshot: shares the layer's tiles, read only
         if (withBase)
-            part.base = QImage(rect.size(), QImage::Format_ARGB32_Premultiplied);
-        QImage source(rect.size(), QImage::Format_ARGB32_Premultiplied);
+            part.base = BudgetImage::create(rect.size(), QImage::Format_ARGB32_Premultiplied, MemoryBudget::Category::Preview);
+        QImage source = BudgetImage::create(rect.size(), QImage::Format_ARGB32_Premultiplied, MemoryBudget::Category::Preview);
         if ((withBase && part.base.isNull()) || source.isNull()) {
             end(); // out of memory: nothing started
             m_beginOutOfMemory = true;
@@ -251,16 +265,16 @@ bool TransformSession::begin(const std::vector<TiledImage> &layers, const Select
         std::vector<QRgb> row(size_t(rect.width()));
         for (int y = rect.top(); y <= rect.bottom(); ++y) {
             readOriginal(layer, y, rect.left(), rect.right() + 1, row.data());
-            const QRgb *in = row.data() - rect.left();
+            const QRgb *in = row.data();
             const uchar *s = selection.isActive() ? selection.mask().constScanLine(y) : nullptr;
             QRgb *src = reinterpret_cast<QRgb *>(source.scanLine(y - rect.top()));
             if (!withBase) {
-                std::memcpy(src, in + rect.left(), size_t(rect.width()) * 4);
+                std::memcpy(src, in, size_t(rect.width()) * 4);
                 continue;
             }
             QRgb *base = reinterpret_cast<QRgb *>(part.base.scanLine(y - rect.top()));
             for (int x = rect.left(); x <= rect.right(); ++x) {
-                const QRgb p = in[x];
+                const QRgb p = in[x - rect.left()];
                 const quint32 c = s ? s[x] : 255;
                 const QRgb taken = c == 255 ? p
                                             : qRgba(int(mul255(qRed(p), c)), int(mul255(qGreen(p), c)),
@@ -276,7 +290,9 @@ bool TransformSession::begin(const std::vector<TiledImage> &layers, const Select
         parts.push_back(std::move(part));
     }
     if (selection.isActive()) {
-        m_sourceMask = selection.mask().copy(rect);
+        m_sourceMask = BudgetImage::copy(selection.mask(), rect, MemoryBudget::Category::Preview);
+        if (m_sourceMask.isNull())
+            throw std::bad_alloc();
         m_selection = selection;
     }
     m_parts = std::move(parts);
@@ -286,12 +302,14 @@ bool TransformSession::begin(const std::vector<TiledImage> &layers, const Select
     return true;
 }
 
+catch (const std::bad_alloc &) {
+    end();
+    m_beginOutOfMemory = true;
+    return false;
+}
+
 void TransformSession::end()
 {
-    if (m_reserved > 0) {
-        MemoryBudget::release(m_reserved, MemoryBudget::Category::Preview);
-        m_reserved = 0;
-    }
     m_docSize = QSize();
     m_sourceRect = QRect();
     m_selection = Selection();
@@ -306,6 +324,8 @@ qsizetype TransformSession::byteSize() const
         bytes += part.base.sizeInBytes();
         for (const QImage &level : part.source)
             bytes += level.sizeInBytes();
+        for (size_t i = 1; i < part.displaySource.size(); ++i)
+            bytes += part.displaySource[i].sizeInBytes();
     }
     return bytes;
 }
@@ -579,6 +599,8 @@ void TransformSession::render(int partIndex, QImage &out, const QRect &requested
     // pointer. QImage::scanLine() on a still-shared image (a preview copy of a document layer)
     // would detach concurrently from every thread.
     uchar *bits = out.bits();
+    if (!bits)
+        throw std::bad_alloc();
     const qsizetype bpl = out.bytesPerLine();
     renderRows(m_parts[size_t(partIndex)], area, quality,
                [&](int y) { return reinterpret_cast<QRgb *>(bits + y * bpl) + area.left(); });
@@ -593,7 +615,7 @@ QImage TransformSession::renderRegion(int partIndex, const QRect &requested, Qua
         return {};
     if (partIndex == m_failRegionPart)
         return {}; // simulated allocation failure (tests)
-    QImage region(area.size(), QImage::Format_ARGB32_Premultiplied);
+    QImage region = BudgetImage::create(area.size(), QImage::Format_ARGB32_Premultiplied, MemoryBudget::Category::Temporary);
     if (region.isNull())
         return {}; // out of memory
     uchar *bits = region.bits(); // see render(): no scanLine() from the worker threads
@@ -666,8 +688,9 @@ bool TransformSession::render(int partIndex, TiledImage &out, const QRect &reque
         return true;
     // A band of tile rows at a time (sixteen: enough rows that the row pool uses every thread):
     // rendered in parallel into a dense band, then written. Cancellation is checked between bands.
-    const int band = out.tileSize() * 16;
-    QImage buffer(area.width(), band, QImage::Format_ARGB32_Premultiplied);
+    const int band = out.tileSize() * 2;
+    QImage buffer = BudgetImage::create(QSize(area.width(), std::min(band, area.height())),
+                                         QImage::Format_ARGB32_Premultiplied, MemoryBudget::Category::Temporary);
     if (buffer.isNull())
         return false;
     uchar *bits = buffer.bits(); // detached here, on this thread; rows are written through bits
@@ -734,7 +757,9 @@ Selection TransformSession::transformedSelection() const
 {
     if (!isActive() || !m_selection.isActive())
         return Selection();
-    QImage mask(m_docSize, QImage::Format_Grayscale8);
+    QImage mask = BudgetImage::create(m_docSize, QImage::Format_Grayscale8, MemoryBudget::Category::Preview);
+    if (mask.isNull())
+        throw std::bad_alloc();
     mask.fill(0);
     const QRect target = targetRect() & mask.rect();
     const QPointF origin = m_sourceRect.topLeft();
@@ -757,4 +782,81 @@ Selection TransformSession::transformedSelection() const
         }
     });
     return Selection::fromMask(mask);
+}
+
+TiledImage TransformSession::baseLayer(int partIndex) const
+{
+    if (partIndex < 0 || partIndex >= int(m_parts.size()))
+        return {};
+    const Part &part = m_parts[size_t(partIndex)];
+    if (!hasSelection())
+        return TiledImage(m_docSize, TiledImage::DefaultTileSize, MemoryBudget::Category::Preview);
+    TiledImage base = part.original;
+    if (!base.write(m_sourceRect.topLeft(), part.base))
+        return {};
+    base.pruneTransparent(m_sourceRect);
+    return base;
+}
+
+void TransformSession::renderDisplaySource(int partIndex, QImage &out, const QRect &area, int level, Quality quality) const
+{
+    if (partIndex < 0 || partIndex >= int(m_parts.size()) || out.size() != area.size())
+        throw std::bad_alloc();
+    if (partIndex == m_failRegionPart)
+        throw std::bad_alloc();
+    const Part &part = m_parts[size_t(partIndex)];
+    const double stride = double(qint64(1) << level);
+    const double shrink = std::min(std::abs(m_sx), std::abs(m_sy)) / stride;
+    const int sourceLevel = shrink >= 1 ? 0 : std::min(int(part.displaySource.size()) - 1,
+                                                     std::max(0, int(std::floor(std::log2(1 / shrink)))));
+    const QImage &source = part.displaySource[size_t(sourceLevel)];
+    const double rx = 1.0 / double(qint64(1) << sourceLevel);
+    const double ry = rx;
+    const QPointF origin = m_sourceRect.topLeft();
+    const QPointF delta = mapToSource({stride, 0}) - mapToSource({0, 0});
+    uchar *bits = out.bits();
+    if (!bits)
+        throw std::bad_alloc();
+    const qsizetype bpl = out.bytesPerLine();
+    parallelRows(0, out.height(), [&](int y) {
+        QRgb *row = reinterpret_cast<QRgb *>(bits + y * bpl);
+        QPointF point = mapToSource({(area.left() + 0.5) * stride, (area.top() + y + 0.5) * stride}) - origin;
+        for (int x = 0; x < out.width(); ++x, point += delta) {
+            const double sx = point.x() * rx, sy = point.y() * ry;
+            if (sx <= -2 || sy <= -2 || sx >= source.width() + 2 || sy >= source.height() + 2)
+                continue;
+            const QRgb pixel = quality == Quality::Fast ? bilinear(source, sx, sy) : bicubic(source, sx, sy);
+            if (qAlpha(pixel))
+                row[x] = over(pixel, row[x]);
+        }
+    });
+}
+
+void TransformSession::prepareDisplaySources()
+{
+    for (Part &part : m_parts) {
+        if (!part.displaySource.empty())
+            continue;
+        std::vector<QImage> levels{part.source.front()};
+        for (int k = 1; k <= 14; ++k) {
+            const QImage &src = levels.back();
+            QImage out = BudgetImage::create(QSize((src.width() + 1) / 2, (src.height() + 1) / 2),
+                                             QImage::Format_ARGB32_Premultiplied, MemoryBudget::Category::Preview);
+            if (out.isNull())
+                throw std::bad_alloc();
+            for (int y = 0; y < out.height(); ++y) {
+                QRgb *row = reinterpret_cast<QRgb *>(out.scanLine(y));
+                for (int x = 0; x < out.width(); ++x) {
+                    const QRgb a = pixelOrClear(src, 2*x, 2*y), b = pixelOrClear(src, 2*x+1, 2*y);
+                    const QRgb c = pixelOrClear(src, 2*x, 2*y+1), d = pixelOrClear(src, 2*x+1, 2*y+1);
+                    row[x] = qRgba((qRed(a)+qRed(b)+qRed(c)+qRed(d)+2)/4,
+                                   (qGreen(a)+qGreen(b)+qGreen(c)+qGreen(d)+2)/4,
+                                   (qBlue(a)+qBlue(b)+qBlue(c)+qBlue(d)+2)/4,
+                                   (qAlpha(a)+qAlpha(b)+qAlpha(c)+qAlpha(d)+2)/4);
+                }
+            }
+            levels.push_back(std::move(out));
+        }
+        part.displaySource = std::move(levels);
+    }
 }

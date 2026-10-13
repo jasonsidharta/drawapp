@@ -12,6 +12,7 @@
 #include "TileSnapshot.h"
 #include "TransformApply.h"
 #include "TransformSession.h"
+#include "TransformPreview.h"
 #include "UndoHistory.h"
 #include "ViewPyramid.h"
 #include "ViewTransform.h"
@@ -152,6 +153,17 @@ public:
     }
     // What the view shows: the document, or the transform preview while one is open.
     const TiledImage &displayedComposite() const;
+    const QImage &displayPreviewImage() const { return m_displayPreviewImage; }
+    QRect displayPreviewArea() const { return m_displayPreview.area(); }
+    int displayPreviewLevel() const { return m_displayPreview.level(); }
+    void flushDisplayPreviewForTesting(bool fast = false)
+    {
+        m_previewTimer.stop();
+        m_previewQuality = fast ? TransformSession::Quality::Fast : TransformSession::Quality::Final;
+        updateDisplayPreview();
+    }
+    double lastApplyCommitMs() const { return m_lastApplyCommitMs; }
+    qint64 lastApplyWorkerMs() const { return m_lastApplyWorkerMs; }
 
     SelectShape selectShape() const { return m_selectShape; }
     void setSelectShape(SelectShape shape);
@@ -217,6 +229,7 @@ public:
     qreal applyProgress() const { return m_apply.progress(); }
     // Tests: the work (changed pixels x layers) from which Apply runs on the worker thread.
     void setBackgroundApplyThresholdForTesting(qint64 pixels) { m_backgroundApplyPixels = pixels; }
+    void failApplyPreparationForTesting(int after) { m_failApplyPreparation = after; }
     TransformApply &transformApplyForTesting() { return m_apply; }
     Q_INVOKABLE void cancelTransform();
     // key: "x", "y" (box centre), "width", "height" (pixels), "rotation" (degrees).
@@ -412,7 +425,7 @@ private:
     bool strokeOutOfMemory();
     // Apply: in the background (the user's Apply) or at once (implicit applies before another action).
     void applyTransformWith(bool background);
-    void commitApply(const TransformApply::Result &result);
+    void commitApply(TransformApply::Result result);
     // True (after a notice) while a transform is being applied: edits wait for it.
     bool applyBlocks();
     // When an action's undo record would not fit in the history (undoBytes larger than its whole
@@ -438,6 +451,7 @@ private:
     void sanitizeLayerSelection();
     void selectionUpdated();
     void updateTransformPreview(TransformSession::Quality quality);
+    void updateDisplayPreview();
     // Ends what is in progress before another document edit: a stroke or gesture, and an open
     // transform (applied).
     void finishPendingEdits();
@@ -599,6 +613,14 @@ private:
     qint64 m_backgroundApplyPixels = 4 * 1024 * 1024;
     std::vector<quint64> m_transformLayerIds;
     // The session's last part is a merged copy of the (adjacent) layers, used for the preview.
+    int m_failApplyPreparation = -1;
+    double m_lastApplyCommitMs = 0;
+    qint64 m_lastApplyWorkerMs = 0;
+    bool m_displayPreviewMode = false;
+    TransformPreview m_displayPreview;
+    QImage m_displayPreviewImage;
+    QTimer m_previewTimer;
+    TransformSession::Quality m_previewQuality = TransformSession::Quality::Final;
     bool m_previewMerged = false; // bottom to top
     Tool m_toolBeforeTransform = Brush;
     bool m_keepAspect = true;

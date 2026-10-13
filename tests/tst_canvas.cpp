@@ -2756,6 +2756,95 @@ private slots:
 
     bool waitForApply() { return QTest::qWaitFor([&] { return !m_canvas->isApplying(); }, 20000); }
 
+    void displayPreviewIsBoundedAndCancelIsExact()
+    {
+        QVERIFY(m_canvas->newDocumentSized(4096, 4096).isEmpty());
+        m_canvas->setBrushSize(80);
+        QVERIFY(m_canvas->drawStroke(docCurve({100, 100}, {3950, 3950}, 20)));
+        const TiledImage before = m_canvas->document().composite();
+        const int steps = m_canvas->history().undoCount();
+        QCOMPARE(m_canvas->beginTransform(), QString());
+        for (int i = 0; i < 10; ++i)
+            m_canvas->setTransformValue("rotation", i * 3);
+        m_canvas->flushDisplayPreviewForTesting();
+        QVERIFY(!m_canvas->displayPreviewImage().isNull());
+        const int stride = 1 << m_canvas->displayPreviewLevel();
+        QVERIFY(stride > 1);
+        QVERIFY(m_canvas->displayPreviewImage().sizeInBytes() < qint64(4096) * 4096 * 4);
+        QCOMPARE(m_canvas->transformRotation(), 27.0);
+        QCOMPARE(m_canvas->document().composite(), before);
+        m_canvas->cancelTransform();
+        QCoreApplication::processEvents();
+        QVERIFY(m_canvas->displayPreviewImage().isNull());
+        QCOMPARE(m_canvas->document().composite(), before);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+    }
+
+    void workerExceptionsBecomeFailures()
+    {
+        QImage pixels(64, 64, QImage::Format_ARGB32_Premultiplied);
+        pixels.fill(Qt::red);
+        TiledImage layer = TiledImage::fromImage(pixels);
+        TransformApply::Input input;
+        QVERIFY(input.session.begin(std::vector<TiledImage>{layer, layer}, Selection()));
+        input.session.moveBy({2, 3});
+        input.layers = {layer, layer};
+        input.layerIds = {1, 2};
+        input.versions = {layer.version(), layer.version()};
+        input.area = layer.rect();
+        input.throwBeforePartForTesting = 1;
+        TransformApply job;
+        bool finished = false;
+        connect(&job, &TransformApply::finished, this, [&](const TransformApply::Result &result) {
+            QVERIFY(!result.ok);
+            QVERIFY(result.outOfMemory);
+            QVERIFY(result.layers.empty());
+            finished = true;
+        });
+        job.start(std::move(input));
+        QTRY_VERIFY(finished);
+    }
+
+    void applyPreparationIsAtomic_data()
+    {
+        QTest::addColumn<int>("phase");
+        for (int phase = 0; phase < 5; ++phase)
+            QTest::newRow(qPrintable(QString::number(phase))) << phase;
+    }
+
+    void applyPreparationIsAtomic()
+    {
+        QFETCH(int, phase);
+        m_canvas->setBackgroundApplyThresholdForTesting(qint64(1) << 40);
+        const auto [colour, ink] = transformedPair();
+        QVERIFY(colour && ink);
+        const QImage colour0 = layerImage(layerIndex(colour)), ink0 = layerImage(layerIndex(ink));
+        const QImage composite = doc();
+        const QImage selection = m_canvas->document().selection().mask();
+        const int steps = m_canvas->history().undoCount();
+        const quint64 state = m_canvas->history().stateId();
+        m_canvas->failApplyPreparationForTesting(phase);
+        QSignalSpy notices(m_canvas, &CanvasItem::notice);
+        m_canvas->applyTransform();
+        QVERIFY(m_canvas->isTransforming());
+        QCOMPARE(layerImage(layerIndex(colour)), colour0);
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        QCOMPARE(doc(), composite);
+        QCOMPARE(m_canvas->document().selection().mask(), selection);
+        QCOMPARE(m_canvas->history().undoCount(), steps);
+        QCOMPARE(m_canvas->history().stateId(), state);
+        QVERIFY(!notices.isEmpty());
+        m_canvas->failApplyPreparationForTesting(-1);
+        m_canvas->applyTransform();
+        QVERIFY(!m_canvas->isTransforming());
+        QCOMPARE(m_canvas->history().undoCount(), steps + 1);
+        m_canvas->undo();
+        QCOMPARE(layerImage(layerIndex(colour)), colour0);
+        QCOMPARE(layerImage(layerIndex(ink)), ink0);
+        m_canvas->redo();
+        QVERIFY(layerImage(layerIndex(colour)) != colour0);
+    }
+
     void backgroundApplyEqualsImmediateApply()
     {
         // The same transform applied at once and on the worker thread gives the same layers and

@@ -2,6 +2,9 @@
 // allocation failure and the memory budget. Headless, against the production classes.
 
 #include "DocumentData.h"
+#include "TransformSession.h"
+#include "TransformPreview.h"
+#include "UndoHistory.h"
 #include "MemoryBudget.h"
 #include "TiledImage.h"
 #include "ViewPyramid.h"
@@ -112,6 +115,152 @@ class TestTiles : public QObject
     }
 
 private slots:
+    void viewportPreviewMatchesIndependentLayers()
+    {
+        const QSize size(96, 80);
+        std::vector<LayerData> layers;
+        for (int i = 0; i < 3; ++i) {
+            LayerData layer;
+            layer.id = i + 1;
+            layer.image = TiledImage::fromImage(pattern(size, 70 + i));
+            layer.opacity = 0.35 + i * 0.2;
+            layers.push_back(layer);
+        }
+        QImage mask(size, QImage::Format_Grayscale8);
+        mask.fill(0);
+        for (int y = 13; y < 57; ++y)
+            for (int x = 17; x < 65; ++x)
+                mask.scanLine(y)[x] = uchar(80 + x * 2);
+        TransformSession session;
+        QVERIFY(session.begin(std::vector<TiledImage>{layers[0].image, layers[2].image}, Selection::fromMask(mask)));
+        session.moveBy({8, 4});
+        session.setRotation(13);
+        const QRect crop(11, 7, 63, 51);
+        TransformPreview preview;
+        QVERIFY(preview.prepare(session, layers, {1, 3}, crop, 0));
+        const QImage actual = preview.render(session, TransformSession::Quality::Final);
+        QVERIFY(!actual.isNull());
+        auto applied = layers;
+        QVERIFY(session.render(0, applied[0].image, applied[0].image.rect(), TransformSession::Quality::Final));
+        QVERIFY(session.render(1, applied[2].image, applied[2].image.rect(), TransformSession::Quality::Final));
+        TiledImage reference(size);
+        QVERIFY(compositeLayers(reference, reference.rect(), applied));
+        QVERIFY(maxDifference(actual, reference.copy(crop)) <= 1);
+        QCOMPARE(layers[1].image, applied[1].image); // interleaved unselected layer stays put
+        session.reset();
+        TiledImage original(size);
+        QVERIFY(compositeLayers(original, original.rect(), layers));
+        QCOMPARE(preview.render(session, TransformSession::Quality::Final), original.copy(crop));
+    }
+
+    void reducedPreviewKeepsThinStrokes()
+    {
+        LayerData layer;
+        layer.id = 1;
+        layer.image = TiledImage(QSize(512, 512));
+        QVERIFY(layer.image.fillRect({101, 50, 1, 400}, qRgb(255, 0, 0)));
+        TransformSession session;
+        QVERIFY(session.begin(std::vector<TiledImage>{layer.image}, Selection()));
+        session.moveBy({3, 0});
+        TransformPreview preview;
+        QVERIFY(preview.prepare(session, {layer}, {1}, QRect(0, 0, 64, 64), 3));
+        const QImage shown = preview.render(session, TransformSession::Quality::Fast);
+        QVERIFY(!shown.isNull());
+        for (int y = 10; y < 50; ++y) {
+            int coverage = 0;
+            for (int x = 0; x < shown.width(); ++x)
+                coverage += qAlpha(shown.pixel(x, y));
+            QVERIFY2(coverage >= 25, "The one-pixel stroke vanished in the reduced preview");
+        }
+        QCOMPARE(shown.size(), QSize(64, 64));
+    }
+
+    void denseCopyKeepsItsReservation()
+    {
+        BudgetGuard guard;
+        TiledImage image = TiledImage::fromImage(pattern({128, 128}, 23));
+        const qint64 before = MemoryBudget::usedTotal();
+        QImage first = image.toImage();
+        QVERIFY(!first.isNull());
+        QCOMPARE(MemoryBudget::usedTotal(), before + first.sizeInBytes());
+        QImage shared = first;
+        first = {};
+        QCOMPARE(MemoryBudget::usedTotal(), before + shared.sizeInBytes());
+        MemoryBudget::setLimit(MemoryBudget::usedTotal());
+        QVERIFY(image.toImage().isNull());
+        shared = {};
+        QCOMPARE(MemoryBudget::usedTotal(), before);
+    }
+
+    void transformCacheLifetimeAndFailures()
+    {
+        BudgetGuard guard;
+        TiledImage image = TiledImage::fromImage(pattern({127, 65}, 24));
+        const qint64 before = MemoryBudget::usedTotal();
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            {
+                TransformSession session;
+                MemoryBudget::failReservationsForTesting(attempt, 1);
+                session.begin(std::vector<TiledImage>{image}, Selection());
+                MemoryBudget::failReservationsForTesting(-1, 0);
+            }
+            QCOMPARE(MemoryBudget::usedTotal(), before);
+        }
+        TransformSession worker;
+        {
+            TransformSession session;
+            QVERIFY(session.begin(std::vector<TiledImage>{image}, Selection()));
+            worker = session.workerCopy();
+        }
+        QVERIFY(MemoryBudget::usedTotal() > before);
+        QImage output = worker.renderRegion(0, image.rect(), TransformSession::Quality::Final);
+        QCOMPARE(output, image.toImage());
+        output = {};
+        worker.end();
+        QCOMPARE(MemoryBudget::usedTotal(), before);
+    }
+
+    void selectionAllocationFailureIsExplicit()
+    {
+        BudgetGuard guard;
+        TransformSession session;
+        QVERIFY(session.begin(std::vector<TiledImage>{}, Selection::all({64, 64})));
+        MemoryBudget::failReservationsForTesting(0, 1);
+        QVERIFY_EXCEPTION_THROWN(session.transformedSelection(), std::bad_alloc);
+        QVERIFY(session.hasSelection());
+    }
+
+    void pyramidGrowthDuringEvictionBalancesBudget()
+    {
+        BudgetGuard guard;
+        TiledImage image = TiledImage::fromImage(pattern({512, 512}, 25));
+        const qint64 before = MemoryBudget::usedTotal();
+        {
+            ViewPyramid pyramid;
+            QVERIFY(!pyramid.pixels(image, 0, {0, 0, 64, 64}).isNull());
+            MemoryBudget::setLimit(before + 512 * 512 * 4);
+            QVERIFY(!pyramid.pixels(image, 0, image.rect()).isNull());
+            QCOMPARE(MemoryBudget::usedTotal(), before + 512 * 512 * 4);
+        }
+        QCOMPARE(MemoryBudget::usedTotal(), before);
+    }
+
+    void sharedUndoCannotFundReservations()
+    {
+        TiledImage image = TiledImage::fromImage(pattern({64, 64}, 26));
+        TileSnapshot before;
+        before.capture(image, image.rect());
+        UndoHistory history;
+        history.push(UndoCommand::pixels(1, std::move(before), QStringLiteral("shared")));
+        int dropped = -1;
+        QCOMPARE(history.shed(1, &dropped), qsizetype(0));
+        QCOMPARE(dropped, 0);
+        QCOMPARE(history.undoCount(), 1);
+        image = {};
+        QCOMPARE(history.shed(1, &dropped), qsizetype(64 * 64 * 4));
+        QCOMPARE(dropped, 1);
+    }
+
     void emptyGiantImageAllocatesNothing()
     {
         const qint64 before = MemoryBudget::usedTotal();

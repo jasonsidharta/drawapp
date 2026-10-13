@@ -1,4 +1,6 @@
 #include "ViewPyramid.h"
+#include "BudgetImage.h"
+#include <QScopeGuard>
 
 #include <algorithm>
 #include <climits>
@@ -22,8 +24,6 @@ qint64 ViewPyramid::dropBuffer()
     m_bufferValid = false;
     m_bufferStamps.clear();
     m_scratch = QImage();
-    if (bytes > 0)
-        MemoryBudget::release(bytes, MemoryBudget::Category::Cache);
     m_scratchBytes = 0;
     return bytes;
 }
@@ -77,6 +77,7 @@ const TiledImage *ViewPyramid::level(const TiledImage &image, int level, const Q
     if (a.isEmpty())
         return &out;
     const bool wasBusy = m_busy;
+    const auto restoreBusy = qScopeGuard([&] { m_busy = wasBusy; });
     m_busy = true; // tile allocations below must not let the evictor clear what is being built
     bool ok = true;
     for (int r = out.rowOf(a.top()); r <= out.rowOf(a.bottom()) && ok; ++r)
@@ -173,6 +174,7 @@ void ViewPyramid::build(const TiledImage &below, TiledImage &out, int column, in
 
 QImage ViewPyramid::pixels(const TiledImage &image, int level, const QRect &area)
 {
+    MemoryBudget::PreserveHistory preserve;
     level = std::clamp(level, 0, MaxLevel);
     const QRect levelRect(QPoint(0, 0), levelSize(image.size(), level));
     const QRect a = area & levelRect;
@@ -190,14 +192,11 @@ QImage ViewPyramid::pixels(const TiledImage &image, int level, const QRect &area
         const qint64 needed = qint64(buffer.width()) * buffer.height() * 4;
         m_bufferValid = false;
         if (needed > m_scratchBytes) {
-            if (!MemoryBudget::tryReserve(needed - m_scratchBytes, MemoryBudget::Category::Cache))
+            dropBuffer(); // no delta can become stale if reservation evicts this cache
+            m_scratch = BudgetImage::create(QSize(int(std::min<qint64>(needed / 4, INT_MAX)), 1),
+                                             QImage::Format_ARGB32_Premultiplied, MemoryBudget::Category::Cache);
+            if (m_scratch.isNull())
                 return QImage();
-            m_scratch = QImage();
-            m_scratch = QImage(int(std::min<qint64>(needed / 4, INT_MAX)), 1, QImage::Format_ARGB32_Premultiplied);
-            if (m_scratch.isNull()) {
-                MemoryBudget::release(needed - m_scratchBytes, MemoryBudget::Category::Cache);
-                return QImage();
-            }
             m_scratchBytes = needed;
         }
         m_bufferArea = buffer;
@@ -212,6 +211,7 @@ QImage ViewPyramid::pixels(const TiledImage &image, int level, const QRect &area
     if (!source)
         return QImage();
     const bool wasBusy = m_busy;
+    const auto restoreBusy = qScopeGuard([&] { m_busy = wasBusy; });
     m_busy = true;
     uchar *bits = m_scratch.bits();
     const qsizetype bpl = qsizetype(m_bufferArea.width()) * 4;
